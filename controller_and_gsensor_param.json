@@ -1,0 +1,15 @@
+{
+  "controller_and_gsensor": [
+    "mode",
+    "exp_sim",
+    "G_active",
+    "adaptive",
+    "dt",
+    "dt_G",
+    "resolution",
+    "q2",
+    "r_diag",
+    "exp_sim_G"
+  ],
+  "count": 10
+}

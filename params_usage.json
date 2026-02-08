@@ -1,0 +1,712 @@
+{
+  "note": "Includes variables from parameters.m, parameters_G.m, param_section.m (VarPath), and parameters_on_target_change.m (assignments).",
+  "vars": {
+    "mode": [
+      "calc_mode.m",
+      "gui_main\\+ui\\ParametersTab.m",
+      "gui_main\\op_section.m",
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "jsonlab\\savejson.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "subroutines_gsensor\\model\\yolov8segFcn.m",
+      "subroutines_gsensor\\morphs\\get_points.m",
+      "supersaturation_control.m"
+    ],
+    "exp_sim": [
+      "controller_for_gui.m",
+      "gsensor_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\snippets\\interval_sleep.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "gui_main\\snipptets_controller\\read_growth_rate.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "supersaturation_control.m"
+    ],
+    "target": [
+      "controller_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "gui_main\\snipptets_controller\\calculate_target.m",
+      "gui_main\\snipptets_controller\\control_target.m",
+      "gui_main\\subroutines_gui_main\\create_target_chosen_var_code_str.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m",
+      "subroutines_controller\\control\\calc_e_target.m",
+      "subroutines_controller\\control\\objective_function.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\fill_target_list.m",
+      "subroutines_controller\\utils\\initialize_animated_lines.m",
+      "subroutines_controller\\utils\\initialize_plots.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "supersaturation_control.m"
+    ],
+    "adaptive_mode": [
+      "gui_main\\op_section.m",
+      "gui_main\\snipptets_controller\\execute_growth_parameters_adaption.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "supersaturation_control.m"
+    ],
+    "sigma_set": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\utils\\initialize_plots.m"
+    ],
+    "G_set": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\utils\\initialize_plots.m"
+    ],
+    "G_active": [
+      "controller_for_gui.m",
+      "gsensor_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\snippets_gsensor\\initialize_gsensor_for_gui.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "supersaturation_control.m"
+    ],
+    "adaptive": [
+      "controller_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "gui_main\\snipptets_controller\\refresh_controller.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "subroutines_gsensor\\detection\\find_edge_points.m",
+      "subroutines_gsensor\\detection\\find_edge_points_2.m",
+      "supersaturation_control.m"
+    ],
+    "inline_display": [
+      "controller_for_gui.m",
+      "gui_main\\op_section.m",
+      "supersaturation_control.m"
+    ],
+    "controller_active": [
+      "controller_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller_for_gui.m"
+    ],
+    "controller_refresh_request": [
+      "controller_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\reset_all_requests.m",
+      "gui_main\\snipptets_controller\\initialize_controller_for_gui.m"
+    ],
+    "add_seed_request": [
+      "gui_main\\op_section.m",
+      "gui_main\\reset_all_requests.m",
+      "gui_main\\snipptets_controller\\initialize_controller_for_gui.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m"
+    ],
+    "G_refresh_request": [
+      "gsensor_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\reset_all_requests.m",
+      "gui_main\\snippets_gsensor\\initialize_gsensor_for_gui.m"
+    ],
+    "pop_up_and_save_variables_refresh_request": [
+      "controller_for_gui.m",
+      "gui_main\\op_section.m",
+      "gui_main\\reset_all_requests.m",
+      "gui_main\\snipptets_controller\\initialize_controller_for_gui.m"
+    ],
+    "C2K": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "supersaturation_control.m"
+    ],
+    "K2C": [
+      "controller_for_gui.m",
+      "gui_main\\param_section.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "supersaturation_control.m"
+    ],
+    "dt": [
+      "controller_for_gui.m",
+      "gsensor_for_gui.m",
+      "gui_main\\param_section.m",
+      "gui_main\\snippets\\interval_sleep.m",
+      "gui_main\\snippets_gsensor\\initialize_gsensor_for_gui.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "gui_main\\snipptets_controller\\calculate_target.m",
+      "gui_main\\snipptets_controller\\execute_growth_parameters_adaption.m",
+      "gui_main\\snipptets_controller\\initialize_controller_for_gui.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "gui_main\\snipptets_controller\\refresh_controller.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "subroutines_controller\\control\\add_to_int_X_dt.m",
+      "subroutines_controller\\control\\calc_Q.m",
+      "subroutines_controller\\control\\calc_T_j_set.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m",
+      "subroutines_controller\\control\\calc_dT_dt.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m",
+      "subroutines_controller\\control\\calc_dc_dt.m",
+      "subroutines_controller\\control\\construct_EKF.m",
+      "subroutines_controller\\control\\create_EKF_general.m",
+      "subroutines_controller\\control\\objective_function.m",
+      "subroutines_controller\\control\\smooth_EKF.m",
+      "subroutines_controller\\control\\smooth_EKF_general.m",
+      "subroutines_controller\\control\\state_transition_ODE.m",
+      "subroutines_controller\\control\\state_transition_function.m",
+      "subroutines_controller\\control\\state_transition_function_T.m",
+      "subroutines_controller\\control\\state_transition_matrices.m",
+      "subroutines_controller\\control\\state_transition_matrices_model.m",
+      "subroutines_controller\\control\\update_T_j.m",
+      "subroutines_controller\\mass_balance\\calc_next_crystallization_mass_balance.m",
+      "subroutines_controller\\utils\\initialize_plots.m",
+      "subroutines_gsensor\\detection\\create_EKF_G.m",
+      "supersaturation_control.m"
+    ],
+    "k": [
+      "gui_main\\+ui\\ParametersTab.m",
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "jsonlab\\filterjsonmmap.m",
+      "jsonlab\\jdatadecode.m",
+      "jsonlab\\jsonget.m",
+      "jsonlab\\jsonset.m",
+      "jsonlab\\regrouph5.m",
+      "opcua_for_matlab\\map2base.m",
+      "supersaturation_control.m"
+    ],
+    "k_loss": [
+      "gui_main\\param_section.m"
+    ],
+    "c_p": [
+      "gui_main\\param_section.m"
+    ],
+    "r_reactor": [
+      "gui_main\\param_section.m"
+    ],
+    "rho_solvent": [
+      "gui_main\\param_section.m"
+    ],
+    "rho_solute": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\mass_balance\\calc_next_crystallization_mass_balance.m"
+    ],
+    "m_solvent": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "subroutines_controller\\mass_balance\\calc_next_crystallization_mass_balance.m",
+      "supersaturation_control.m"
+    ],
+    "area_1": [
+      "gui_main\\param_section.m"
+    ],
+    "area_2": [
+      "gui_main\\param_section.m"
+    ],
+    "params.w_sigma": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\objective_function.m"
+    ],
+    "params.w_G": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\objective_function.m"
+    ],
+    "params.w_dT_dt": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\objective_function.m"
+    ],
+    "params.rho_solute": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\mass_balance\\calc_next_crystallization_mass_balance.m",
+      "subroutines_controller\\mass_balance\\create_size_list.m"
+    ],
+    "params.var_dT_dt": [
+      "gui_main\\+ui\\ParametersTab.m",
+      "gui_main\\param_section.m",
+      "opcua_for_matlab\\map2base.m",
+      "subroutines_controller\\control\\calc_Q.m"
+    ],
+    "params.var_dc_dt": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_Q.m"
+    ],
+    "params.dT": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_R.m"
+    ],
+    "params.dc": [
+      "subroutines_controller\\control\\calc_R.m"
+    ],
+    "params.R": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "subroutines_controller\\control\\calc_e_target.m",
+      "subroutines_controller\\control\\state_transition_matrices.m",
+      "supersaturation_control.m"
+    ],
+    "params.n": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\record_growth_parameters.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "subroutines_controller\\control\\calc_e_target.m",
+      "subroutines_controller\\control\\state_transition_matrices.m",
+      "supersaturation_control.m"
+    ],
+    "params.E_A": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\record_growth_parameters.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "subroutines_controller\\control\\calc_e_target.m",
+      "subroutines_controller\\control\\state_transition_matrices.m",
+      "supersaturation_control.m"
+    ],
+    "params.k_0": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\record_growth_parameters.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "subroutines_controller\\control\\calc_e_target.m",
+      "supersaturation_control.m"
+    ],
+    "params.n_proc": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "supersaturation_control.m"
+    ],
+    "params.E_A_proc": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "supersaturation_control.m"
+    ],
+    "params.k_0_proc": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_G.m",
+      "supersaturation_control.m"
+    ],
+    "params.tau_1": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_T_j.m",
+      "subroutines_controller\\control\\calc_T_with_zero_dT_dt.m",
+      "subroutines_controller\\control\\calc_dT_dt_model.m",
+      "subroutines_controller\\control\\state_transition_ODE_T.m"
+    ],
+    "params.tau_2": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_T_j.m",
+      "subroutines_controller\\control\\calc_T_with_zero_dT_dt.m",
+      "subroutines_controller\\control\\calc_dT_dt_model.m",
+      "subroutines_controller\\control\\state_transition_ODE_T.m"
+    ],
+    "params.T_R": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_T_j.m",
+      "subroutines_controller\\control\\calc_T_with_zero_dT_dt.m",
+      "subroutines_controller\\control\\calc_dT_dt_model.m",
+      "subroutines_controller\\control\\state_transition_ODE_T.m"
+    ],
+    "params.K_P_dT_dt": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m"
+    ],
+    "params.K_I_dT_dt": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m"
+    ],
+    "params.K_P_T_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "params.K_I_T_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "params.K_P_T_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "params.K_I_T_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "params.PI_mode": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_K_I_target.m",
+      "subroutines_controller\\control\\calc_K_P_target.m"
+    ],
+    "params.K_u": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_K_I_target.m",
+      "subroutines_controller\\control\\calc_K_P_target.m"
+    ],
+    "params.T_u": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_K_I_target.m"
+    ],
+    "params.K_P_target": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m"
+    ],
+    "params.K_I_target": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m"
+    ],
+    "dT_dt_min_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "dT_dt_max_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "dT_dt_min_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "dT_dt_max_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "T_j_min": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "subroutines_controller\\control\\calc_T_j_set.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m",
+      "subroutines_controller\\control\\calc_dT_j_dt.m",
+      "subroutines_controller\\control\\update_T_j.m",
+      "supersaturation_control.m"
+    ],
+    "T_j_max": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "subroutines_controller\\control\\calc_T_j_set.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m",
+      "subroutines_controller\\control\\calc_dT_j_dt.m",
+      "subroutines_controller\\control\\update_T_j.m",
+      "supersaturation_control.m"
+    ],
+    "dT_j_dt_max": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "subroutines_controller\\control\\calc_dT_j_dt.m",
+      "subroutines_controller\\control\\update_T_j.m",
+      "supersaturation_control.m"
+    ],
+    "dT_j": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "subroutines_controller\\control\\update_T_j.m",
+      "supersaturation_control.m"
+    ],
+    "dt_update": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "subroutines_controller\\control\\update_T_j.m",
+      "supersaturation_control.m"
+    ],
+    "sigma_threshold": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "subroutines_controller\\control\\state_transition_matrices_model.m",
+      "supersaturation_control.m"
+    ],
+    "delta_e_target_sigma_threshold": [
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\initialize_plots.m"
+    ],
+    "delta_e_target_G_threshold": [
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\initialize_plots.m"
+    ],
+    "t_lag": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_lag_time.m",
+      "gui_main\\snipptets_controller\\control_target.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\initialize_animated_lines.m",
+      "subroutines_controller\\utils\\initialize_plots.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "supersaturation_control.m"
+    ],
+    "t_lag_perc": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_lag_time.m",
+      "subroutines_controller\\control\\calc_t_lag_perc.m",
+      "supersaturation_control.m"
+    ],
+    "t_lag_threshold_perc_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "t_lag_threshold_perc_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "t_base": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\plot_lines.m",
+      "subroutines_controller\\utils\\replot_results.m"
+    ],
+    "t_string": [
+      "gui_main\\param_section.m",
+      "subroutines_controller\\utils\\add_points.m",
+      "subroutines_controller\\utils\\initialize_plots.m",
+      "subroutines_controller\\utils\\replot_results.m"
+    ],
+    "T_init_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "T_init_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "T_j_init": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "supersaturation_control.m"
+    ],
+    "T_j_set_init": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "supersaturation_control.m"
+    ],
+    "c_init": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "supersaturation_control.m"
+    ],
+    "steps_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "steps_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "n_c2T": [
+      "gui_main\\param_section.m"
+    ],
+    "seed_time_sigma": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "seed_time_G": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "m_seed": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "supersaturation_control.m"
+    ],
+    "d_mean_seed": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "supersaturation_control.m"
+    ],
+    "d_std_seed": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "supersaturation_control.m"
+    ],
+    "min_num_adapt": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\execute_growth_parameters_adaption.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "supersaturation_control.m"
+    ],
+    "max_num_adapt": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\execute_growth_parameters_adaption.m",
+      "subroutines_controller\\control\\adapt_growth_parameters.m",
+      "supersaturation_control.m"
+    ],
+    "min_count_adapt": [
+      "gui_main\\param_section.m",
+      "supersaturation_control.m"
+    ],
+    "q2_G_measure": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "r_diag_G_measure": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "q2_n": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "r_diag_n": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "q2_k_0": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "r_diag_k_0": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "q2_E_A": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "r_diag_E_A": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\refresh_adaptive.m",
+      "supersaturation_control.m"
+    ],
+    "dt_G": [
+      "DSCGR.m",
+      "gui_main\\param_section.m",
+      "gui_main\\snippets_gsensor\\measure_growth_rate.m",
+      "subroutines_controller\\utils\\initialize_G.m",
+      "subroutines_gsensor\\detection\\create_EKF_G.m",
+      "subroutines_gsensor\\detection\\initialize_uv_struct.m",
+      "subroutines_gsensor\\detection\\update_EKF_G.m",
+      "supersaturation_control.m"
+    ],
+    "resolution": [
+      "DSCGR.m",
+      "gui_main\\param_section.m",
+      "gui_main\\snippets_gsensor\\measure_growth_rate.m",
+      "subroutines_controller\\utils\\initialize_G.m",
+      "subroutines_gsensor\\detection\\create_EKF_G.m",
+      "subroutines_gsensor\\detection\\initialize_uv_struct.m",
+      "subroutines_gsensor\\detection\\update_EKF_G.m",
+      "supersaturation_control.m"
+    ],
+    "q2": [
+      "DSCGR.m",
+      "gui_main\\param_section.m",
+      "subroutines_controller\\control\\create_EKF_general.m",
+      "subroutines_controller\\utils\\initialize_G.m",
+      "subroutines_gsensor\\detection\\create_EKF_G.m",
+      "subroutines_gsensor\\detection\\initialize_uv_struct.m"
+    ],
+    "r_diag": [
+      "DSCGR.m",
+      "gui_main\\param_section.m",
+      "subroutines_controller\\utils\\initialize_G.m",
+      "subroutines_gsensor\\detection\\create_EKF_G.m",
+      "subroutines_gsensor\\detection\\initialize_uv_struct.m"
+    ],
+    "ptr_format": [
+      "gui_main\\param_section.m"
+    ],
+    "exp_sim_G": [
+      "gui_main\\op_section.m",
+      "gui_main\\snippets_gsensor\\measure_growth_rate.m",
+      "gui_main\\snippets_gsensor\\refresh_gsensor.m",
+      "gui_main\\snipptets_controller\\read_growth_rate.m",
+      "subroutines_controller\\utils\\initialize_G.m"
+    ],
+    "params_G.width": [
+      "gui_main\\param_section.m",
+      "subroutines_gsensor\\detection\\update_line.m"
+    ],
+    "params_G.ratio": [
+      "gui_main\\param_section.m",
+      "subroutines_gsensor\\detection\\update_line.m"
+    ],
+    "params_G.delta_theta": [
+      "gui_main\\param_section.m",
+      "subroutines_gsensor\\detection\\update_line.m"
+    ],
+    "params_G.width_divider": [
+      "gui_main\\param_section.m",
+      "subroutines_gsensor\\detection\\update_line.m"
+    ],
+    "params_G.num_peak": [
+      "gui_main\\param_section.m",
+      "subroutines_gsensor\\detection\\update_line.m"
+    ],
+    "params_G.len_min": [
+      "gui_main\\param_section.m",
+      "subroutines_gsensor\\detection\\update_line.m"
+    ],
+    "target_set": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "gui_main\\snipptets_controller\\calculate_lag_time.m",
+      "gui_main\\snipptets_controller\\calculate_target.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m",
+       "subroutines_controller\\control\\calc_e_target.m",
+     "subroutines_controller\\control\\calc_t_lag_perc.m",
+      "subroutines_controller\\control\\objective_function.m",
+      "supersaturation_control.m"
+    ],
+    "params.var_dT": [
+      "gui_main\\param_section.m"
+    ],
+    "params.var_dc": [
+      "gui_main\\param_section.m"
+    ],
+    "params.K_P_T": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m"
+    ],
+    "params.K_I_T": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\control\\calc_T_j_set_.m"
+    ],
+    "t_lag_threshold_perc": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_lag_time.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\control\\calc_t_lag_perc.m",
+      "supersaturation_control.m"
+    ],
+    "dT_dt_min": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m",
+      "supersaturation_control.m"
+    ],
+    "dT_dt_max": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\calculate_T_j_set.m",
+      "parameters_on_target_change.m",
+      "subroutines_controller\\control\\calc_dT_dt_set.m",
+      "supersaturation_control.m"
+    ],
+    "T_init": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\initialize_controller.m",
+      "parameters_on_target_change.m",
+      "supersaturation_control.m"
+    ],
+    "steps": [
+      "gui_main\\param_section.m",
+      "gui_main\\snipptets_controller\\measure_controller_data.m",
+      "parameters_on_target_change.m",
+      "supersaturation_control.m"
+    ],
+    "seed_time": [
+      "gui_main\\param_section.m",
+      "parameters_on_target_change.m",
+      "supersaturation_control.m"
+    ]
+  }
+}

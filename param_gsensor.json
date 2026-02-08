@@ -1,0 +1,12 @@
+{
+  "gsensor_only": [
+    "G_refresh_request",
+    "params_G.width",
+    "params_G.ratio",
+    "params_G.delta_theta",
+    "params_G.width_divider",
+    "params_G.num_peak",
+    "params_G.len_min"
+  ],
+  "count": 7
+}
