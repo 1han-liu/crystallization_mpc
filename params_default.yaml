@@ -1,0 +1,11 @@
+version: 1
+params:
+  shared:
+    - key: "q2"
+      default: 1e-16
+  gsensor:
+    - key: "params_G.width"
+      default: 100
+  controller:
+    - key: "params.w_dT_dt"
+      default: 2

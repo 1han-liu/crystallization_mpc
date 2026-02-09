@@ -16,7 +16,7 @@
     "m_solvent",
     "params.w_sigma",
     "params.w_G",
-    "params.w_dT_dt",
+    "params.w_dT_dt", 写进.yaml
     "params.rho_solute",
     "params.var_dT_dt",
     "params.var_dc_dt",
@@ -67,7 +67,17 @@
     "q2_k_0",
     "r_diag_k_0",
     "q2_E_A",
-    "r_diag_E_A"
+    "r_diag_E_A",
+    --------------------derived新添加的参数
+    "target_set",
+    "params.K_I_T",
+    "t_lag_threshold_perc",
+    "dT_dt_min",
+    "dT_dt_max",
+    "T_init",
+    "steps",
+    "seed_time"
   ],
-  "count": 68
+  "count": 76,
+  "note": "includes derived vars from param_section and parameters_on_target_change"
 }

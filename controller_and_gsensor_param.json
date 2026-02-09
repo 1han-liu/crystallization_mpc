@@ -7,7 +7,7 @@
     "dt",
     "dt_G",
     "resolution",
-    "q2",
+    "q2", 写进.yaml文件
     "r_diag",
     "exp_sim_G"
   ],

@@ -1,7 +1,7 @@
 {
   "gsensor_only": [
     "G_refresh_request",
-    "params_G.width",
+    "params_G.width", 写进.yaml文件
     "params_G.ratio",
     "params_G.delta_theta",
     "params_G.width_divider",

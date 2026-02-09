@@ -18,11 +18,15 @@ def main():
     exchange = os.getenv("RABBIT_EXCHANGE", EXCHANGE)
     queue_name = os.getenv("RABBIT_QUEUE", QUEUES[ROLE])
     include_broadcast = os.getenv("RABBIT_INCLUDE_BROADCAST", "true").lower() in ("1", "true", "yes")
-    send_interval = float(os.getenv("SEND_INTERVAL_SEC", "5"))
+#    send_interval = float(os.getenv("SEND_INTERVAL_SEC", "5"))
 
     binding_keys = bindings_for(ROLE, include_broadcast=include_broadcast)
 
     def on_message(msg: dict):
+        print(f"[{ROLE}] message received")
+        if msg.get("msg_type") == "params" and msg.get("name") == "update":
+            print(f"[{ROLE} params] {msg.get('payload')}")
+            return
         print(f"[{ROLE} recv] {msg}")
 
     t = threading.Thread(
@@ -36,19 +40,23 @@ def main():
     declare_exchange(ch, exchange)
     declare_queue(ch, queue_name, binding_keys, exchange)
 
+# Keep process alive to receive messages
     while True:
-        seq = next_seq()
-        for dst in ("central", "gsensor"):
-            env = build_envelope(
-                src=ROLE,
-                dst=dst,
-                msg_type="telemetry",
-                name="state",
-                seq=seq,
-                payload={"mode": "idle", "sigma_set": 0.05},
-            )
-            publish(ch, exchange, route(ROLE, dst), env, persistent=False)
-        time.sleep(send_interval)
+        time.sleep(1)
+
+#    while True:
+#        seq = next_seq()
+#        for dst in ("central", "gsensor"):
+#            env = build_envelope(
+#                src=ROLE,
+#                dst=dst,
+#                msg_type="telemetry",
+#                name="state",
+#                seq=seq,
+#                payload={"mode": "idle", "sigma_set": 0.05},
+#            )
+#            publish(ch, exchange, route(ROLE, dst), env, persistent=False)
+#        time.sleep(send_interval)
 
 
 if __name__ == "__main__":
