@@ -1,12 +1,15 @@
 {
   "gsensor_only": [
-    "G_refresh_request",
-    "params_G.width", 写进.yaml文件
+    "ptr_format",
+    "params_G.width 写进.yaml文件",
     "params_G.ratio",
     "params_G.delta_theta",
     "params_G.width_divider",
     "params_G.num_peak",
-    "params_G.len_min"
+    "params_G.len_min",
+
+
+    "G_refresh_request"
   ],
   "count": 7
 }

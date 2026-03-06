@@ -82,7 +82,7 @@ def main():
     exchange = os.getenv("RABBIT_EXCHANGE", EXCHANGE)
     queue_name = os.getenv("RABBIT_QUEUE", QUEUES[ROLE])
     include_broadcast = os.getenv("RABBIT_INCLUDE_BROADCAST", "true").lower() in ("1", "true", "yes")
-#    send_interval = float(os.getenv("SEND_INTERVAL_SEC", "5"))
+    send_interval = float(os.getenv("SEND_INTERVAL_SEC", "5"))
     params_path = os.getenv("PARAMS_FILE", "params_default.yaml")
     send_params_on_start = os.getenv("SEND_PARAMS_ON_START", "true").lower() in ("1", "true", "yes")
 

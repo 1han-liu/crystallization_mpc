@@ -1,62 +1,45 @@
 {
   "controller_only": [
-    "target",
-    "adaptive_mode",
     "sigma_set",
     "G_set",
-    "inline_display",
-    "controller_active",
-    "controller_refresh_request",
-    "add_seed_request",
-    "pop_up_and_save_variables_refresh_request",
-    "C2K",
-    "K2C",
-    "k",
-    "rho_solute",
-    "m_solvent",
-    "params.w_sigma",
-    "params.w_G",
-    "params.w_dT_dt", 写进.yaml
-    "params.rho_solute",
-    "params.var_dT_dt",
+    "target_set",
+    "params.var_dT_dt x2",
     "params.var_dc_dt",
     "params.dT",
     "params.dc",
-    "params.R",
     "params.n",
     "params.E_A",
     "params.k_0",
-    "params.n_proc",
-    "params.E_A_proc",
-    "params.k_0_proc",
-    "params.tau_1",
-    "params.tau_2",
     "params.T_R",
-    "params.K_P_dT_dt",
-    "params.K_I_dT_dt",
+    "k",
+    "rho_solute",
+    "m_solvent, area_1的计算也需要她",
+    "params.rho_solute = rho_solute 这是一个drived参数",
+    "params.w_sigma",
+    "params.w_G",
+    "params.w_dT_dt 写进.yaml",
+    "sigma_threshold",
     "params.PI_mode",
     "params.K_u",
     "params.T_u",
     "params.K_P_target",
     "params.K_I_target",
-    "T_j_min",
-    "T_j_max",
-    "dT_j_dt_max",
-    "dT_j",
-    "dt_update",
-    "sigma_threshold",
-    "delta_e_target_sigma_threshold",
-    "delta_e_target_G_threshold",
+    "params.K_P_dT_dt",
+    "params.K_I_dT_dt",
+    "params.K_P_T: parameter_on_target_change中的派生值",
+    "params.K_I_T: parameter_on_target_change中的派生值",
+    "params.tau_1",
+    "params.tau_2",
+    "params.n_proc",
+    "params.E_A_proc",
+    "params.k_0_proc",
     "t_lag",
     "t_lag_perc",
-    "t_base",
-    "t_string",
-    "T_j_init",
-    "T_j_set_init",
-    "c_init",
-    "m_seed",
-    "d_mean_seed",
-    "d_std_seed",
+    "t_lag_threshold_perc: parameter_on_target_change中的派生值",
+    "dT_dt_min: parameter_on_target_change中的派生值",
+    "dT_dt_max: parameter_on_target_change中的派生值",
+    "T_j_min",
+    "T_j_max",
     "min_num_adapt",
     "max_num_adapt",
     "min_count_adapt",
@@ -68,15 +51,61 @@
     "r_diag_k_0",
     "q2_E_A",
     "r_diag_E_A",
-    --------------------derived新添加的参数
-    "target_set",
-    "params.K_I_T",
-    "t_lag_threshold_perc",
-    "dT_dt_min",
-    "dT_dt_max",
     "T_init",
+    "T_j_init",
+    "T_j_set_init",
+    "c_init",
+    "dT_j_dt_max",
+    "dT_j",
+    "dt_update",
     "steps",
-    "seed_time"
+    "seed_time",
+    "m_seed",
+    "d_mean_seed",
+    "d_std_seed",
+    "t_base",
+    "t_string",
+    "params.R",
+    "C2K",
+    "K2C",
+    "delta_e_target_sigma_threshold",
+    "delta_e_target_G_threshold",
+    "n_c2T",
+
+
+
+
+
+
+    "target",
+    "adaptive_mode",
+    "inline_display",
+    "controller_active",
+    "controller_refresh_request",
+    "add_seed_request",
+    "pop_up_and_save_variables_refresh_request",
+    
+    
+    
+    
+   
+
+  
+    
+    
+    
+    
+
+
+
+
+
+    "k_loss: 参与params_tau_2的计算",
+    "c_p: 是溶剂的比热容（J/(kg*K)）它用于计算热惯性相关的时间常数 params.tau_1 和 params.tau_2，从而影响温度动态模型的响应速度。",
+    "r_reactor: 计算area_1/2,area_1和area_2用来计算params.tau_1和params.tau_2",
+    "rho_solvent: 计算area_1",
+    "area_1: 计算params.tau_1",
+    "area_2: 计算params.tau_2"
   ],
   "count": 76,
   "note": "includes derived vars from param_section and parameters_on_target_change"

@@ -1,14 +1,16 @@
 {
   "controller_and_gsensor": [
+    "dt: Time step",
+    "dt_G",
+    "resolution",
+    "q2 写进.yaml文件",
+    "r_diag",
+
+    
     "mode",
     "exp_sim",
     "G_active",
     "adaptive",
-    "dt",
-    "dt_G",
-    "resolution",
-    "q2", 写进.yaml文件
-    "r_diag",
     "exp_sim_G"
   ],
   "count": 10
