@@ -13,7 +13,10 @@ params:
       default: [4, 3, 2]
   gsensor:
     - key: "ptr_format"
-      default: '%d'; %05d'; % '%d'
+      default: 
+      - "%d" 
+      - "%05d"
+      - "%d"
     - key: "params_G.width"
       default: 100
     - key: "params_G.ratio"
@@ -24,7 +27,7 @@ params:
       default: 4
     - key: "params_G.num_peak"
       default: 10
-    - key: params_G.len_min"
+    - key: "params_G.len_min"
       default: 50
   controller:
     - key: "sigma_set"
@@ -53,8 +56,7 @@ params:
       default: 1160.7 # [kg/m^3]: density of solute
     - key: "m_solvent"
       default: 0.300 # [kg]: solvent mass
-    - key: "rho_solute"
-      default:
+#    - key: "rho_solute"
     - key: "params.w_sigma"
       default: 12
     - key: "params.w_G"
@@ -173,7 +175,7 @@ params:
     - key: "C2K"
       default: 273.15
     - key: "K2C"
-      default: -C2K
+      default: -273.15
     - key: "c_p"
       default: 4180 # [J/(kg*K)]: mass-specific heat capacity of solvent
     - key: "rho_solvent"
