@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Central UI</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" id="parameter-drawer">
+        <div class="sidebar-top">
+          <div class="brand">
+            <p class="eyebrow">Crystallization MPC</p>
+            <h1>Central UI</h1>
+          </div>
+          <button id="toggle-parameters" class="nav-link">Parameters</button>
+        </div>
+
+        <div class="drawer-body">
+          <div class="panel drawer-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Parameter Drawer</p>
+                <h3>YAML-backed Values</h3>
+              </div>
+              <div class="hero-actions">
+                <button id="reload-params" class="ghost">Reload</button>
+                <button id="save-params" class="primary">Save</button>
+              </div>
+            </div>
+
+            <section class="drawer-section">
+              <div class="panel-head">
+                <h3>Shared</h3>
+              </div>
+              <form id="shared-form" class="param-form"></form>
+            </section>
+
+            <section class="drawer-section">
+              <div class="panel-head">
+                <h3>Gsensor</h3>
+              </div>
+              <form id="gsensor-form" class="param-form"></form>
+            </section>
+
+            <section class="drawer-section">
+              <div class="panel-head">
+                <h3>Controller</h3>
+              </div>
+              <form id="controller-form" class="param-form"></form>
+            </section>
+          </div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section class="panel hero">
+          <div>
+            <p class="eyebrow">Operation</p>
+            <h2>Run Central Publish Flow</h2>
+            <p class="muted">Operation stays on the main page. Parameters live in the left drawer.</p>
+          </div>
+          <div class="hero-actions">
+            <label class="field compact">
+              <span>Control target</span>
+              <select id="target-select">
+                <option value="sigma">sigma</option>
+                <option value="G">G</option>
+              </select>
+            </label>
+            <button id="publish-button" class="primary">Publish Parameters</button>
+          </div>
+        </section>
+
+        <div class="grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h3>Derived Preview</h3>
+              <button id="refresh-preview" class="ghost">Refresh</button>
+            </div>
+            <pre id="derived-preview" class="code-block"></pre>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>Publish Result</h3>
+              <span id="publish-status" class="status idle">idle</span>
+            </div>
+            <pre id="publish-result" class="code-block"></pre>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <template id="param-field-template">
+      <label class="field">
+        <span class="field-key"></span>
+        <div class="field-badges"></div>
+        <p class="field-description"></p>
+        <textarea rows="1" class="field-input"></textarea>
+      </label>
+    </template>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

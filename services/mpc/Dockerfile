@@ -9,4 +9,4 @@ COPY . /app
 
 ENV PYTHONPATH=/app/src
 # Default entrypoint for local runs; docker-compose overrides per-service.
-CMD ["python", "-m", "crystallization_mpc.apps.central.comm_test"]
+CMD ["uvicorn", "crystallization_mpc.apps.central.ui.app:web_app", "--host", "0.0.0.0", "--port", "8000"]

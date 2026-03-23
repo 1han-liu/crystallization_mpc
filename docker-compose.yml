@@ -4,34 +4,14 @@ services:
     build:
       context: .
       dockerfile: services/mpc/Dockerfile
-    command: ["python", "-m", "crystallization_mpc.apps.central.comm_test"]
+    command: ["uvicorn", "crystallization_mpc.apps.central.ui.app:web_app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
-    depends_on:
-      - rabbitmq
-    restart: unless-stopped
-
-  gsensor:
-    build:
-      context: .
-      dockerfile: services/mpc/Dockerfile
-    command: ["python", "-m", "crystallization_mpc.apps.gsensor.comm_test"]
-    environment:
-      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
-      - RABBIT_EXCHANGE=idp.bus
-    depends_on:
-      - rabbitmq
-    restart: unless-stopped
-
-  controller:
-    build:
-      context: .
-      dockerfile: services/mpc/Dockerfile
-    command: ["python", "-m", "crystallization_mpc.apps.controller.comm_test"]
-    environment:
-      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
-      - RABBIT_EXCHANGE=idp.bus
+      - PARAMS_FILE=/app/params_default.yaml
+      - PARAM_META_FILE=/app/param_meta.yaml
     depends_on:
       - rabbitmq
     restart: unless-stopped

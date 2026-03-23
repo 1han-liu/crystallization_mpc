@@ -1,200 +1,201 @@
 version: 1
 params:
   shared:
-    - key: "dt" # time step
-      default: 5
-    - key: "dt_G"
-      default: 15
-    - key: "resolution"
-      default: 0.8676e-6
-    - key: "q2"
-      default: 1e-16
-    - key: "r_diag"
-      default: [4, 3, 2]
+  - key: dt
+    default: 5
+  - key: dt_G
+    default: 15
+  - key: resolution
+    default: 8.676e-07
+  - key: q2
+    default: 1.0e-16
+  - key: r_diag
+    default:
+    - 4
+    - 3
+    - 2
   gsensor:
-    - key: "ptr_format"
-      default: 
-      - "%d" 
-      - "%05d"
-      - "%d"
-    - key: "params_G.width"
-      default: 100
-    - key: "params_G.ratio"
-      default: 10
-    - key: "params_G.delta_theta"
-      default: 10
-    - key: "params_G.width_divider"
-      default: 4
-    - key: "params_G.num_peak"
-      default: 10
-    - key: "params_G.len_min"
-      default: 50
+  - key: ptr_format
+    default:
+    - '%d'
+    - '%05d'
+    - '%d'
+  - key: params_G.width
+    default: 100
+  - key: params_G.ratio
+    default: 10
+  - key: params_G.delta_theta
+    default: 10
+  - key: params_G.width_divider
+    default: 4
+  - key: params_G.num_peak
+    default: 10
+  - key: params_G.len_min
+    default: 50
   controller:
-    - key: "sigma_set"
-      default: 0.035
-    - key: "G_set"
-      default: 3e-8
-#    - key: "target_set"
-    - key: "params.var_dT_dt"
-      default: 1e-7 # [(K/s)^2]: variance of the temperature gradient: if large (believe in observation): better for constant: 1e-10, if small (believe in model), better for change：1e-5
-    - key: "params.var_dc_dt"
-      default: 1e-12 # [((g/g)/s)^2]: variance of the concentration gradient: if large (believe in observation): better for constant: 1e-20, if small (believe in model), better for change：1e-10
-    - key: "params.dT"
-      default: 0.01 # [K]: measurement inaccuracy of temperature
-    - key: "params.dc"
-      default: 1e-3 # [g/g]: measurement inaccuracy of concentration
-    - key: "params.n"
-      default: 1.75 # [-]: average order of relative supersaturation of glycine in growth rate
-    - key: "params.E_A"
-      default: 150e3 # [J/mol]: average activation energy of glycine in growth rate
-#    - key: "params.k_0"
-    - key: "params.T_R"
-      default: 298.15 # [K]: room temperature
-    - key: "k"
-      default: 68.2 # [J/(K*s*m^2)]: heat transfer coefficient between jacket and reactor
-    - key: "rho_solute"
-      default: 1160.7 # [kg/m^3]: density of solute
-    - key: "m_solvent"
-      default: 0.300 # [kg]: solvent mass
-#    - key: "rho_solute"
-    - key: "params.w_sigma"
-      default: 12
-    - key: "params.w_G"
-      default: 12 # 1e21
-    - key: "params.w_dT_dt"
-      default: 2
-    - key: "sigma_threshold"
-      default: 0.001
-    - key: "params.PI_mode"
-      default: "Ziegler_Nichols"
-    - key: "params.K_u"
-      default: 15  # [K/s]: porportional gain in sigma
-    - key: "params.T_u"
-      default: 60 # 1*60 [K/s^2]: integral gain in sigma
-    - key: "params.K_P_target"
-      default:
-    - key: "params.K_I_target"
-      default:
-    - key: "params.K_P_dT_dt"
-      default: 3 # [s]: proprtional gain in dTdt 
-    - key: "params.K_I_dT_dt"
-      default: 30 # [-]: integral gain in dTdt
-    - key: "params.K_P_T_sigma"
-      default: 0 # [s^2]: proprtional gain in T 
-    - key: "params.K_I_T_sigma"
-      default: 0 # [s]: integral gain in T
-    - key: "params.K_P_T_G"
-      default: 0.5 # [s^2]: proprtional gain in T 
-    - key: "params.K_I_T_G"
-      default: 0 # [s]: integral gain in T
-    - key: "params.n_proc"
-      default: 1.5 # [-]: average order of relative supersaturation of glycine in growth rate
-    - key: "params.E_A_proc"
-      default: 120e3 # [J/mol]: average activation energy of glycine in growth rate
-#    - key: "params.k_0_proc"
-    - key: "t_lag"
-      default: 150 # [s]
-    - key: "t_lag_perc"
-      default:
-    - key: "t_lag_threshold_perc_sigma"
-      default: 0.015 # [-]
-    - key: "t_lag_threshold_perc_G"
-      default: 1 # [-]
-    - key: "dT_dt_min_sigma"
-      default: -0.3 # [K/s] -0.3
-    - key: "dT_dt_max_sigma"
-      default: 0.3 # [K/s] 0.3
-    - key: "dT_dt_min_G"
-      default: -0.5 # [K/s] -0.3
-    - key: "dT_dt_max_G"
-      default: 0.5 # [K/s] 0.3
-    - key: "T_j_min"
-      default: 253.15 # [K]
-    - key: "T_j_max"
-      default: 453.15 # [K]
-    - key: "min_num_adapt"
-      default: 15
-    - key: "max_num_adapt"
-      default: 50
-    - key: "min_count_adapt"
-      default: 30
-    - key: "q2_G_measure"
-      default: 1e-7
-    - key: "r_diag_G_measure"
-      default: [4, 3, 2]
-    - key: "q2_n"
-      default: 1e-6
-    - key: "r_diag_n"
-      default: [4, 3, 2]
-    - key: "q2_k_0"
-      default: 1e5
-    - key: "r_diag_k_0"
-      default: [4, 3, 2]
-    - key: "q2_E_A"
-      default: 0.1
-    - key: "r_diag_E_A"
-      default: [4, 3, 2]
-    - key: "T_init_sigma"
-      default: 315.15 # 42 + C2K
-    - key: "T_init_G"
-      default: 315.15 # 38.5 + C2K
-    - key: "T_j_init"
-      default: 315.15 # = T_init_sigma
-    - key: "T_j_set_init"
-      default: 315.15 # = T_j_init
-    - key: "c_init"
-      default: 0.32
-    - key: "dT_j_dt_max"
-      default: 0.2 # [K/s] 0.2
-    - key: "dT_j"
-      default: 0.01 # [K]0.01
-    - key: "dt_update"
-      default: 0.01 # [s]
-    - key: "steps_sigma"
-      default: 900 # 15*60
-    - key: "steps_G"
-      default: 1620 # 27*60
-    - key: "n_c2T"
-      default: 3
-    - key: "seed_time_sigma"
-      default: 1200 #  20*60
-    - key: "seed_time_G"
-      default: 2
-    - key: "m_seed"
-      default: 1e-3 # [kg]: mass of seed
-    - key: "d_mean_seed"
-      default: 250e-6 # [m]: mean value of seed size
-    - key: "d_std_seed"
-      default: 25e-6 # [m]: standard deviation of seed size
-    - key: "t_base"
-      default: 60 # s
-    - key: "t_string"
-      default: "min"
-    - key: "params.R"
-      default: 8.314 # [J/(mol*K)]: gas constant
-    - key: "C2K"
-      default: 273.15
-    - key: "K2C"
-      default: -273.15
-    - key: "c_p"
-      default: 4180 # [J/(kg*K)]: mass-specific heat capacity of solvent
-    - key: "rho_solvent"
-      default: 998 # [kg/m^3]: solvent density
-    - key: "r_reactor"
-      default: 0.04 # [m]: reactor cross-section radius
-    - key: "k_loss"
-      default: 6.4 # [J/(K*s*m^2)]: heat transfer coefficient between reactor and the surrounding
-    - key: "delta_e_target_sigma_threshold"
-      default: 0.005
-    - key: "delta_e_target_G_threshold"
-      default: 0.5e-8
-#    - key: area_1 calculate in params.py
-#      2 * m_solvent / (rho_solvent * r_reactor); % [m^2]: contact area between jacket and reactor
-#    - key: area_2 calculate in params.py 
-#      pi * r_reactor^2
-#    - key: "params.tau_1" calculate in params.py
-#    - key: "params.tau_2" calculate in patams.py
-
-
-
-   
+  - key: sigma_set
+    default: 0.035
+  - key: G_set
+    default: 3.0e-08
+  - key: params.var_dT_dt
+    default: 1.0e-07
+  - key: params.var_dc_dt
+    default: 1.0e-12
+  - key: params.dT
+    default: 0.01
+  - key: params.dc
+    default: 0.001
+  - key: params.n
+    default: 1.75
+  - key: params.E_A
+    default: 150000
+  - key: params.T_R
+    default: 298.15
+  - key: k
+    default: 68.2
+  - key: rho_solute
+    default: 1160.7
+  - key: m_solvent
+    default: 0.3
+  - key: params.w_sigma
+    default: 12
+  - key: params.w_G
+    default: 12
+  - key: params.w_dT_dt
+    default: 2
+  - key: sigma_threshold
+    default: 0.001
+  - key: params.PI_mode
+    default: Ziegler_Nichols
+  - key: params.K_u
+    default: 15
+  - key: params.T_u
+    default: 60
+  - key: params.K_P_target
+    default: null
+  - key: params.K_I_target
+    default: null
+  - key: params.K_P_dT_dt
+    default: 3
+  - key: params.K_I_dT_dt
+    default: 30
+  - key: params.K_P_T_sigma
+    default: 0
+  - key: params.K_I_T_sigma
+    default: 0
+  - key: params.K_P_T_G
+    default: 0.5
+  - key: params.K_I_T_G
+    default: 0
+  - key: params.n_proc
+    default: 1.5
+  - key: params.E_A_proc
+    default: 120000
+  - key: t_lag
+    default: 150
+  - key: t_lag_perc
+    default: 0.1333333333
+  - key: t_lag_threshold_perc_sigma
+    default: 0.015
+  - key: t_lag_threshold_perc_G
+    default: 1
+  - key: dT_dt_min_sigma
+    default: -0.3
+  - key: dT_dt_max_sigma
+    default: 0.3
+  - key: dT_dt_min_G
+    default: -0.5
+  - key: dT_dt_max_G
+    default: 0.5
+  - key: T_j_min
+    default: 253.15
+  - key: T_j_max
+    default: 453.15
+  - key: min_num_adapt
+    default: 15
+  - key: max_num_adapt
+    default: 50
+  - key: min_count_adapt
+    default: 30
+  - key: q2_G_measure
+    default: 1.0e-07
+  - key: r_diag_G_measure
+    default:
+    - 4
+    - 3
+    - 2
+  - key: q2_n
+    default: 1.0e-06
+  - key: r_diag_n
+    default:
+    - 4
+    - 3
+    - 2
+  - key: q2_k_0
+    default: 100000
+  - key: r_diag_k_0
+    default:
+    - 4
+    - 3
+    - 2
+  - key: q2_E_A
+    default: 0.1
+  - key: r_diag_E_A
+    default:
+    - 4
+    - 3
+    - 2
+  - key: T_init_sigma
+    default: 315.15
+  - key: T_init_G
+    default: 315.15
+  - key: T_j_init
+    default: 315.15
+  - key: T_j_set_init
+    default: 315.15
+  - key: c_init
+    default: 0.32
+  - key: dT_j_dt_max
+    default: 0.2
+  - key: dT_j
+    default: 0.01
+  - key: dt_update
+    default: 0.01
+  - key: steps_sigma
+    default: 900
+  - key: steps_G
+    default: 1620
+  - key: n_c2T
+    default: 3
+  - key: seed_time_sigma
+    default: 1200
+  - key: seed_time_G
+    default: 2
+  - key: m_seed
+    default: 0.001
+  - key: d_mean_seed
+    default: 0.00025
+  - key: d_std_seed
+    default: 2.5e-05
+  - key: t_base
+    default: 60
+  - key: t_string
+    default: min
+  - key: params.R
+    default: 8.314
+  - key: C2K
+    default: 273.15
+  - key: K2C
+    default: -273.15
+  - key: c_p
+    default: 4180
+  - key: rho_solvent
+    default: 998
+  - key: r_reactor
+    default: 0.04
+  - key: k_loss
+    default: 6.4
+  - key: delta_e_target_sigma_threshold
+    default: 0.005
+  - key: delta_e_target_G_threshold
+    default: 5.0e-09

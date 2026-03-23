@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROLE = "central"
+TARGET_SWITCH_KEYS = (
+    ("target_set", "sigma_set", "G_set"),
+    ("params.K_P_T", "params.K_P_T_sigma", "params.K_P_T_G"),
+    ("params.K_I_T", "params.K_I_T_sigma", "params.K_I_T_G"),
+    ("dT_dt_min", "dT_dt_min_sigma", "dT_dt_min_G"),
+    ("dT_dt_max", "dT_dt_max_sigma", "dT_dt_max_G"),
+    ("t_lag_threshold_perc", "t_lag_threshold_perc_sigma", "t_lag_threshold_perc_G"),
+    ("T_init", "T_init_sigma", "T_init_G"),
+    ("steps", "steps_sigma", "steps_G"),
+    ("seed_time", "seed_time_sigma", "seed_time_G"),
+)
 
 
 def _require_yaml():
@@ -27,13 +38,51 @@ def _list_to_dict(items) -> Dict[str, object]:
     return params
 
 
-def load_params(path: str) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
+def _dict_to_list(params: Dict[str, object]) -> List[Dict[str, object]]:
+    return [{"key": key, "default": value} for key, value in params.items()]
+
+
+def load_params_document(path: str) -> Dict[str, object]:
     if not os.path.exists(path):
         print(f"[{ROLE}] params file not found: {path}")
-        return {}, {}, {}, 1
+        return {"version": 1, "params": {"shared": [], "gsensor": [], "controller": []}}
+    yaml = _require_yaml()
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_param_meta(path: str) -> Dict[str, Dict[str, Any]]:
+    if not os.path.exists(path):
+        return {}
     yaml = _require_yaml()
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
+    params = data.get("params", {}) or {}
+    return {str(key): dict(value or {}) for key, value in params.items()}
+
+
+def save_params_document(
+    path: str,
+    version: int,
+    shared: Dict[str, object],
+    gsensor: Dict[str, object],
+    controller: Dict[str, object],
+) -> None:
+    yaml = _require_yaml()
+    data = {
+        "version": version,
+        "params": {
+            "shared": _dict_to_list(shared),
+            "gsensor": _dict_to_list(gsensor),
+            "controller": _dict_to_list(controller),
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=False)
+
+
+def load_params(path: str) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
+    data = load_params_document(path)
     params = data.get("params", {}) or {}
     version = int(data.get("version", 1))
     shared = _list_to_dict(params.get("shared"))
@@ -173,25 +222,20 @@ def apply_derived_params(
         if k_0_proc is not None:
             derived["params.k_0_proc"] = k_0_proc
 
+    controller_with_derived = dict(controller)
     if target in ("sigma", "G"):
-        suffix = "sigma" if target == "sigma" else "G"
-        mapping = {
-            "target_set": f"{suffix}_set",
-            "params.K_P_T": f"params.K_P_T_{suffix}",
-            "params.K_I_T": f"params.K_I_T_{suffix}",
-            "dT_dt_min": f"dT_dt_min_{suffix}",
-            "dT_dt_max": f"dT_dt_max_{suffix}",
-            "t_lag_threshold_perc": f"t_lag_threshold_perc_{suffix}",
-            "T_init": f"T_init_{suffix}",
-            "steps": f"steps_{suffix}",
-            "seed_time": f"seed_time_{suffix}",
-        }
+        use_sigma = target == "sigma"
         merged_with_derived = {**merged_with_derived, **derived}
-        for dst, src in mapping.items():
-            if dst in merged_with_derived:
-                continue
-            if src in merged_with_derived:
-                derived[dst] = merged_with_derived[src]
+        for dst, sigma_key, g_key in TARGET_SWITCH_KEYS:
+            active_key = sigma_key if use_sigma else g_key
+            inactive_key = g_key if use_sigma else sigma_key
 
-    controller_with_derived = {**controller, **derived}
+            if dst not in merged_with_derived and active_key in merged_with_derived:
+                derived[dst] = merged_with_derived[active_key]
+
+            # Only publish the active target-specific source key.
+            controller_with_derived.pop(inactive_key, None)
+        controller_with_derived = {**controller_with_derived, **derived}
+    else:
+        controller_with_derived = {**controller_with_derived, **derived}
     return shared, controller_with_derived, derived
