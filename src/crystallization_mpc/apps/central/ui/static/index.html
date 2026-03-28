@@ -58,19 +58,19 @@
         <section class="panel hero">
           <div>
             <p class="eyebrow">Operation</p>
-            <h2>Run Central Publish Flow</h2>
-            <p class="muted">Operation stays on the main page. Parameters live in the left drawer.</p>
+            <h2>Operation Console</h2>
+            <p class="muted">Parameters stay in the left drawer. Operation controls are rendered from metadata on the main page.</p>
           </div>
           <div class="hero-actions">
-            <label class="field compact">
-              <span>Control target</span>
-              <select id="target-select">
-                <option value="sigma">sigma</option>
-                <option value="G">G</option>
-              </select>
-            </label>
             <button id="publish-button" class="primary">Publish Parameters</button>
           </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h3>Operation Controls</h3>
+          </div>
+          <div id="operation-sections" class="operation-sections"></div>
         </section>
 
         <div class="grid">
@@ -97,8 +97,20 @@
         <span class="field-key"></span>
         <div class="field-badges"></div>
         <p class="field-description"></p>
+        <p class="field-expression"></p>
+        <p class="field-depends"></p>
         <textarea rows="1" class="field-input"></textarea>
       </label>
+    </template>
+
+    <template id="operation-item-template">
+      <div class="operation-item">
+        <div class="operation-copy">
+          <span class="operation-label"></span>
+          <span class="operation-key"></span>
+        </div>
+        <div class="operation-control"></div>
+      </div>
     </template>
 
     <script src="/static/app.js"></script>

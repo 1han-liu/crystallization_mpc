@@ -133,10 +133,77 @@ textarea {
   margin-top: 20px;
 }
 
+.param-group {
+  margin-bottom: 18px;
+}
+
+.param-group-title {
+  margin: 0 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
 .content {
   padding: 16px;
   display: grid;
   gap: 16px;
+}
+
+.operation-sections {
+  display: grid;
+  gap: 18px;
+}
+
+.operation-section {
+  display: grid;
+  gap: 10px;
+}
+
+.operation-section-title {
+  margin: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.operation-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #efefef;
+}
+
+.operation-item:last-child {
+  border-bottom: none;
+}
+
+.operation-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.operation-label {
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.operation-key {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.operation-control {
+  min-width: 160px;
+}
+
+.operation-control select,
+.operation-control button {
+  width: 100%;
 }
 
 .panel {
@@ -208,7 +275,17 @@ textarea {
   color: var(--muted);
 }
 
+.field-expression,
+.field-depends {
+  margin: -2px 0 2px;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
 .field-description.is-empty,
+.field-expression.is-empty,
+.field-depends.is-empty,
 .field-badges.is-empty {
   display: none;
 }

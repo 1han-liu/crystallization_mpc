@@ -71,10 +71,6 @@ params:
     default: 15
   - key: params.T_u
     default: 60
-  - key: params.K_P_target
-    default: null
-  - key: params.K_I_target
-    default: null
   - key: params.K_P_dT_dt
     default: 3
   - key: params.K_I_dT_dt

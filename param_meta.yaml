@@ -1,544 +1,923 @@
 version: 1
 params:
   dt:
-    description: Time step
-    unit: s
+    section: "Loop interval"
+    label: "Time step t"
+    description: "Global control loop interval."
+    unit: "s"
+    kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
     ui:
       visible: true
+      order: 10
+
   resolution:
-    description: Camera or pixel resolution used by growth-rate estimation.
-    unit: m
+    section: "Shared estimation"
+    label: "Camera resolution"
+    description: "Pixel-to-length conversion used by growth-rate estimation."
+    unit: "m"
+    kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
     ui:
       visible: true
+      order: 20
+
   q2:
-    description: Process noise term used by EKF-based estimation.
+    section: "Shared estimation"
+    label: "Process noise q2"
+    description: "Shared EKF process noise term."
     unit: "-"
+    kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
     ui:
       visible: true
+      order: 30
+
   r_diag:
-    description: Measurement noise diagonal for the shared estimator.
+    section: "Shared estimation"
+    label: "Measurement noise diagonal r_diag"
+    description: "Shared EKF measurement noise diagonal."
     unit: "-"
+    kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
     ui:
       visible: true
-# controller
-  sigma_set:
-    description: Target of relative supersaturation sigma_set [-]
-    unit: g/g
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  G_set:
-    description: Growth-rate target used when target mode is G.
-    unit: m/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.var_dT_dt:
-    description: Process variance for the temperature-gradient state.
-    unit: "(K/s)^2"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.var_dc_dt:
-    description: Process variance for the concentration-gradient state.
-    unit: "((g/g)/s)^2"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.dT:
-    description: Temperature measurement uncertainty.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.dc:
-    description: Concentration measurement uncertainty.
-    unit: g/g
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.n:
-    description: Growth-rate order with respect to supersaturation.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.E_A:
-    description: Activation energy for the main growth-rate model.
-    unit: J/mol
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.T_R:
-    description: Room temperature reference.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  k:
-    description: Heat transfer coefficient between jacket and reactor.
-    unit: J/(K*s*m^2)
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  rho_solute:
-    description: Density of the solute.
-    unit: kg/m^3
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  m_solvent:
-    description: Mass of solvent in the reactor.
-    unit: kg
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.w_sigma:
-    description: Objective weight for supersaturation tracking.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.w_G:
-    description: Objective weight for growth-rate tracking.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.w_dT_dt:
-    description: Objective weight for temperature-gradient effort.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  sigma_threshold:
-    description: Threshold below which sigma-specific logic switches regime.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.PI_mode:
-    description: PI tuning rule used to derive target-loop gains.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_u:
-    description: Ultimate gain used for PI tuning.
-    unit: K/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.T_u:
-    description: Oscillation period used for PI tuning.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_P_target:
-    description: Effective proportional gain for the target loop.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_I_target:
-    description: Effective integral gain for the target loop.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_P_dT_dt:
-    description: Proportional gain for the dT/dt loop.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_I_dT_dt:
-    description: Integral gain for the dT/dt loop.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_P_T_sigma:
-    description: Temperature-loop proportional gain used in sigma mode.
-    unit: s^2
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_I_T_sigma:
-    description: Temperature-loop integral gain used in sigma mode.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_P_T_G:
-    description: Temperature-loop proportional gain used in G mode.
-    unit: s^2
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.K_I_T_G:
-    description: Temperature-loop integral gain used in G mode.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.n_proc:
-    description: Process-model order for growth-rate adaptation.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.E_A_proc:
-    description: Process-model activation energy for adaptation.
-    unit: J/mol
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  t_lag:
-    description: Main lag time horizon.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  t_lag_perc:
-    description: Lag ratio used in timing heuristics.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  t_lag_threshold_perc_sigma:
-    description: Lag threshold ratio for sigma mode.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  t_lag_threshold_perc_G:
-    description: Lag threshold ratio for G mode.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dT_dt_min_sigma:
-    description: Minimum temperature-gradient limit in sigma mode.
-    unit: K/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dT_dt_max_sigma:
-    description: Maximum temperature-gradient limit in sigma mode.
-    unit: K/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dT_dt_min_G:
-    description: Minimum temperature-gradient limit in G mode.
-    unit: K/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dT_dt_max_G:
-    description: Maximum temperature-gradient limit in G mode.
-    unit: K/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  T_j_min:
-    description: Minimum jacket temperature.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  T_j_max:
-    description: Maximum jacket temperature.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  T_init_sigma:
-    description: Initial process temperature used in sigma mode.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  T_init_G:
-    description: Initial process temperature used in G mode.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  T_j_init:
-    description: Initial jacket temperature.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  T_j_set_init:
-    description: Initial jacket setpoint.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  c_init:
-    description: Initial concentration.
-    unit: g/g
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dT_j_dt_max:
-    description: Maximum jacket temperature slew rate.
-    unit: K/s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dT_j:
-    description: Jacket temperature resolution or tolerance.
-    unit: K
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  dt_update:
-    description: Hardware update period for jacket commands.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  steps_sigma:
-    description: Number of control steps used in sigma mode.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  steps_G:
-    description: Number of control steps used in G mode.
-    unit: "-"
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  seed_time_sigma:
-    description: Seed addition time used in sigma mode.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  seed_time_G:
-    description: Seed addition time used in G mode.
-    unit: s
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  params.R:
-    description: Universal gas constant.
-    unit: J/(mol*K)
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  c_p:
-    description: Specific heat capacity of the solvent.
-    unit: J/(kg*K)
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  rho_solvent:
-    description: Density of the solvent.
-    unit: kg/m^3
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  r_reactor:
-    description: Reactor radius used by heat-transfer geometry terms.
-    unit: m
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  k_loss:
-    description: Heat loss coefficient between reactor and surroundings.
-    unit: J/(K*s*m^2)
-    derived: false
-    publish_to: [controller]
-    ui:
-      visible: true
-  area_1:
-    description: Contact area between jacket and reactor.
-    unit: m^2
-    derived: true
-    depends_on: [m_solvent, rho_solvent, r_reactor]
-    publish_to: [controller]
-    ui:
-      visible: false
-  area_2:
-    description: Reactor top or section area used for heat-loss terms.
-    unit: m^2
-    derived: true
-    depends_on: [r_reactor]
-    publish_to: [controller]
-    ui:
-      visible: false
-  params.tau_1:
-    description: Time constant between jacket and reactor.
-    unit: s
-    derived: true
-    depends_on: [c_p, m_solvent, k, area_1]
-    publish_to: [controller]
-    ui:
-      visible: false
-  params.tau_2:
-    description: Time constant for heat loss to the environment.
-    unit: s
-    derived: true
-    depends_on: [c_p, m_solvent, k_loss, area_2]
-    publish_to: [controller]
-    ui:
-      visible: false
-  params.rho_solute:
-    description: Solute density mirrored into the controller params namespace.
-    unit: kg/m^3
-    derived: true
-    depends_on: [rho_solute]
-    publish_to: [controller]
-    ui:
-      visible: false
-  params.k_0:
-    description: Growth-rate coefficient used by the main controller model.
-    unit: m/s
-    derived: true
-    depends_on: [params.R]
-    publish_to: [controller]
-    ui:
-      visible: false
-  params.k_0_proc:
-    description: Growth-rate coefficient used by the process adaptation model.
-    unit: m/s
-    derived: true
-    depends_on: [params.R]
-    publish_to: [controller]
-    ui:
-      visible: false
-  target_set:
-    description: Effective active target after sigma/G selection.
-    unit: "-"
-    derived: true
-    depends_on: [sigma_set, G_set]
-    publish_to: [controller]
-    ui:
-      visible: false
-# gsensor
+      order: 40
+
   dt_G:
-    description: Growth-rate estimation update step.
-    unit: s
+    section: "Growth rate estimation"
+    label: "Growth-rate time step dt_G"
+    description: "Sampling interval used by gsensor growth-rate estimation."
+    unit: "s"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
-    ptr_format:
-    description: Print format options used by the gsensor parameter display.
+      order: 110
+
+  ptr_format:
+    section: "Growth rate estimation"
+    label: "Pointer display format"
+    description: "Display format options used in gsensor parameter views."
     unit: "-"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 120
+
   params_G.width:
-    description: Search window width for growth-line detection.
-    unit: px
+    section: "Growth line detection"
+    label: "Search window width"
+    description: "Search window width for growth-line detection."
+    unit: "px"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 130
+
   params_G.ratio:
-    description: Shape ratio threshold used in gsensor line updates.
+    section: "Growth line detection"
+    label: "Shape ratio threshold"
+    description: "Shape ratio threshold used in line updates."
     unit: "-"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 140
+
   params_G.delta_theta:
-    description: Angular step for growth-line search.
-    unit: deg
+    section: "Growth line detection"
+    label: "Angular step"
+    description: "Angular step used by line search."
+    unit: "deg"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 150
+
   params_G.width_divider:
-    description: Divider used to shrink the detection width.
+    section: "Growth line detection"
+    label: "Width divider"
+    description: "Divider applied to narrow the detection width."
     unit: "-"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 160
+
   params_G.num_peak:
-    description: Maximum number of peaks kept during growth detection.
+    section: "Growth line detection"
+    label: "Peak count limit"
+    description: "Maximum number of peaks kept during detection."
     unit: "-"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 170
+
   params_G.len_min:
-    description: Minimum accepted growth-line length.
-    unit: px
+    section: "Growth line detection"
+    label: "Minimum line length"
+    description: "Minimum accepted growth-line length."
+    unit: "px"
+    kind: "basic"
     derived: false
     publish_to: [gsensor]
     ui:
       visible: true
+      order: 180
+
+  sigma_set:
+    section: "Target"
+    label: "Target of relative supersaturation: sigma_set"
+    description: "Supersaturation target used when target mode is sigma."
+    unit: "g/g"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 210
+
+  G_set:
+    section: "Target"
+    label: "Target of growth rate: G_set"
+    description: "Growth-rate target used when target mode is G."
+    unit: "m/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 220
+
+  target_set:
+    section: "Target"
+    label: "Target value: target_set"
+    description: "Effective target after sigma/G selection."
+    unit: "-"
+    kind: "derived"
+    compute_from: "target_selection"
+    expression: 'if target=="sigma", target_set=sigma_set; elseif target=="G", target_set=G_set; end'
+    depends_on: [target, sigma_set, G_set]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  params.var_dT_dt:
+    section: "Kalman filter for MPC"
+    label: "Temperature variance of process noise: params.var_dT_dt"
+    description: "Process variance for the temperature-gradient state."
+    unit: "(K/s)^2"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 230
+
+  params.var_dc_dt:
+    section: "Kalman filter for MPC"
+    label: "Concentration variance of process noise: params.var_dc_dt"
+    description: "Process variance for the concentration-gradient state."
+    unit: "((g/g)/s)^2"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 240
+
+  params.dT:
+    section: "Kalman filter for MPC"
+    label: "Temperature measurement inaccuracy: params.dT"
+    description: "Temperature measurement uncertainty."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 250
+
+  params.dc:
+    section: "Kalman filter for MPC"
+    label: "Concentration measurement inaccuracy: params.dc"
+    description: "Concentration measurement uncertainty."
+    unit: "g/g"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 260
+
+  params.n:
+    section: "Growth rate model"
+    label: "Reaction order: params.n"
+    description: "Growth-rate order with respect to supersaturation."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 270
+
+  params.E_A:
+    section: "Growth rate model"
+    label: "Activation energy: params.E_A"
+    description: "Activation energy for the main growth-rate model."
+    unit: "J/mol"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 280
+
+  params.k_0:
+    section: "Growth rate model"
+    label: "Reaction coefficient prefactor: params.k_0"
+    description: "Growth-rate coefficient used by the main controller model."
+    unit: "m/s"
+    kind: "derived"
+    compute_from: "k_0"
+    expression: "0.1 * 3.0e-8 / 0.035^1.5 / exp(-120e3 / params.R / 306.15)"
+    depends_on: [params.R]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  params.n_proc:
+    section: "Growth rate process model"
+    label: "Process-model order: params.n_proc"
+    description: "Process-model order for growth-rate adaptation."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 290
+
+  params.E_A_proc:
+    section: "Growth rate process model"
+    label: "Process-model activation energy: params.E_A_proc"
+    description: "Process-model activation energy for adaptation."
+    unit: "J/mol"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 300
+
+  params.k_0_proc:
+    section: "Growth rate process model"
+    label: "Process-model prefactor: params.k_0_proc"
+    description: "Growth-rate coefficient used by the process adaptation model."
+    unit: "m/s"
+    kind: "derived"
+    compute_from: "k_0_proc"
+    expression: "3.0e-8 / 0.035^1.5 / exp(-120e3 / params.R / 306.15)"
+    depends_on: [params.R]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  params.w_sigma:
+    section: "Objective weights"
+    label: "Objective weight: params.w_sigma"
+    description: "Objective weight for supersaturation tracking."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 310
+
+  params.w_G:
+    section: "Objective weights"
+    label: "Objective weight: params.w_G"
+    description: "Objective weight for growth-rate tracking."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 320
+
+  params.w_dT_dt:
+    section: "Objective weights"
+    label: "Objective weight: params.w_dT_dt"
+    description: "Objective weight for temperature-gradient effort."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 330
+
+  sigma_threshold:
+    section: "Target switching"
+    label: "Supersaturation threshold"
+    description: "Threshold below which sigma-specific logic switches regime."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 340
+
+  params.PI_mode:
+    section: "PI tuning"
+    label: "PI tuning mode: params.PI_mode"
+    description: "PI tuning rule used to derive target-loop gains."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 350
+
+  params.K_u:
+    section: "PI tuning"
+    label: "Ultimate gain: params.K_u"
+    description: "Ultimate gain used for PI tuning."
+    unit: "K/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 360
+
+  params.T_u:
+    section: "PI tuning"
+    label: "Oscillation period: params.T_u"
+    description: "Oscillation period used for PI tuning."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 370
+
+  params.K_P_target:
+    section: "Target loop"
+    label: "Target loop proportional gain: params.K_P_target"
+    description: "Effective proportional gain for the target loop."
+    unit: "-"
+    kind: "derived"
+    compute_from: "k_p_target"
+    expression: 'if params.PI_mode=="Ziegler_Nichols", params.K_P_target = 0.45 * params.K_u; end'
+    depends_on: [params.PI_mode, params.K_u]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+      order: 380
+
+  params.K_I_target:
+    section: "Target loop"
+    label: "Target loop integral gain: params.K_I_target"
+    description: "Effective integral gain for the target loop."
+    unit: "-"
+    kind: "derived"
+    compute_from: "k_i_target"
+    expression: 'if params.PI_mode=="Ziegler_Nichols", params.K_I_target = 0; end'
+    depends_on: [params.PI_mode, params.K_u, params.T_u]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+      order: 390
+
+  params.K_P_dT_dt:
+    section: "dT/dt loop"
+    label: "dT/dt proportional gain: params.K_P_dT_dt"
+    description: "Proportional gain for the dT/dt loop."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 400
+
+  params.K_I_dT_dt:
+    section: "dT/dt loop"
+    label: "dT/dt integral gain: params.K_I_dT_dt"
+    description: "Integral gain for the dT/dt loop."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 410
+
+  params.K_P_T_sigma:
+    section: "Temperature loop by target"
+    label: "Temperature proportional gain in sigma mode: params.K_P_T_sigma"
+    description: "Temperature-loop proportional gain used in sigma mode."
+    unit: "s^2"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 420
+
+  params.K_I_T_sigma:
+    section: "Temperature loop by target"
+    label: "Temperature integral gain in sigma mode: params.K_I_T_sigma"
+    description: "Temperature-loop integral gain used in sigma mode."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 430
+
+  params.K_P_T_G:
+    section: "Temperature loop by target"
+    label: "Temperature proportional gain in G mode: params.K_P_T_G"
+    description: "Temperature-loop proportional gain used in G mode."
+    unit: "s^2"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 440
+
+  params.K_I_T_G:
+    section: "Temperature loop by target"
+    label: "Temperature integral gain in G mode: params.K_I_T_G"
+    description: "Temperature-loop integral gain used in G mode."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 450
+
+  t_lag:
+    section: "Lag settings"
+    label: "Lag time t_lag"
+    description: "Main lag time horizon."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 460
+
+  t_lag_perc:
+    section: "Lag settings"
+    label: "Lag ratio t_lag_perc"
+    description: "Lag ratio used in timing heuristics."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 470
+
+  t_lag_threshold_perc_sigma:
+    section: "Lag settings"
+    label: "Lag threshold ratio in sigma mode"
+    description: "Lag threshold ratio for sigma mode."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 480
+
+  t_lag_threshold_perc_G:
+    section: "Lag settings"
+    label: "Lag threshold ratio in G mode"
+    description: "Lag threshold ratio for G mode."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 490
+
+  dT_dt_min_sigma:
+    section: "Temperature-gradient limits"
+    label: "Minimum dT/dt in sigma mode"
+    description: "Minimum temperature-gradient limit in sigma mode."
+    unit: "K/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 500
+
+  dT_dt_max_sigma:
+    section: "Temperature-gradient limits"
+    label: "Maximum dT/dt in sigma mode"
+    description: "Maximum temperature-gradient limit in sigma mode."
+    unit: "K/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 510
+
+  dT_dt_min_G:
+    section: "Temperature-gradient limits"
+    label: "Minimum dT/dt in G mode"
+    description: "Minimum temperature-gradient limit in G mode."
+    unit: "K/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 520
+
+  dT_dt_max_G:
+    section: "Temperature-gradient limits"
+    label: "Maximum dT/dt in G mode"
+    description: "Maximum temperature-gradient limit in G mode."
+    unit: "K/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 530
+
+  T_j_min:
+    section: "Jacket constraints"
+    label: "Minimum jacket temperature T_j_min"
+    description: "Minimum jacket temperature."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 540
+
+  T_j_max:
+    section: "Jacket constraints"
+    label: "Maximum jacket temperature T_j_max"
+    description: "Maximum jacket temperature."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 550
+
+  dT_j_dt_max:
+    section: "Jacket constraints"
+    label: "Maximum jacket slew rate dT_j_dt_max"
+    description: "Maximum jacket temperature slew rate."
+    unit: "K/s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 560
+
+  dT_j:
+    section: "Jacket constraints"
+    label: "Jacket temperature resolution dT_j"
+    description: "Jacket temperature resolution or tolerance."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 570
+
+  dt_update:
+    section: "Jacket constraints"
+    label: "Hardware update period dt_update"
+    description: "Hardware update period for jacket commands."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 580
+
+  T_init_sigma:
+    section: "Initialization"
+    label: "Initial process temperature in sigma mode T_init_sigma"
+    description: "Initial process temperature used in sigma mode."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 590
+
+  T_init_G:
+    section: "Initialization"
+    label: "Initial process temperature in G mode T_init_G"
+    description: "Initial process temperature used in G mode."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 600
+
+  T_j_init:
+    section: "Initialization"
+    label: "Initial jacket temperature T_j_init"
+    description: "Initial jacket temperature."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 610
+
+  T_j_set_init:
+    section: "Initialization"
+    label: "Initial jacket setpoint T_j_set_init"
+    description: "Initial jacket setpoint."
+    unit: "K"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 620
+
+  c_init:
+    section: "Initialization"
+    label: "Initial concentration c_init"
+    description: "Initial concentration."
+    unit: "g/g"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 630
+
+  steps_sigma:
+    section: "Scheduling"
+    label: "Number of control steps in sigma mode"
+    description: "Number of control steps used in sigma mode."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 640
+
+  steps_G:
+    section: "Scheduling"
+    label: "Number of control steps in G mode"
+    description: "Number of control steps used in G mode."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 650
+
+  seed_time_sigma:
+    section: "Scheduling"
+    label: "Seed addition time in sigma mode"
+    description: "Seed addition time used in sigma mode."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 660
+
+  seed_time_G:
+    section: "Scheduling"
+    label: "Seed addition time in G mode"
+    description: "Seed addition time used in G mode."
+    unit: "s"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 670
+
+  params.R:
+    section: "Physical properties"
+    label: "Gas constant params.R"
+    description: "Universal gas constant."
+    unit: "J/(mol*K)"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 680
+
+  k:
+    section: "Physical properties"
+    label: "Heat transfer coefficient k"
+    description: "Heat transfer coefficient between jacket and reactor."
+    unit: "J/(K*s*m^2)"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 690
+
+  k_loss:
+    section: "Physical properties"
+    label: "Heat loss coefficient k_loss"
+    description: "Heat loss coefficient between reactor and surroundings."
+    unit: "J/(K*s*m^2)"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 700
+
+  c_p:
+    section: "Physical properties"
+    label: "Specific heat capacity c_p"
+    description: "Specific heat capacity of the solvent."
+    unit: "J/(kg*K)"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 710
+
+  rho_solvent:
+    section: "Physical properties"
+    label: "Solvent density rho_solvent"
+    description: "Density of the solvent."
+    unit: "kg/m^3"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 720
+
+  rho_solute:
+    section: "Physical properties"
+    label: "Solute density rho_solute"
+    description: "Density of the solute."
+    unit: "kg/m^3"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 730
+
+  m_solvent:
+    section: "Physical properties"
+    label: "Solvent mass m_solvent"
+    description: "Mass of solvent in the reactor."
+    unit: "kg"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 740
+
+  r_reactor:
+    section: "Physical properties"
+    label: "Reactor radius r_reactor"
+    description: "Reactor radius used by heat-transfer geometry terms."
+    unit: "m"
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+      order: 750
+
+  area_1:
+    section: "Derived controller parameters"
+    label: "Contact area area_1"
+    description: "Contact area between jacket and reactor."
+    unit: "m^2"
+    kind: "derived"
+    compute_from: "area_1"
+    expression: "2 * m_solvent / (rho_solvent * r_reactor)"
+    depends_on: [m_solvent, rho_solvent, r_reactor]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  area_2:
+    section: "Derived controller parameters"
+    label: "Heat-loss area area_2"
+    description: "Reactor top or section area used for heat-loss terms."
+    unit: "m^2"
+    kind: "derived"
+    compute_from: "area_2"
+    expression: "pi * r_reactor^2"
+    depends_on: [r_reactor]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  params.tau_1:
+    section: "Derived controller parameters"
+    label: "Time constant params.tau_1"
+    description: "Time constant between jacket and reactor."
+    unit: "s"
+    kind: "derived"
+    compute_from: "tau_1"
+    expression: "(c_p * m_solvent) / (k * area_1)"
+    depends_on: [c_p, m_solvent, k, area_1]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  params.tau_2:
+    section: "Derived controller parameters"
+    label: "Time constant params.tau_2"
+    description: "Time constant for heat loss to the environment."
+    unit: "s"
+    kind: "derived"
+    compute_from: "tau_2"
+    expression: "(c_p * m_solvent) / (k_loss * area_2)"
+    depends_on: [c_p, m_solvent, k_loss, area_2]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false
+
+  params.rho_solute:
+    section: "Derived controller parameters"
+    label: "Mapped density params.rho_solute"
+    description: "Solute density mirrored into the controller params namespace."
+    unit: "kg/m^3"
+    kind: "derived"
+    compute_from: "rho_solute_map"
+    expression: "params.rho_solute = rho_solute"
+    depends_on: [rho_solute]
+    derived: true
+    publish_to: [controller]
+    ui:
+      visible: false

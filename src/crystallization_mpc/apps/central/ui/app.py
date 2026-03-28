@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from crystallization_mpc.apps.central.params import (
     apply_derived_params,
+    load_operation_meta,
     load_param_meta,
     load_params,
     save_params_document,
@@ -28,7 +30,10 @@ TARGET_VALUES = ("sigma", "G")
 UI_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = UI_DIR.parents[4]
 DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
+DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
+DEFAULT_OPERATION_META_PATH = PROJECT_ROOT / "operation_meta.yaml"
+logger = logging.getLogger(__name__)
 
 
 class TargetUpdate(BaseModel):
@@ -40,6 +45,15 @@ class ParamsUpdate(BaseModel):
     shared: Dict[str, Any] = Field(default_factory=dict)
     gsensor: Dict[str, Any] = Field(default_factory=dict)
     controller: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationValueUpdate(BaseModel):
+    key: str
+    value: Any
+
+
+class OperationActionUpdate(BaseModel):
+    key: str
 
 
 class CentralApp:
@@ -57,9 +71,17 @@ class CentralApp:
         self._conn = None
         self._ch = None
 
-    def connect(self) -> None:
-        if self._ch is not None:
+    def _is_connection_open(self) -> bool:
+        return self._conn is not None and bool(getattr(self._conn, "is_open", False))
+
+    def _is_channel_open(self) -> bool:
+        return self._ch is not None and bool(getattr(self._ch, "is_open", False))
+
+    def connect(self, force: bool = False) -> None:
+        if not force and self._is_connection_open() and self._is_channel_open():
             return
+        if force:
+            self.close()
         binding_keys = bindings_for(ROLE, include_broadcast=self.include_broadcast)
         self._conn, self._ch = connect(self.url)
         declare_exchange(self._ch, self.exchange)
@@ -67,14 +89,39 @@ class CentralApp:
 
     def close(self) -> None:
         if self._conn is not None:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                logger.exception("Failed to close RabbitMQ connection cleanly.")
         self._conn = None
         self._ch = None
 
     def _require_channel(self):
-        if self._ch is None:
-            raise RuntimeError("CentralApp is not connected. Call connect() first.")
+        if not self._is_connection_open() or not self._is_channel_open():
+            self.connect(force=True)
         return self._ch
+
+    def _publish_with_reconnect(
+        self,
+        routing_key: str,
+        payload: Dict[str, Any],
+        persistent: bool = True,
+    ) -> None:
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                ch = self._require_channel()
+                publish(ch, self.exchange, routing_key, payload, persistent=persistent)
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "RabbitMQ publish failed on attempt %s/2, reconnecting.",
+                    attempt + 1,
+                    exc_info=True,
+                )
+                self.connect(force=True)
+        raise RuntimeError("RabbitMQ publish failed after reconnect.") from last_error
 
     def publish_params(
         self,
@@ -83,7 +130,6 @@ class CentralApp:
         controller: Dict[str, object],
         version: int,
     ) -> None:
-        ch = self._require_channel()
         seq = next_seq()
 
         if shared or gsensor:
@@ -96,7 +142,7 @@ class CentralApp:
                 seq=seq,
                 payload=payload,
             )
-            publish(ch, self.exchange, route(ROLE, "gsensor"), env, persistent=True)
+            self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
 
         if shared or controller:
             payload = {"version": version, "params": {**shared, **controller}}
@@ -108,7 +154,7 @@ class CentralApp:
                 seq=seq,
                 payload=payload,
             )
-            publish(ch, self.exchange, route(ROLE, "controller"), env, persistent=True)
+            self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
 
     def load_and_publish(
         self,
@@ -124,12 +170,20 @@ class CentralApp:
 
 class CentralService:
     def __init__(self) -> None:
-        self.params_path = Path(os.getenv("PARAMS_FILE", str(DEFAULT_PARAMS_PATH)))
+        self.default_params_path = Path(os.getenv("PARAMS_DEFAULT_FILE", str(DEFAULT_PARAMS_PATH)))
+        self.params_path = Path(os.getenv("PARAMS_FILE", str(DEFAULT_RUNTIME_PARAMS_PATH)))
         self.param_meta_path = Path(os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH)))
+        self.operation_meta_path = Path(os.getenv("OPERATION_META_FILE", str(DEFAULT_OPERATION_META_PATH)))
         self.target: Literal["sigma", "G"] = os.getenv("CONTROL_TARGET", "sigma")  # type: ignore[assignment]
         if self.target not in TARGET_VALUES:
             self.target = "sigma"
         self.publisher = CentralApp()
+        self.operation_state = self._build_default_operation_state()
+
+    def _active_params_path(self) -> Path:
+        if self.params_path.exists():
+            return self.params_path
+        return self.default_params_path
 
     def start(self) -> None:
         self.publisher.connect()
@@ -138,10 +192,53 @@ class CentralService:
         self.publisher.close()
 
     def load_params(self) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
-        return load_params(str(self.params_path))
+        return load_params(str(self._active_params_path()))
 
     def load_param_meta(self) -> Dict[str, Dict[str, Any]]:
         return load_param_meta(str(self.param_meta_path))
+
+    def load_operation_meta(self) -> list[Dict[str, Any]]:
+        return load_operation_meta(str(self.operation_meta_path))
+
+    def _build_default_operation_state(self) -> Dict[str, Any]:
+        state: Dict[str, Any] = {}
+        for section in self.load_operation_meta():
+            for item in section.get("items", []):
+                key = str(item.get("key", ""))
+                if not key:
+                    continue
+                state[key] = item.get("default")
+        state["target"] = self.target
+        return state
+
+    def update_operation_value(self, key: str, value: Any) -> Dict[str, Any]:
+        self.operation_state[key] = value
+        if key == "target" and value in TARGET_VALUES:
+            self.target = value
+            self.operation_state["target"] = value
+        return {
+            "saved": True,
+            "key": key,
+            "value": self.operation_state.get(key),
+        }
+
+    def trigger_operation_action(self, key: str) -> Dict[str, Any]:
+        current = bool(self.operation_state.get(key, False))
+        if key in {"controller_active", "adaptive", "G_active", "inline_display"}:
+            self.operation_state[key] = not current
+            return {
+                "triggered": True,
+                "key": key,
+                "value": self.operation_state[key],
+                "placeholder": True,
+            }
+        self.operation_state[key] = True
+        return {
+            "triggered": True,
+            "key": key,
+            "value": True,
+            "placeholder": True,
+        }
 
     def save_params(self, payload: ParamsUpdate) -> None:
         save_params_document(
@@ -166,7 +263,7 @@ class CentralService:
 
     def publish(self) -> Dict[str, Any]:
         shared, gsensor, controller, version, derived = self.publisher.load_and_publish(
-            params_path=str(self.params_path),
+            params_path=str(self._active_params_path()),
             target=self.target,
         )
         return {
@@ -210,6 +307,7 @@ def get_params() -> Dict[str, Any]:
         "gsensor": gsensor,
         "controller": controller,
         "meta": service.load_param_meta(),
+        "source_file": str(service._active_params_path()),
     }
 
 
@@ -227,17 +325,36 @@ def get_operation_state() -> Dict[str, Any]:
     preview = service.preview_publish_payload()
     return {
         "target": service.target,
+        "state": service.operation_state,
         "preview": preview,
+    }
+
+
+@web_app.get("/api/operation/meta")
+def get_operation_meta() -> Dict[str, Any]:
+    return {
+        "sections": service.load_operation_meta(),
     }
 
 
 @web_app.post("/api/operation/target")
 def update_target(payload: TargetUpdate) -> Dict[str, Any]:
     service.target = payload.target
+    service.operation_state["target"] = payload.target
     return {
         "saved": True,
         "target": service.target,
     }
+
+
+@web_app.post("/api/operation/value")
+def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
+    return service.update_operation_value(payload.key, payload.value)
+
+
+@web_app.post("/api/operation/action")
+def trigger_operation_action(payload: OperationActionUpdate) -> Dict[str, Any]:
+    return service.trigger_operation_action(payload.key)
 
 
 @web_app.post("/api/operation/publish")

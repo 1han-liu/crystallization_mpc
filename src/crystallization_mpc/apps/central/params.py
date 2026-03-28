@@ -61,6 +61,26 @@ def load_param_meta(path: str) -> Dict[str, Dict[str, Any]]:
     return {str(key): dict(value or {}) for key, value in params.items()}
 
 
+def load_operation_meta(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    yaml = _require_yaml()
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    sections = data.get("sections", []) or []
+    result: List[Dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        result.append(
+            {
+                "title": str(section.get("title", "")),
+                "items": list(section.get("items", []) or []),
+            }
+        )
+    return result
+
+
 def save_params_document(
     path: str,
     version: int,
@@ -104,6 +124,10 @@ def _as_float(value: object) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+def _is_missing(params: Dict[str, object], key: str) -> bool:
+    return key not in params or params.get(key) is None
 
 
 def _compute_area_1(params: Dict[str, object]) -> Optional[float]:
@@ -171,6 +195,21 @@ def _compute_k_0_proc(params: Dict[str, object]) -> Optional[float]:
     return 3.0e-8 / denom
 
 
+def _compute_k_p_target(params: Dict[str, object]) -> Optional[float]:
+    pi_mode = params.get("params.PI_mode")
+    k_u = _as_float(params.get("params.K_u"))
+    if pi_mode != "Ziegler_Nichols" or k_u is None:
+        return None
+    return 0.45 * k_u
+
+
+def _compute_k_i_target(params: Dict[str, object]) -> Optional[float]:
+    pi_mode = params.get("params.PI_mode")
+    if pi_mode != "Ziegler_Nichols":
+        return None
+    return 0.0
+
+
 def apply_derived_params(
     shared: Dict[str, object],
     controller: Dict[str, object],
@@ -183,44 +222,56 @@ def apply_derived_params(
     merged = {**shared, **controller}
     derived: Dict[str, object] = {}
 
-    if "area_1" not in merged:
+    if _is_missing(merged, "area_1"):
         area_1 = _compute_area_1(merged)
         if area_1 is not None:
             derived["area_1"] = area_1
 
     merged_with_derived = {**merged, **derived}
-    if "params.tau_1" not in merged_with_derived:
+    if _is_missing(merged_with_derived, "params.tau_1"):
         tau_1 = _compute_tau_1(merged_with_derived)
         if tau_1 is not None:
             derived["params.tau_1"] = tau_1
 
     merged_with_derived = {**merged_with_derived, **derived}
-    if "area_2" not in merged_with_derived:
+    if _is_missing(merged_with_derived, "area_2"):
         area_2 = _compute_area_2(merged_with_derived)
         if area_2 is not None:
             derived["area_2"] = area_2
 
     merged_with_derived = {**merged_with_derived, **derived}
-    if "params.tau_2" not in merged_with_derived:
+    if _is_missing(merged_with_derived, "params.tau_2"):
         tau_2 = _compute_tau_2(merged_with_derived)
         if tau_2 is not None:
             derived["params.tau_2"] = tau_2
 
     merged_with_derived = {**merged_with_derived, **derived}
-    if "params.rho_solute" not in merged_with_derived and "rho_solute" in merged_with_derived:
+    if _is_missing(merged_with_derived, "params.rho_solute") and "rho_solute" in merged_with_derived:
         derived["params.rho_solute"] = merged_with_derived["rho_solute"]
 
     merged_with_derived = {**merged_with_derived, **derived}
-    if "params.k_0" not in merged_with_derived:
+    if _is_missing(merged_with_derived, "params.k_0"):
         k_0 = _compute_k_0(merged_with_derived)
         if k_0 is not None:
             derived["params.k_0"] = k_0
 
     merged_with_derived = {**merged_with_derived, **derived}
-    if "params.k_0_proc" not in merged_with_derived:
+    if _is_missing(merged_with_derived, "params.k_0_proc"):
         k_0_proc = _compute_k_0_proc(merged_with_derived)
         if k_0_proc is not None:
             derived["params.k_0_proc"] = k_0_proc
+
+    merged_with_derived = {**merged_with_derived, **derived}
+    if _is_missing(merged_with_derived, "params.K_P_target"):
+        k_p_target = _compute_k_p_target(merged_with_derived)
+        if k_p_target is not None:
+            derived["params.K_P_target"] = k_p_target
+
+    merged_with_derived = {**merged_with_derived, **derived}
+    if _is_missing(merged_with_derived, "params.K_I_target"):
+        k_i_target = _compute_k_i_target(merged_with_derived)
+        if k_i_target is not None:
+            derived["params.K_I_target"] = k_i_target
 
     controller_with_derived = dict(controller)
     if target in ("sigma", "G"):
