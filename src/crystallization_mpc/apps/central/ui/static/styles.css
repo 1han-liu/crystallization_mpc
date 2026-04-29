@@ -90,6 +90,9 @@ textarea {
   cursor: pointer;
   background: #ffffff;
   color: var(--ink);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
 }
 
 .nav-link {
