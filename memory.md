@@ -70,3 +70,10 @@
 - 变更文件：新增 `src/crystallization_mpc/apps/gsensor/telemetry.py`、`tests/test_gsensor_param_telemetry.py`；更新 `src/crystallization_mpc/infra/influxdb/write.py`、`docs/interfaces.md`、`plan.md`、`memory.md`。
 - 验证：运行 `pytest tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py`；运行 `python -m compileall src\crystallization_mpc\apps\gsensor src\crystallization_mpc\infra\influxdb tests\test_gsensor_param_telemetry.py`。
 - 备注：`gsensor_params` 采用一参数一条 point；`param_key` 必须与 `params_default.yaml` 中的 key 完全一致；`scope=shared|gsensor` 表达参数归属，`value_float/value_string/value_bool/value_json` 避免 Influx 字段类型冲突。
+
+### 2026-05-07 - 补充 Gsensor 业务流程分层
+
+- 任务：把 MATLAB 原 gsensor 业务流程按参数/通信、生命周期、初始化/标定、每帧检测、图像算法、速率估计和 controller 接收层写入计划记录。
+- 变更文件：更新 `plan.md`、`memory.md`。
+- 验证：文档-only 改动，不运行 pytest；读取 `plan.md` 确认新增分层内容和 RabbitMQ 迁移约束一致。
+- 备注：OPC UA 相关函数和节点仅作为 MATLAB 原流程通信边界参考；当前 Python 项目迁移时仍统一映射到 RabbitMQ，不引入 OPC UA。
