@@ -1,6 +1,6 @@
 # 任务记忆
 
-本文件用于记录本项目协作过程中已经完成的任务、关键决策、验证结果和遗留事项。每次任务完成后，在“任务记录”中追加一条记录，便于后续代理快速接续上下文。
+本文档用于记录本项目协作过程中已经完成的任务、关键决策、验证结果和遗留事项。每次任务完成后，在“任务记录”中追加一条记录，便于后续代理快速接续上下文。
 
 ## 记录模板
 
@@ -35,3 +35,38 @@
 - 变更文件：新增 `memory.md`、`plan.md`。
 - 验证：文档-only 改动，不运行 pytest；完成后读取文件并检查 `git status`。
 - 备注：两个文件均面向项目协作和编码代理使用，不作为最终用户说明书。
+
+### 2026-05-07 - Gsensor UI 参数侧边栏与实验调参
+
+- 任务：在独立 Gsensor UI 左侧增加参数侧边栏，支持实验过程中查看和修改 gsensor 所需参数；`Apply` 后立即更新当前 gsensor 内存参数并保存到 `params_runtime.yaml`，不修改 `params_default.yaml`。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/app.py`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`app.js`、`styles.css`、`tests/test_growth_rate_commands.py`。
+- 验证：`pytest tests\test_growth_rate_commands.py` 通过；`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_growth_rate_commands.py` 通过。
+- 备注：`Reset` 最终定义为恢复 gsensor UI 参数到 `params_default.yaml` 的初始值，并写回 `params_runtime.yaml`；controller 参数保留 runtime 中已有值，不被 Gsensor UI 重置。
+
+### 2026-05-07 - Docker 构建上下文与 compose 警告修复
+
+- 任务：修复 Docker build 因 pytest 临时目录 `.pytest-tmp*` 权限异常导致构建上下文发送失败的问题，并移除 obsolete 的 compose `version` 字段。
+- 变更文件：更新 `.dockerignore`、`.gitignore`、`docker-compose.yml`。
+- 验证：尝试运行 `docker compose build central gsensor`；项目侧 `.pytest-tmp*` 上下文问题已处理，但当前环境 Docker 配置目录 `C:\Users\Jack\.docker` 权限阻止进一步验证。
+- 备注：`.pytest-tmp*/` 已加入 `.dockerignore` 和 `.gitignore`；后续 Docker 若失败，应优先检查 Docker 用户配置权限而非项目构建上下文。
+
+### 2026-05-07 - 诊断面板折叠与 Gsensor 刷新行为调整
+
+- 任务：将 Central UI 的 `Derived Preview`、`Publish Result` 和 Gsensor UI 的 `Active Parameters`、`Last Message` 改为默认折叠，仅作为故障排查工具；去掉 Gsensor UI 每 2 秒自动刷新。
+- 变更文件：更新 `src/crystallization_mpc/apps/central/ui/static/index.html`、`app.js`、`styles.css`，以及 `src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`app.js`、`styles.css`。
+- 验证：`pytest tests\test_growth_rate_commands.py` 通过；`python -m compileall src\crystallization_mpc\apps\central src\crystallization_mpc\apps\gsensor` 通过。
+- 备注：Gsensor UI 状态现在只在页面加载、点击 `Refresh`、`Apply`/`Reset` 后、窗口聚焦或页面重新可见时刷新；主内容布局改为按内容高度排列，避免 Gsensor UI 主板块被撑满页面。
+
+### 2026-05-07 - 确认 Gsensor 功能补齐约束
+
+- 任务：记录后续补齐 gsensor MATLAB 图像测量服务时的关键实现约束。
+- 变更文件：更新 `memory.md`、`plan.md`。
+- 验证：文档-only 改动，不运行 pytest；读取文档确认约束已记录。
+- 备注：数据通讯全部通过 RabbitMQ 实现，不引入 OPC UA；gsensor 参数和状态结构以 `params_default.yaml` 中 `shared` 与 `gsensor` 参数为基础，并叠加 central 下发或 UI 写入的运行时参数。
+
+### 2026-05-07 - 设计 Gsensor 参数 Influx 数据模型
+
+- 任务：完成最小可用的 `gsensor_params` Influx 数据模型，固定参数记录的 measurement、tags、fields 和参数值序列化规则。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/telemetry.py`、`tests/test_gsensor_param_telemetry.py`；更新 `src/crystallization_mpc/infra/influxdb/write.py`、`docs/interfaces.md`、`plan.md`、`memory.md`。
+- 验证：运行 `pytest tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py`；运行 `python -m compileall src\crystallization_mpc\apps\gsensor src\crystallization_mpc\infra\influxdb tests\test_gsensor_param_telemetry.py`。
+- 备注：`gsensor_params` 采用一参数一条 point；`param_key` 必须与 `params_default.yaml` 中的 key 完全一致；`scope=shared|gsensor` 表达参数归属，`value_float/value_string/value_bool/value_json` 避免 Influx 字段类型冲突。

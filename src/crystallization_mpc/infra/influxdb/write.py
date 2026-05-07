@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,13 +21,18 @@ else:
 SIGMA_MEASUREMENT = "crystallizer"
 
 
-def build_point(
-    fields: dict[str, float],
+def _field_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)):
+        return value
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def build_tagged_point(
+    fields: dict[str, Any],
     *,
-    source: str = "test_sine",
-    run_id: str = "test_sigma_001",
-    mode: str = "test",
-    target: str = "sigma",
+    tags: dict[str, Any] | None = None,
     measurement: str = SIGMA_MEASUREMENT,
     timestamp: datetime | None = None,
 ) -> Any:
@@ -36,17 +42,37 @@ def build_point(
         raise RuntimeError("At least one field is required.")
 
     point_time = timestamp or datetime.now(timezone.utc)
-    point = (
-        Point(measurement)
-        .tag("source", source)
-        .tag("run_id", run_id)
-        .tag("mode", mode)
-        .tag("target", target)
-        .time(point_time, WritePrecision.NS)
-    )
+    point = Point(measurement).time(point_time, WritePrecision.NS)
+    for key, value in (tags or {}).items():
+        if value is not None:
+            point = point.tag(key, str(value))
     for key, value in fields.items():
-        point = point.field(key, float(value))
+        if value is not None:
+            point = point.field(key, _field_value(value))
     return point
+
+
+def build_point(
+    fields: dict[str, Any],
+    *,
+    source: str = "test_sine",
+    run_id: str = "test_sigma_001",
+    mode: str = "test",
+    target: str = "sigma",
+    measurement: str = SIGMA_MEASUREMENT,
+    timestamp: datetime | None = None,
+) -> Any:
+    return build_tagged_point(
+        fields,
+        tags={
+            "source": source,
+            "run_id": run_id,
+            "mode": mode,
+            "target": target,
+        },
+        measurement=measurement,
+        timestamp=timestamp,
+    )
 
 
 def build_sigma_point(
@@ -78,7 +104,7 @@ class InfluxWriter:
 
     def write_fields(
         self,
-        fields: dict[str, float],
+        fields: dict[str, Any],
         *,
         source: str = "test_sine",
         run_id: str = "test_sigma_001",
@@ -93,6 +119,22 @@ class InfluxWriter:
             run_id=run_id,
             mode=mode,
             target=target,
+            measurement=measurement,
+            timestamp=timestamp,
+        )
+        self.write_api.write(bucket=self.settings.bucket, record=point)
+
+    def write_tagged_fields(
+        self,
+        fields: dict[str, Any],
+        *,
+        tags: dict[str, Any] | None = None,
+        measurement: str = SIGMA_MEASUREMENT,
+        timestamp: datetime | None = None,
+    ) -> None:
+        point = build_tagged_point(
+            fields,
+            tags=tags,
             measurement=measurement,
             timestamp=timestamp,
         )
@@ -156,5 +198,6 @@ __all__ = [
     "SIGMA_MEASUREMENT",
     "build_point",
     "build_sigma_point",
+    "build_tagged_point",
     "write_sigma",
 ]
