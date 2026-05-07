@@ -75,21 +75,21 @@
           <div id="operation-sections" class="operation-sections"></div>
         </section>
 
-        <div class="grid">
-          <section class="panel">
-            <div class="panel-head">
-              <h3>Derived Preview</h3>
-              <button id="refresh-preview" class="ghost">Refresh</button>
-            </div>
+        <div class="grid diagnostics-grid">
+          <details class="panel diagnostic-panel">
+            <summary class="diagnostic-summary">
+              <span>Derived Preview</span>
+              <button id="refresh-preview" class="ghost" type="button">Refresh</button>
+            </summary>
             <pre id="derived-preview" class="code-block"></pre>
-          </section>
-          <section class="panel">
-            <div class="panel-head">
-              <h3>Publish Result</h3>
+          </details>
+          <details class="panel diagnostic-panel">
+            <summary class="diagnostic-summary">
+              <span>Publish Result</span>
               <span id="publish-status" class="status idle">idle</span>
-            </div>
+            </summary>
             <pre id="publish-result" class="code-block"></pre>
-          </section>
+          </details>
         </div>
       </main>
     </div>

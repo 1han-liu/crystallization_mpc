@@ -421,7 +421,9 @@ saveParamsButton.addEventListener("click", async () => {
   await saveParams();
 });
 
-refreshPreviewButton.addEventListener("click", async () => {
+refreshPreviewButton.addEventListener("click", async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
   await loadOperationState();
 });
 

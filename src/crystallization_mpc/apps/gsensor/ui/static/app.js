@@ -243,15 +243,6 @@ Promise.all([loadParams(), loadStatus()]).catch((error) => {
   paramSaveStatus.textContent = error.message;
 });
 
-setInterval(() => {
-  if (!state.actionInFlight && !document.hidden) {
-    loadStatus().catch((error) => {
-      statusText.textContent = error.message;
-      statusText.className = "status error";
-    });
-  }
-}, 2000);
-
 window.addEventListener("focus", () => {
   if (state.actionInFlight) {
     return;
