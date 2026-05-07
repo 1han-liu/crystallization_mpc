@@ -16,6 +16,20 @@ services:
       - rabbitmq
     restart: unless-stopped
 
+  gsensor:
+    build:
+      context: .
+      dockerfile: services/mpc/Dockerfile
+    command: ["uvicorn", "crystallization_mpc.apps.gsensor.app:web_app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    environment:
+      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
+      - RABBIT_EXCHANGE=idp.bus
+    depends_on:
+      - rabbitmq
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:3-management
     ports:

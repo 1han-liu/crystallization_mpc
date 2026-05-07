@@ -204,6 +204,13 @@ textarea {
   min-width: 160px;
 }
 
+.operation-control-actions {
+  min-width: 320px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .operation-control select,
 .operation-control button {
   width: 100%;
@@ -385,5 +392,14 @@ textarea {
     display: grid;
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .operation-item {
+    grid-template-columns: 1fr;
+  }
+
+  .operation-control,
+  .operation-control-actions {
+    min-width: 0;
   }
 }

@@ -5,6 +5,8 @@ const state = {
   operationState: {},
   target: "sigma",
   drawerOpen: false,
+  actionInFlight: false,
+  operationStateSignature: "",
 };
 
 const shell = document.querySelector(".shell");
@@ -139,9 +141,19 @@ function collectForm(form) {
   return data;
 }
 
+function cacheBustedUrl(url, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  if (method !== "GET" || !url.startsWith("/api/")) {
+    return url;
+  }
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}_=${Date.now()}`;
+}
+
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
+  const response = await fetch(cacheBustedUrl(url, options), {
     headers: { "Content-Type": "application/json" },
+    cache: "no-store",
     ...options,
   });
   const payload = await response.json();
@@ -169,8 +181,13 @@ function renderOperationControl(item) {
   control.className = "operation-control";
   const currentValue = state.operationState[item.key];
 
+  if (item.key === "G_active") {
+    return renderGrowthRateControl();
+  }
+
   if (item.kind === "list") {
     const select = document.createElement("select");
+    select.disabled = state.actionInFlight;
     (item.options || []).forEach((option) => {
       const optionEl = document.createElement("option");
       optionEl.value = option;
@@ -179,7 +196,14 @@ function renderOperationControl(item) {
       select.appendChild(optionEl);
     });
     select.addEventListener("change", async (event) => {
-      await updateOperationValue(item.key, event.target.value);
+      try {
+        state.actionInFlight = true;
+        select.disabled = true;
+        await updateOperationValue(item.key, event.target.value);
+      } finally {
+        state.actionInFlight = false;
+        await loadOperationState({ forceRender: true });
+      }
     });
     control.appendChild(select);
     return control;
@@ -187,12 +211,20 @@ function renderOperationControl(item) {
 
   const button = document.createElement("button");
   button.className = item.kind === "action_push" ? "ghost" : "primary";
+  button.disabled = state.actionInFlight;
 
   if (item.kind === "action_toggle") {
     const labels = item.labels || [item.label, item.label];
     button.textContent = currentValue ? labels[1] : labels[0];
     button.addEventListener("click", async () => {
-      await triggerOperationAction(item.key);
+      try {
+        state.actionInFlight = true;
+        button.disabled = true;
+        await triggerOperationAction(item.key);
+      } finally {
+        state.actionInFlight = false;
+        await loadOperationState({ forceRender: true });
+      }
     });
     control.appendChild(button);
     return control;
@@ -200,9 +232,55 @@ function renderOperationControl(item) {
 
   button.textContent = item.label;
   button.addEventListener("click", async () => {
-    await triggerOperationAction(item.key);
+    try {
+      state.actionInFlight = true;
+      button.disabled = true;
+      await triggerOperationAction(item.key);
+    } finally {
+      state.actionInFlight = false;
+      await loadOperationState({ forceRender: true });
+    }
   });
   control.appendChild(button);
+  return control;
+}
+
+function renderGrowthRateControl() {
+  const control = document.createElement("div");
+  control.className = "operation-control operation-control-actions";
+
+  const startButton = document.createElement("button");
+  startButton.className = "primary";
+  startButton.textContent = "Start growth rate";
+  startButton.disabled = state.actionInFlight;
+  startButton.addEventListener("click", async () => {
+    try {
+      state.actionInFlight = true;
+      startButton.disabled = true;
+      await startGrowthRateCommand();
+    } finally {
+      state.actionInFlight = false;
+      await loadOperationState({ forceRender: true });
+    }
+  });
+
+  const stopButton = document.createElement("button");
+  stopButton.className = "ghost";
+  stopButton.textContent = "Stop growth rate";
+  stopButton.disabled = state.actionInFlight;
+  stopButton.addEventListener("click", async () => {
+    try {
+      state.actionInFlight = true;
+      stopButton.disabled = true;
+      await stopGrowthRateCommand();
+    } finally {
+      state.actionInFlight = false;
+      await loadOperationState({ forceRender: true });
+    }
+  });
+
+  control.appendChild(startButton);
+  control.appendChild(stopButton);
   return control;
 }
 
@@ -229,12 +307,18 @@ function renderOperationSections() {
   });
 }
 
-async function loadOperationState() {
+async function loadOperationState({ forceRender = false } = {}) {
   const payload = await fetchJson("/api/operation/state");
   state.target = payload.target;
-  state.operationState = payload.state || {};
+  const nextOperationState = payload.state || {};
+  const nextSignature = JSON.stringify(nextOperationState);
+  const shouldRender = forceRender || nextSignature !== state.operationStateSignature;
+  state.operationState = nextOperationState;
+  state.operationStateSignature = nextSignature;
   derivedPreview.textContent = JSON.stringify(payload.preview, null, 2);
-  renderOperationSections();
+  if (shouldRender) {
+    renderOperationSections();
+  }
 }
 
 async function saveParams() {
@@ -257,7 +341,6 @@ async function updateOperationValue(key, value) {
     method: "POST",
     body: JSON.stringify({ key, value }),
   });
-  await loadOperationState();
 }
 
 async function triggerOperationAction(key) {
@@ -265,10 +348,47 @@ async function triggerOperationAction(key) {
     method: "POST",
     body: JSON.stringify({ key }),
   });
-  await loadOperationState();
 }
 
-async function publishParams() {
+async function startGrowthRateCommand() {
+  publishStatus.textContent = "starting growth rate";
+  publishStatus.className = "status idle";
+  try {
+    const payload = await fetchJson("/api/operation/growth-rate/start", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    publishResult.textContent = JSON.stringify(payload, null, 2);
+    publishStatus.textContent = "success";
+    publishStatus.className = "status success";
+  } catch (error) {
+    publishResult.textContent = error.message;
+    publishStatus.textContent = "error";
+    publishStatus.className = "status error";
+    throw error;
+  }
+}
+
+async function stopGrowthRateCommand() {
+  publishStatus.textContent = "stopping growth rate";
+  publishStatus.className = "status idle";
+  try {
+    const payload = await fetchJson("/api/operation/growth-rate/stop", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    publishResult.textContent = JSON.stringify(payload, null, 2);
+    publishStatus.textContent = "success";
+    publishStatus.className = "status success";
+  } catch (error) {
+    publishResult.textContent = error.message;
+    publishStatus.textContent = "error";
+    publishStatus.className = "status error";
+    throw error;
+  }
+}
+
+async function publishParams({ raiseOnError = false } = {}) {
   publishStatus.textContent = "sending";
   publishStatus.className = "status idle";
   try {
@@ -283,6 +403,9 @@ async function publishParams() {
     publishResult.textContent = error.message;
     publishStatus.textContent = "error";
     publishStatus.className = "status error";
+    if (raiseOnError) {
+      throw error;
+    }
   }
 }
 
@@ -309,11 +432,31 @@ publishButton.addEventListener("click", async () => {
 async function bootstrap() {
   await loadParams();
   await loadOperationMeta();
-  await loadOperationState();
+  await loadOperationState({ forceRender: true });
 }
 
 bootstrap().catch((error) => {
   publishResult.textContent = error.message;
   publishStatus.textContent = "error";
   publishStatus.className = "status error";
+});
+
+setInterval(() => {
+  if (!state.actionInFlight && !document.hidden) {
+    loadOperationState().catch((error) => {
+      publishResult.textContent = error.message;
+      publishStatus.textContent = "error";
+      publishStatus.className = "status error";
+    });
+  }
+}, 2000);
+
+window.addEventListener("focus", () => {
+  if (!state.actionInFlight) {
+    loadOperationState({ forceRender: true }).catch((error) => {
+      publishResult.textContent = error.message;
+      publishStatus.textContent = "error";
+      publishStatus.className = "status error";
+    });
+  }
 });

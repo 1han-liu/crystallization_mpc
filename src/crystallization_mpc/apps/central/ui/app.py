@@ -156,6 +156,22 @@ class CentralApp:
             )
             self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
 
+    def build_growth_rate_command(self, active: bool, seq: Optional[int] = None) -> Dict[str, Any]:
+        command_name = "growth_rate.start" if active else "growth_rate.stop"
+        return build_envelope(
+            src=ROLE,
+            dst="gsensor",
+            msg_type="command",
+            name=command_name,
+            seq=next_seq() if seq is None else seq,
+            payload={"key": "G_active", "active": active},
+        )
+
+    def publish_growth_rate_command(self, active: bool) -> Dict[str, Any]:
+        env = self.build_growth_rate_command(active)
+        self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
+        return env
+
     def load_and_publish(
         self,
         params_path: Optional[str] = None,
@@ -224,7 +240,18 @@ class CentralService:
 
     def trigger_operation_action(self, key: str) -> Dict[str, Any]:
         current = bool(self.operation_state.get(key, False))
-        if key in {"controller_active", "adaptive", "G_active", "inline_display"}:
+        if key == "G_active":
+            active = not current
+            self.publisher.publish_growth_rate_command(active)
+            self.operation_state[key] = active
+            return {
+                "triggered": True,
+                "key": key,
+                "value": active,
+                "placeholder": True,
+            }
+
+        if key in {"controller_active", "adaptive", "inline_display"}:
             self.operation_state[key] = not current
             return {
                 "triggered": True,
@@ -276,6 +303,26 @@ class CentralService:
             "published": True,
         }
 
+    def start_growth_rate(self) -> Dict[str, Any]:
+        command = self.publisher.publish_growth_rate_command(True)
+        self.operation_state["G_active"] = True
+        return {
+            "triggered": True,
+            "key": "G_active",
+            "value": True,
+            "command": command,
+        }
+
+    def stop_growth_rate(self) -> Dict[str, Any]:
+        command = self.publisher.publish_growth_rate_command(False)
+        self.operation_state["G_active"] = False
+        return {
+            "triggered": True,
+            "key": "G_active",
+            "value": False,
+            "command": command,
+        }
+
 
 service = CentralService()
 
@@ -291,6 +338,15 @@ async def lifespan(_: FastAPI):
 
 web_app = FastAPI(title="Crystallization MPC Central UI", lifespan=lifespan)
 web_app.mount("/static", StaticFiles(directory=UI_DIR / "static"), name="static")
+
+
+@web_app.middleware("http")
+async def no_cache_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @web_app.get("/", response_class=HTMLResponse)
@@ -355,6 +411,22 @@ def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
 @web_app.post("/api/operation/action")
 def trigger_operation_action(payload: OperationActionUpdate) -> Dict[str, Any]:
     return service.trigger_operation_action(payload.key)
+
+
+@web_app.post("/api/operation/growth-rate/start")
+def start_growth_rate(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
+    try:
+        return service.start_growth_rate()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@web_app.post("/api/operation/growth-rate/stop")
+def stop_growth_rate() -> Dict[str, Any]:
+    try:
+        return service.stop_growth_rate()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @web_app.post("/api/operation/publish")
