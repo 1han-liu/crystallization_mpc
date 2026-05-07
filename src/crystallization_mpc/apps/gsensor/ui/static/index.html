@@ -4,40 +4,78 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260430-growth-status6">
+    <link rel="stylesheet" href="/static/styles.css?v=20260507-param-drawer1">
   </head>
   <body>
-    <main class="content">
-      <section class="panel hero">
-        <div>
-          <p class="eyebrow">Crystallization MPC</p>
-          <h1>Gsensor UI</h1>
-          <p class="muted">Growth-rate measurement service shell.</p>
-        </div>
-        <div class="actions">
-          <span id="status-text" class="status idle">idle</span>
-          <span id="initialized-text" class="status idle">not initialized</span>
-          <button id="refresh-button" class="ghost">Refresh</button>
-        </div>
-      </section>
-
-      <section class="grid">
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Active Parameters</h2>
+    <div class="shell">
+      <aside class="sidebar" id="parameter-drawer">
+        <div class="sidebar-top">
+          <div class="brand">
+            <p class="eyebrow">Crystallization MPC</p>
+            <h1>Gsensor UI</h1>
           </div>
-          <pre id="params-block" class="code-block"></pre>
+          <button id="toggle-parameters" class="nav-link">Parameters</button>
         </div>
 
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Last Message</h2>
+        <div class="drawer-body">
+          <div class="panel drawer-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Parameter Drawer</p>
+                <h2>Gsensor Values</h2>
+              </div>
+              <div class="actions">
+                <button id="reset-params" class="ghost">Reset</button>
+                <button id="apply-params" class="primary">Apply</button>
+              </div>
+            </div>
+            <form id="params-form" class="param-form"></form>
+            <p id="param-save-status" class="save-status muted">idle</p>
           </div>
-          <pre id="message-block" class="code-block"></pre>
         </div>
-      </section>
-    </main>
+      </aside>
 
-    <script src="/static/app.js?v=20260430-growth-status6"></script>
+      <main class="content">
+        <section class="panel hero">
+          <div>
+            <p class="eyebrow">Crystallization MPC</p>
+            <h1>Gsensor UI</h1>
+            <p class="muted">Growth-rate measurement service shell.</p>
+          </div>
+          <div class="actions">
+            <span id="status-text" class="status idle">idle</span>
+            <span id="initialized-text" class="status idle">not initialized</span>
+            <button id="refresh-button" class="ghost">Refresh</button>
+          </div>
+        </section>
+
+        <section class="grid">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Active Parameters</h2>
+            </div>
+            <pre id="params-block" class="code-block"></pre>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Last Message</h2>
+            </div>
+            <pre id="message-block" class="code-block"></pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="param-field-template">
+      <label class="field">
+        <span class="field-key"></span>
+        <div class="field-badges"></div>
+        <p class="field-description"></p>
+        <textarea rows="1" class="field-input"></textarea>
+      </label>
+    </template>
+
+    <script src="/static/app.js?v=20260507-param-drawer1"></script>
   </body>
 </html>

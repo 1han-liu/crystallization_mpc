@@ -1,6 +1,7 @@
 .git/
 .venv/
 .pytest_cache/
+.pytest-tmp*/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -8,4 +9,3 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-
