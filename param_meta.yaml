@@ -72,6 +72,18 @@ params:
       visible: true
       order: 120
 
+  image_folder:
+    section: "Growth rate estimation"
+    label: "Image folder"
+    description: "Container-local image folder mounted from GSENSOR_IMAGE_HOST_DIR."
+    unit: "-"
+    kind: "path"
+    derived: false
+    publish_to: [gsensor]
+    ui:
+      visible: true
+      order: 125
+
   params_G.width:
     section: "Growth line detection"
     label: "Search window width"

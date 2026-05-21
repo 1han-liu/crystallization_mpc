@@ -22,6 +22,8 @@ services:
     command: ["uvicorn", "crystallization_mpc.apps.gsensor.app:web_app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"
+    volumes:
+      - "${GSENSOR_IMAGE_HOST_DIR}:/data/images:ro"
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus

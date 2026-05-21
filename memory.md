@@ -77,3 +77,10 @@
 - 变更文件：更新 `plan.md`、`memory.md`。
 - 验证：文档-only 改动，不运行 pytest；读取 `plan.md` 确认新增分层内容和 RabbitMQ 迁移约束一致。
 - 备注：OPC UA 相关函数和节点仅作为 MATLAB 原流程通信边界参考；当前 Python 项目迁移时仍统一映射到 RabbitMQ，不引入 OPC UA。
+
+### 2026-05-07 - Gsensor Web 初始化交互闭环
+
+- 任务：按计划将 gsensor 初始化中的 MATLAB 桌面 UI 交互改为 FastAPI session + Web canvas 点选流程，并删除不再作为运行代码的 MATLAB UI 直译文件。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/initialization.py`、`tests/test_gsensor_initialization.py`；更新 `src/crystallization_mpc/apps/gsensor/app.py`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`app.js`、`styles.css`、`params_default.yaml`、`param_meta.yaml`；删除 `choose_is_full`、`choose_corner`、`get_points`、`get_side` 以及 `annotate_point`、`make_line`、`make_arrow`、`mark_point`、`create_button`、`calc_button_position`、`initialize_DSCGR` 等 MATLAB 桌面 UI 直译运行文件。
+- 验证：`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`pytest tests\test_gsensor_initialization.py tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py` 通过，结果为 17 passed，另有 pytest cache 权限 warning。
+- 备注：保留纯算法/几何转译函数，例如 `calc_intersect`、`calc_foot_point`、`calc_normal`、`reorient_points`、`calc_kernel_mask`；Web 初始化当前完成 2D 点选、full/non-full 分支、kernel 点、corner 选择和 overlay 数据，3D 恢复、`calc_2d_3d_info`、YOLO/Hough、增长率和 RabbitMQ 发布仍等待后续 MATLAB 源码接入。端口 `8001` 在当前 Windows 环境绑定失败，前台验证 `8011` 可启动。

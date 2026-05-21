@@ -46,7 +46,7 @@ def test_image_folder_is_a_gsensor_param_with_matching_metadata():
     _shared, gsensor, _controller, _version = load_params(str(PROJECT_ROOT / "params_default.yaml"))
     meta = load_param_meta(str(PROJECT_ROOT / "param_meta.yaml"))
 
-    assert gsensor["image_folder"] == ""
+    assert gsensor["image_folder"] == "/data/images"
     assert meta["image_folder"]["publish_to"] == ["gsensor"]
     assert meta["image_folder"]["kind"] == "path"
     assert meta["image_folder"]["ui"]["visible"] is True

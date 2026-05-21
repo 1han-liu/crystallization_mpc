@@ -8,8 +8,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ from crystallization_mpc.apps.central.params import (
     load_params,
     save_params_document,
 )
+from crystallization_mpc.apps.gsensor.initialization import GsensorInitializationManager
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for
 from crystallization_mpc.messaging.schema import utc_ts
@@ -34,6 +35,32 @@ logger = logging.getLogger(__name__)
 class GsensorParamsUpdate(BaseModel):
     version: int = 1
     params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class InitializationFolderRequest(BaseModel):
+    folder: str
+    image_choice: str = "first"
+
+
+class InitializationSessionRequest(BaseModel):
+    session_id: str
+
+
+class InitializationIsFullRequest(InitializationSessionRequest):
+    is_full: bool
+
+
+class InitializationPointRequest(InitializationSessionRequest):
+    x: float
+    y: float
+
+
+class InitializationCornerRequest(InitializationSessionRequest):
+    corner: str
+
+
+class InitializationResetRequest(BaseModel):
+    session_id: str | None = None
 
 
 class GsensorService:
@@ -71,6 +98,7 @@ class GsensorService:
         self.last_params_message: Dict[str, Any] | None = None
         self.last_measurement_step_at: str | None = None
         self.measurement_step_count = 0
+        self.initialization = GsensorInitializationManager()
         self._consumer_thread: threading.Thread | None = None
         self._measurement_thread: threading.Thread | None = None
         self._measurement_stop = threading.Event()
@@ -265,14 +293,19 @@ class GsensorService:
 
     def status(self) -> Dict[str, Any]:
         current_params = self.current_params()
+        initialization_payload = self.initialization.payload()
+        initialization_status = initialization_payload.get("status") or self.initialization_status
+        if initialization_status == "not_started":
+            initialization_status = self.initialization_status
         with self._lock:
             return {
                 "role": ROLE,
                 "active": self.active,
                 "measurement_running": self._measurement_running(),
                 "initialized": self.initialized,
-                "initialization_status": self.initialization_status,
+                "initialization_status": initialization_status,
                 "initialized_at": self.initialized_at,
+                "initialization": initialization_payload,
                 "queue": self.queue_name,
                 "exchange": self.exchange,
                 "param_count": len(current_params),
@@ -339,4 +372,93 @@ def reset_params() -> Dict[str, Any]:
     return service.reset_ui_params_to_default()
 
 
-__all__ = ["GsensorParamsUpdate", "GsensorService", "web_app"]
+def _raise_http_error(exc: Exception) -> None:
+    if isinstance(exc, FileNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@web_app.post("/api/initialization/folder")
+def start_initialization(payload: InitializationFolderRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.start_folder(payload.folder, payload.image_choice)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.get("/api/initialization/image/{session_id}")
+def get_initialization_image(session_id: str) -> FileResponse:
+    try:
+        path = service.initialization.image_path(session_id)
+        if not path.exists():
+            raise FileNotFoundError(f"Image file not found: {path}")
+        return FileResponse(
+            path,
+            media_type=service.initialization.image_media_type(session_id),
+            filename=path.name,
+        )
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/is-full")
+def set_initialization_is_full(payload: InitializationIsFullRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.set_is_full(payload.session_id, payload.is_full)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.get("/api/initialization/step")
+def get_initialization_step(session_id: str | None = Query(default=None)) -> Dict[str, Any]:
+    try:
+        return service.initialization.payload(session_id)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/point")
+def submit_initialization_point(payload: InitializationPointRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.submit_point(payload.session_id, payload.x, payload.y)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/corner")
+def choose_initialization_corner(payload: InitializationCornerRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.choose_corner(payload.session_id, payload.corner)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/undo")
+def undo_initialization(payload: InitializationSessionRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.undo(payload.session_id)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/reset")
+def reset_initialization(payload: InitializationResetRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.reset(payload.session_id)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+__all__ = [
+    "GsensorParamsUpdate",
+    "GsensorService",
+    "InitializationCornerRequest",
+    "InitializationFolderRequest",
+    "InitializationIsFullRequest",
+    "InitializationPointRequest",
+    "InitializationResetRequest",
+    "InitializationSessionRequest",
+    "web_app",
+]

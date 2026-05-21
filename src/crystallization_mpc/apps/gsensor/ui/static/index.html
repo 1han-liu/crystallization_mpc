@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260507-param-drawer1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260507-init1">
   </head>
   <body>
     <div class="shell">
@@ -40,13 +40,74 @@
           <div>
             <p class="eyebrow">Crystallization MPC</p>
             <h1>Gsensor UI</h1>
-            <p class="muted">Growth-rate measurement service shell.</p>
+            <p class="muted">Initialization and growth-rate measurement service shell.</p>
           </div>
           <div class="actions">
             <span id="status-text" class="status idle">idle</span>
             <span id="initialized-text" class="status idle">not initialized</span>
             <button id="refresh-button" class="ghost">Refresh</button>
           </div>
+        </section>
+
+        <section class="panel initialization-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Initialization</p>
+              <h2>Image Marking</h2>
+            </div>
+            <div class="actions">
+              <button id="undo-init" class="ghost" disabled>Undo</button>
+              <button id="reset-init" class="ghost" disabled>Reset</button>
+            </div>
+          </div>
+
+          <div class="folder-row">
+            <label class="folder-field">
+              <span>Folder</span>
+              <input id="image-folder-input" type="text" placeholder="C:\path\to\images">
+            </label>
+            <label class="folder-field compact">
+              <span>Image</span>
+              <select id="image-choice">
+                <option value="first">First</option>
+                <option value="latest">Latest</option>
+              </select>
+            </label>
+            <button id="load-folder" class="primary">Load</button>
+          </div>
+
+          <div class="init-layout">
+            <div class="image-stage">
+              <canvas id="init-canvas"></canvas>
+              <p id="canvas-empty" class="canvas-empty muted">No image loaded</p>
+            </div>
+
+            <aside class="init-side">
+              <div class="init-status">
+                <p class="eyebrow">Step</p>
+                <h3 id="init-step-title">Not started</h3>
+                <p id="init-step-prompt" class="muted">Load an image folder to begin.</p>
+              </div>
+
+              <div class="segmented" id="full-mode-controls">
+                <button data-full-mode="true" class="ghost" disabled>Yes</button>
+                <button data-full-mode="false" class="ghost" disabled>No</button>
+              </div>
+
+              <div class="segmented" id="corner-controls">
+                <button data-corner="A" class="ghost" disabled>A</button>
+                <button data-corner="B" class="ghost" disabled>B</button>
+                <button data-corner="C" class="ghost" disabled>C</button>
+              </div>
+
+              <div class="point-list-wrap">
+                <p class="eyebrow">Points</p>
+                <ol id="point-list" class="point-list"></ol>
+              </div>
+            </aside>
+          </div>
+
+          <p id="init-save-status" class="save-status muted">idle</p>
         </section>
 
         <section class="grid diagnostics-grid">
@@ -76,6 +137,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260507-param-drawer1"></script>
+    <script src="/static/app.js?v=20260507-init1"></script>
   </body>
 </html>

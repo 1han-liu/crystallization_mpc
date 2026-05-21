@@ -11,7 +11,18 @@
 - 实施步骤：按 MATLAB 函数依赖逐步迁移主循环、图像读取/标定、YOLO 分割、Hough 边界检测、生长速率计算、EKF 滤波和 RabbitMQ 发布。
 - 测试计划：先为纯计算和状态转换函数补单元测试；再用样例图像或合成检测结果验证边界位移、生长速率和 EKF 输出；最后验证 gsensor -> controller RabbitMQ 消息。
 - 假设/风险：参数和状态结构以 `params_default.yaml` 中 `shared` 与 `gsensor` 参数为基础，并叠加 central 下发或 Gsensor UI 写入的运行时参数；具体消息 payload 需在看到 MATLAB 输出字段后锁定。
-- 状态：待执行，等待 MATLAB 源码。
+- 状态：执行中；Web 初始化 UI/API 闭环已完成，3D 恢复、每帧检测、增长率/EKF 和 RabbitMQ 发布仍等待后续 MATLAB 源码接入。
+
+#### 当前完成情况
+
+- 已完成：Gsensor Web 初始化 session 与 API，支持服务端图片文件夹扫描、first/latest 图片选择、full/non-full 选择、canvas 原图坐标点选、Undo/Reset、corner A/B/C 选择和 overlay 数据返回。
+- 已完成：初始化阶段的 2D 几何推进已接入纯计算函数，包括 `calc_intersect`、`calc_foot_point`、`calc_normal`、`reorient_points`；full mode 可由 opposite/adjacent 线求 `u/v/w`，non-full mode 可由 foot point 求 `u/v` 并使用人工 `w`。
+- 已完成：删除 MATLAB 桌面 UI 原语直译运行文件，不再保留 `figure/uiwait/getCursorInfo/uicontrol/pause` 等运行路径；保留纯算法/几何转译函数。
+- 已完成：新增 `image_folder` gsensor 参数与元数据，供参数抽屉和初始化入口共享。
+- 已验证：`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`pytest tests\test_gsensor_initialization.py tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py` 通过，17 passed。
+- 未完成：`recover_3d_all`、`recover_3d`、`show_3d`、`calc_2d_3d_info` 尚未迁移，初始化流程目前在 `ready_for_3d` 停住，不伪造 3D 结果。
+- 未完成：`measure_growth_rate -> update_uv_struct -> update_line -> update_EKF_G` 每帧检测链路、YOLO/edge + Hough、增长率/EKF 输出和 gsensor -> controller RabbitMQ 发布尚未接入。
+- 未完成：`gsensor_measurement` Influx measurement、检测失败/停止事件和测量结果持久化尚未实现。
 
 #### Gsensor 业务流程核心分层
 
