@@ -20,8 +20,6 @@ params:
     - '%d'
     - '%05d'
     - '%d'
-  - key: image_folder
-    default: /data/images
   - key: params_G.width
     default: 100
   - key: params_G.ratio

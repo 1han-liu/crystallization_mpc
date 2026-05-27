@@ -14,6 +14,7 @@ import numpy as np
 from crystallization_mpc.apps.gsensor.morphs.calc_foot_point import calc_foot_point
 from crystallization_mpc.apps.gsensor.morphs.calc_intersect import calc_intersect
 from crystallization_mpc.apps.gsensor.morphs.calc_normal import calc_normal
+from crystallization_mpc.apps.gsensor.morphs.recover_3d_all import recover_3d_all
 from crystallization_mpc.apps.gsensor.utils.reorient_points import reorient_points
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
@@ -31,6 +32,9 @@ class InitializationSession:
     image_height: int | None = None
     is_full: bool | None = None
     corner: str | None = None
+    candidates_3d: list[dict[str, Any]] = field(default_factory=list)
+    selected_3d_choice: int | None = None
+    recovered_3d: dict[str, Any] | None = None
     points: dict[str, list[float]] = field(default_factory=dict)
     point_history: list[str] = field(default_factory=list)
     status: str = "awaiting_is_full"
@@ -82,6 +86,9 @@ class GsensorInitializationManager:
                 "points": {},
                 "derived": {},
                 "overlays": [],
+                "candidates_3d": [],
+                "selected_3d_choice": None,
+                "recovered_3d": None,
                 "can_undo": False,
             }
         derived = self._derived(session)
@@ -100,6 +107,9 @@ class GsensorInitializationManager:
             "points": {key: point[:2] for key, point in session.points.items()},
             "derived": {key: point[:2] for key, point in derived["points"].items()},
             "overlays": self._overlays(session, derived),
+            "candidates_3d": session.candidates_3d,
+            "selected_3d_choice": session.selected_3d_choice,
+            "recovered_3d": session.recovered_3d,
             "can_undo": bool(session.point_history or session.corner is not None),
         }
 
@@ -115,6 +125,9 @@ class GsensorInitializationManager:
         session = self._get_session(session_id)
         session.is_full = bool(is_full)
         session.corner = None
+        session.candidates_3d.clear()
+        session.selected_3d_choice = None
+        session.recovered_3d = None
         session.points.clear()
         session.point_history.clear()
         session.status = "marking_points"
@@ -146,19 +159,68 @@ class GsensorInitializationManager:
 
     def choose_corner(self, session_id: str, corner: str) -> dict[str, Any]:
         session = self._get_session(session_id)
-        if session.status not in {"ready_for_corner", "ready_for_3d"}:
+        if session.status not in {"ready_for_corner", "ready_for_3d_choice", "ready_for_3d"}:
             raise ValueError("Complete 2D point marking before choosing a corner.")
         corner = corner.upper()
         if corner not in CORNER_CHOICES:
             raise ValueError("corner must be A, B, or C.")
         session.corner = corner
-        session.status = "ready_for_3d"
+        session.candidates_3d = self._generate_3d_candidates(session)
+        session.selected_3d_choice = None
+        session.recovered_3d = None
+        session.status = "ready_for_3d_choice"
         return self.payload(session.session_id)
+
+    def select_3d_choice(self, session_id: str, choice: int) -> dict[str, Any]:
+        session = self._get_session(session_id)
+        if session.status not in {"ready_for_3d_choice", "ready_for_3d"}:
+            raise ValueError("Choose a corner before selecting a 3D candidate.")
+        for candidate in session.candidates_3d:
+            if candidate["choice"] == choice:
+                session.selected_3d_choice = choice
+                session.recovered_3d = {
+                    "M": candidate["M"],
+                    "W": candidate["W"],
+                    "U": candidate["U"],
+                    "V": candidate["V"],
+                    "show_3d": candidate.get("show_3d"),
+                }
+                session.status = "ready_for_3d"
+                return self.payload(session.session_id)
+        raise ValueError(f"Unknown 3D choice: {choice}")
+
+    def _generate_3d_candidates(self, session: InitializationSession) -> list[dict[str, Any]]:
+        derived = self._derived(session)
+        points = derived["points"]
+        missing = [key for key in ("m", "w", "u", "v") if key not in points]
+        if missing:
+            raise ValueError(
+                "Initialization geometry is incomplete for 3D recovery: "
+                + ", ".join(missing)
+            )
+        candidates = recover_3d_all(
+            None,
+            points["m"],
+            points["w"],
+            points["u"],
+            points["v"],
+            session.corner,
+            session.is_full,
+        )
+        return [candidate.as_dict() for candidate in candidates]
 
     def undo(self, session_id: str) -> dict[str, Any]:
         session = self._get_session(session_id)
+        if session.selected_3d_choice is not None or session.recovered_3d is not None:
+            session.selected_3d_choice = None
+            session.recovered_3d = None
+            session.status = "ready_for_3d_choice"
+            return self.payload(session.session_id)
         if session.corner is not None:
             session.corner = None
+            session.candidates_3d.clear()
+            session.selected_3d_choice = None
+            session.recovered_3d = None
             session.status = "ready_for_corner"
             return self.payload(session.session_id)
         if session.point_history:
@@ -168,15 +230,24 @@ class GsensorInitializationManager:
         return self.payload(session.session_id)
 
     def reset(self, session_id: str | None = None) -> dict[str, Any]:
-        session = self._get_session(session_id, required=False)
-        if session is not None:
-            self.sessions.pop(session.session_id, None)
-            if self.active_session_id == session.session_id:
-                self.active_session_id = None
-        elif session_id is None and self.active_session_id:
+        if session_id is None:
+            # No session id means service-level cleanup rather than the UI's
+            # in-session reset action.
             self.sessions.pop(self.active_session_id, None)
             self.active_session_id = None
-        return self.payload(None)
+            return self.payload(None)
+
+        session = self._get_session(session_id)
+        session.is_full = None
+        session.corner = None
+        session.candidates_3d.clear()
+        session.selected_3d_choice = None
+        session.recovered_3d = None
+        session.points.clear()
+        session.point_history.clear()
+        self.active_session_id = session.session_id
+        self._update_status(session)
+        return self.payload(session.session_id)
 
     def _get_session(
         self,
@@ -245,6 +316,13 @@ class GsensorInitializationManager:
                 "prompt": "Choose corner A, B, or C.",
                 "choices": sorted(CORNER_CHOICES),
             }
+        if session.selected_3d_choice is None:
+            return {
+                "type": "3d_choice",
+                "key": "3d_choice",
+                "prompt": "Choose a 3D candidate.",
+                "choices": [candidate["choice"] for candidate in session.candidates_3d],
+            }
         return None
 
     def _point_steps(self, session: InitializationSession) -> list[dict[str, str]]:
@@ -293,6 +371,8 @@ class GsensorInitializationManager:
             session.status = "marking_points"
         elif session.corner is None:
             session.status = "ready_for_corner"
+        elif session.selected_3d_choice is None:
+            session.status = "ready_for_3d_choice"
         else:
             session.status = "ready_for_3d"
 

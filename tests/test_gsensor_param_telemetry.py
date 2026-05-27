@@ -42,14 +42,12 @@ def test_gsensor_param_records_use_default_yaml_keys_and_scopes():
     assert records_by_key["ptr_format"].param_key == "ptr_format"
 
 
-def test_image_folder_is_a_gsensor_param_with_matching_metadata():
+def test_image_folder_is_not_a_published_gsensor_param():
     _shared, gsensor, _controller, _version = load_params(str(PROJECT_ROOT / "params_default.yaml"))
     meta = load_param_meta(str(PROJECT_ROOT / "param_meta.yaml"))
 
-    assert gsensor["image_folder"] == "/data/images"
-    assert meta["image_folder"]["publish_to"] == ["gsensor"]
-    assert meta["image_folder"]["kind"] == "path"
-    assert meta["image_folder"]["ui"]["visible"] is True
+    assert "image_folder" not in gsensor
+    assert "image_folder" not in meta
 
 
 def test_gsensor_param_record_serializes_values_by_type():

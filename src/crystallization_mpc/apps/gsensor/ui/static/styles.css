@@ -160,7 +160,7 @@ button:disabled {
 
 .folder-row {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 140px auto;
+  grid-template-columns: minmax(220px, 1fr) 140px auto;
   gap: 10px;
   align-items: end;
 }
@@ -194,6 +194,12 @@ button:disabled {
   align-items: start;
 }
 
+.init-main {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
 .image-stage {
   position: relative;
   min-height: 420px;
@@ -224,6 +230,47 @@ button:disabled {
   display: none;
 }
 
+.three-d-preview {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.three-d-preview[hidden] {
+  display: none;
+}
+
+.three-d-preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.three-d-preview h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+#three-d-canvas {
+  display: block;
+  width: 100%;
+  height: 320px;
+  min-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #ffffff;
+  cursor: grab;
+}
+
+#three-d-canvas.is-dragging {
+  cursor: grabbing;
+}
+
 .init-side {
   display: grid;
   gap: 14px;
@@ -249,6 +296,27 @@ button:disabled {
 
 #full-mode-controls {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.candidate-controls-wrap {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.candidate-controls-wrap[hidden] {
+  display: none;
+}
+
+.candidate-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.candidate-grid button {
+  justify-content: center;
+  min-height: 36px;
+  overflow-wrap: anywhere;
 }
 
 .point-list-wrap {

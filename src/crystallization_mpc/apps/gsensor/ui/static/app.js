@@ -11,22 +11,31 @@ const applyParamsButton = document.querySelector("#apply-params");
 const resetParamsButton = document.querySelector("#reset-params");
 const paramSaveStatus = document.querySelector("#param-save-status");
 
-const imageFolderInput = document.querySelector("#image-folder-input");
+const imageFolderPicker = document.querySelector("#image-folder-picker");
 const imageChoice = document.querySelector("#image-choice");
 const loadFolderButton = document.querySelector("#load-folder");
 const undoInitButton = document.querySelector("#undo-init");
 const resetInitButton = document.querySelector("#reset-init");
 const initCanvas = document.querySelector("#init-canvas");
 const canvasEmpty = document.querySelector("#canvas-empty");
+const threeDPreview = document.querySelector("#three-d-preview");
+const threeDPreviewTitle = document.querySelector("#three-d-preview-title");
+const threeDCanvas = document.querySelector("#three-d-canvas");
+const reset3DViewButton = document.querySelector("#reset-3d-view");
 const initStepTitle = document.querySelector("#init-step-title");
 const initStepPrompt = document.querySelector("#init-step-prompt");
 const fullModeControls = document.querySelector("#full-mode-controls");
 const cornerControls = document.querySelector("#corner-controls");
+const candidateControlsWrap = document.querySelector("#candidate-controls-wrap");
+const candidateControls = document.querySelector("#candidate-controls");
 const pointList = document.querySelector("#point-list");
 const initSaveStatus = document.querySelector("#init-save-status");
 
 const initContext = initCanvas.getContext("2d");
+const threeDContext = threeDCanvas.getContext("2d");
 const initImage = new Image();
+const supportedImageExtensions = new Set([".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]);
+const default3DView = { yaw: -0.65, pitch: 0.55 };
 
 const state = {
   paramsVersion: 1,
@@ -36,6 +45,14 @@ const state = {
   initialization: null,
   currentImageKey: null,
   imageReady: false,
+  threeDView: {
+    yaw: default3DView.yaw,
+    pitch: default3DView.pitch,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+    patchKey: null,
+  },
 };
 
 function setDrawerOpen(open) {
@@ -82,6 +99,46 @@ async function fetchJson(url, options = {}) {
     throw new Error(payload.detail || "Request failed");
   }
   return payload;
+}
+
+function imageFilesFromPicker() {
+  return Array.from(imageFolderPicker.files || []).filter((file) => {
+    const lowerName = file.name.toLowerCase();
+    const dotIndex = lowerName.lastIndexOf(".");
+    const extension = dotIndex >= 0 ? lowerName.slice(dotIndex) : "";
+    return supportedImageExtensions.has(extension);
+  });
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",", 2)[1] : result);
+    });
+    reader.addEventListener("error", () => {
+      reject(reader.error || new Error(`Could not read ${file.name}`));
+    });
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadSelectedImageFolder(files) {
+  const payloadFiles = [];
+  for (const file of files) {
+    payloadFiles.push({
+      filename: file.webkitRelativePath || file.name,
+      content_base64: await readFileAsBase64(file),
+    });
+  }
+  return fetchJson("/api/initialization/upload-folder", {
+    method: "POST",
+    body: JSON.stringify({
+      image_choice: imageChoice.value,
+      files: payloadFiles,
+    }),
+  });
 }
 
 function renderForm(params) {
@@ -187,9 +244,6 @@ async function loadParams() {
   state.paramsVersion = payload.version || 1;
   state.paramMeta = payload.meta || {};
   renderForm(payload.params || {});
-  if (payload.params?.image_folder && !imageFolderInput.value) {
-    imageFolderInput.value = payload.params.image_folder;
-  }
   paramSaveStatus.textContent = `loaded from ${payload.source_file || "server"}`;
   return payload;
 }
@@ -225,8 +279,11 @@ function renderInitialization(payload) {
   state.initialization = payload;
   const hasSession = Boolean(payload?.session_id);
   const step = payload?.current_step || null;
+  const selected3DChoice = payload?.selected_3d_choice;
   initStepTitle.textContent = hasSession ? payload.status : "Not started";
-  initStepPrompt.textContent = step?.prompt || (hasSession ? "Waiting for the next initialization step." : "Load an image folder to begin.");
+  initStepPrompt.textContent = step?.prompt || (selected3DChoice
+    ? `Selected 3D choice ${selected3DChoice}.`
+    : (hasSession ? "Waiting for the next initialization step." : "Load an image folder to begin."));
   initSaveStatus.textContent = hasSession
     ? `${payload.selected_image || ""}`
     : "idle";
@@ -245,9 +302,27 @@ function renderInitialization(payload) {
     button.classList.toggle("selected", payload?.corner === button.dataset.corner);
   });
 
+  renderCandidateControls(payload);
   renderPointList(payload);
   maybeLoadInitializationImage(payload);
   drawInitialization();
+  drawSelected3DPreview();
+}
+
+function renderCandidateControls(payload) {
+  candidateControls.innerHTML = "";
+  const candidates = payload?.candidates_3d || [];
+  candidateControlsWrap.hidden = candidates.length === 0;
+  candidates.forEach((candidate) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost";
+    button.dataset.choice = String(candidate.choice);
+    button.textContent = candidate.label || `Choice ${candidate.choice}`;
+    button.disabled = !["ready_for_3d_choice", "ready_for_3d"].includes(payload?.status);
+    button.classList.toggle("selected", payload?.selected_3d_choice === candidate.choice);
+    candidateControls.appendChild(button);
+  });
 }
 
 function renderPointList(payload) {
@@ -317,6 +392,298 @@ function drawInitialization() {
       drawPoint(overlay);
     }
   });
+}
+
+function selected3DPatch(payload) {
+  if (payload?.recovered_3d?.show_3d) {
+    return payload.recovered_3d.show_3d;
+  }
+  if (payload?.selected_3d_choice == null) {
+    return null;
+  }
+  const candidate = (payload?.candidates_3d || []).find((item) => item.choice === payload.selected_3d_choice);
+  return candidate?.show_3d || null;
+}
+
+function drawSelected3DPreview() {
+  const patch = selected3DPatch(state.initialization);
+  const choice = state.initialization?.selected_3d_choice;
+  threeDPreview.hidden = !patch;
+  reset3DViewButton.disabled = !patch;
+  if (!patch) {
+    clear3DPreview();
+    return;
+  }
+  threeDPreviewTitle.textContent = choice ? `Choice ${choice}` : "Selected candidate";
+  applyInitial3DView(patch);
+  draw3DPreview(patch);
+}
+
+function clear3DPreview() {
+  threeDContext.clearRect(0, 0, threeDCanvas.width || 1, threeDCanvas.height || 1);
+}
+
+function draw3DPreview(patch) {
+  const vertices = Array.isArray(patch?.vertices) ? patch.vertices : [];
+  const faces = Array.isArray(patch?.faces) ? patch.faces : [];
+  if (!vertices.length || !faces.length) {
+    clear3DPreview();
+    return;
+  }
+  size3DCanvas();
+  const transformed = vertices.map((vertex) => transform3DVertex(vertex));
+  const projected = project3DVertices(transformed, threeDCanvas.width, threeDCanvas.height);
+  const alpha = Math.max(0, Math.min(Number(patch.face_alpha) || 0.16, 1));
+  const sortedFaces = faces.slice().sort((left, right) => averageFaceZ(transformed, right) - averageFaceZ(transformed, left));
+
+  threeDContext.clearRect(0, 0, threeDCanvas.width, threeDCanvas.height);
+  draw3DAxes(projected.scale, threeDCanvas.width, threeDCanvas.height);
+  threeDContext.save();
+  sortedFaces.forEach((face) => {
+    const points = patchFaceVertices(projected.points, face);
+    if (points.length < 3) {
+      return;
+    }
+    const shade = faceShade(transformed, face);
+    threeDContext.fillStyle = `rgba(${shade}, 38, 38, ${alpha})`;
+    threeDContext.strokeStyle = "rgba(120, 20, 20, 0.72)";
+    threeDContext.lineWidth = 1.25;
+    threeDContext.beginPath();
+    threeDContext.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach((point) => threeDContext.lineTo(point.x, point.y));
+    threeDContext.closePath();
+    threeDContext.fill();
+    threeDContext.stroke();
+  });
+  draw3DVertices(projected.points);
+  threeDContext.restore();
+}
+
+function applyInitial3DView(patch) {
+  const key = JSON.stringify(patch?.vertices || []);
+  if (state.threeDView.patchKey === key) {
+    return;
+  }
+  const view = bestInitial3DView(patch);
+  state.threeDView.yaw = view.yaw;
+  state.threeDView.pitch = view.pitch;
+  state.threeDView.patchKey = key;
+}
+
+function bestInitial3DView(patch) {
+  const vertices = Array.isArray(patch?.vertices) ? patch.vertices : [];
+  if (vertices.length < 4) {
+    return { ...default3DView };
+  }
+  let best = { ...default3DView };
+  let bestScore = -Infinity;
+  const pitchValues = [-0.95, -0.7, -0.45, 0.45, 0.7, 0.95];
+  for (let yawIndex = 0; yawIndex < 24; yawIndex += 1) {
+    const yaw = (Math.PI * 2 * yawIndex) / 24;
+    pitchValues.forEach((pitch) => {
+      const points = vertices.map((vertex) => transform3DVertexWithView(vertex, { yaw, pitch }));
+      const score = projectedSpreadScore(points);
+      if (score > bestScore) {
+        bestScore = score;
+        best = { yaw, pitch };
+      }
+    });
+  }
+  return best;
+}
+
+function size3DCanvas() {
+  const rect = threeDCanvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(320, Math.floor(rect.width * scale));
+  const height = Math.max(240, Math.floor(rect.height * scale));
+  if (threeDCanvas.width !== width || threeDCanvas.height !== height) {
+    threeDCanvas.width = width;
+    threeDCanvas.height = height;
+  }
+}
+
+function transform3DVertex(vertex) {
+  return transform3DVertexWithView(vertex, state.threeDView);
+}
+
+function transform3DVertexWithView(vertex, view) {
+  const values = Array.isArray(vertex) ? vertex : [];
+  const x = Number(values[0]) || 0;
+  const y = -(Number(values[1]) || 0);
+  const z = Number(values[2]) || 0;
+  const cosYaw = Math.cos(view.yaw);
+  const sinYaw = Math.sin(view.yaw);
+  const cosPitch = Math.cos(view.pitch);
+  const sinPitch = Math.sin(view.pitch);
+  const yawX = x * cosYaw + z * sinYaw;
+  const yawZ = -x * sinYaw + z * cosYaw;
+  return {
+    x: yawX,
+    y: y * cosPitch - yawZ * sinPitch,
+    z: y * sinPitch + yawZ * cosPitch,
+  };
+}
+
+function projectedSpreadScore(points) {
+  const bounds = points.reduce((acc, point) => ({
+    minX: Math.min(acc.minX, point.x),
+    maxX: Math.max(acc.maxX, point.x),
+    minY: Math.min(acc.minY, point.y),
+    maxY: Math.max(acc.maxY, point.y),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  const area = Math.max(bounds.maxX - bounds.minX, 1) * Math.max(bounds.maxY - bounds.minY, 1);
+  let minDistance = Infinity;
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      minDistance = Math.min(minDistance, Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y));
+    }
+  }
+  return area + (Number.isFinite(minDistance) ? minDistance * 20 : 0);
+}
+
+function project3DVertices(points, width, height) {
+  const bounds = points.reduce((acc, point) => ({
+    minX: Math.min(acc.minX, point.x),
+    maxX: Math.max(acc.maxX, point.x),
+    minY: Math.min(acc.minY, point.y),
+    maxY: Math.max(acc.maxY, point.y),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  const rangeX = Math.max(bounds.maxX - bounds.minX, 1);
+  const rangeY = Math.max(bounds.maxY - bounds.minY, 1);
+  const scale = Math.min(width * 0.72 / rangeX, height * 0.72 / rangeY);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const sourceCenterX = (bounds.minX + bounds.maxX) / 2;
+  const sourceCenterY = (bounds.minY + bounds.maxY) / 2;
+  return {
+    scale,
+    points: points.map((point) => ({
+      x: centerX + (point.x - sourceCenterX) * scale,
+      y: centerY - (point.y - sourceCenterY) * scale,
+      z: point.z,
+    })),
+  };
+}
+
+function patchFaceVertices(points, face) {
+  if (!Array.isArray(face)) {
+    return [];
+  }
+  const indexOffset = face.some((index) => Number(index) === 0) ? 0 : 1;
+  return face
+    .map((index) => points[Number(index) - indexOffset])
+    .filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+}
+
+function averageFaceZ(points, face) {
+  const facePoints = patchFaceVertices(points, face);
+  if (!facePoints.length) {
+    return 0;
+  }
+  return facePoints.reduce((sum, point) => sum + point.z, 0) / facePoints.length;
+}
+
+function faceShade(points, face) {
+  const facePoints = patchFaceVertices(points, face);
+  if (facePoints.length < 3) {
+    return 200;
+  }
+  const a = vectorBetween(facePoints[0], facePoints[1]);
+  const b = vectorBetween(facePoints[0], facePoints[2]);
+  const normal = normalizeVector(crossProduct(a, b));
+  const light = normalizeVector({ x: -0.2, y: 0.4, z: 1 });
+  const brightness = Math.max(0.25, Math.abs(dotProduct(normal, light)));
+  return Math.round(145 + brightness * 80);
+}
+
+function draw3DVertices(points) {
+  const labels = ["M", "W", "U", "V"];
+  threeDContext.font = "12px Arial";
+  points.forEach((point, index) => {
+    threeDContext.beginPath();
+    threeDContext.fillStyle = "#111111";
+    threeDContext.arc(point.x, point.y, 4, 0, Math.PI * 2);
+    threeDContext.fill();
+    threeDContext.fillText(labels[index] || String(index + 1), point.x + 7, point.y - 7);
+  });
+}
+
+function draw3DAxes(scale, width, height) {
+  const origin = { x: width - 84, y: height - 54, z: 0 };
+  const axisLength = Math.max(36, Math.min(70, scale * 0.08));
+  const axes = [
+    { label: "x", color: "#1f5fbf", point: transform3DVertex([axisLength, 0, 0]) },
+    { label: "y", color: "#1f7a4d", point: transform3DVertex([0, axisLength, 0]) },
+    { label: "z", color: "#805ad5", point: transform3DVertex([0, 0, axisLength]) },
+  ];
+  threeDContext.save();
+  threeDContext.font = "12px Arial";
+  axes.forEach((axis) => {
+    threeDContext.strokeStyle = axis.color;
+    threeDContext.fillStyle = axis.color;
+    threeDContext.lineWidth = 1.5;
+    threeDContext.beginPath();
+    threeDContext.moveTo(origin.x, origin.y);
+    threeDContext.lineTo(origin.x + axis.point.x, origin.y - axis.point.y);
+    threeDContext.stroke();
+    threeDContext.fillText(axis.label, origin.x + axis.point.x + 4, origin.y - axis.point.y);
+  });
+  threeDContext.restore();
+}
+
+function vectorBetween(left, right) {
+  return {
+    x: right.x - left.x,
+    y: right.y - left.y,
+    z: right.z - left.z,
+  };
+}
+
+function crossProduct(left, right) {
+  return {
+    x: left.y * right.z - left.z * right.y,
+    y: left.z * right.x - left.x * right.z,
+    z: left.x * right.y - left.y * right.x,
+  };
+}
+
+function dotProduct(left, right) {
+  return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+function normalizeVector(vector) {
+  const length = Math.hypot(vector.x, vector.y, vector.z) || 1;
+  return {
+    x: vector.x / length,
+    y: vector.y / length,
+    z: vector.z / length,
+  };
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(value, max));
+}
+
+function update3DViewFromPointer(event) {
+  if (!state.threeDView.dragging) {
+    return;
+  }
+  const dx = event.clientX - state.threeDView.lastX;
+  const dy = event.clientY - state.threeDView.lastY;
+  state.threeDView.lastX = event.clientX;
+  state.threeDView.lastY = event.clientY;
+  state.threeDView.yaw += dx * 0.01;
+  state.threeDView.pitch = clamp(state.threeDView.pitch + dy * 0.01, -1.25, 1.25);
+  drawSelected3DPreview();
+}
+
+function reset3DView() {
+  const patch = selected3DPatch(state.initialization);
+  const view = bestInitial3DView(patch);
+  state.threeDView.yaw = view.yaw;
+  state.threeDView.pitch = view.pitch;
+  drawSelected3DPreview();
 }
 
 function overlayColor(role) {
@@ -446,20 +813,15 @@ resetParamsButton.addEventListener("click", async () => {
 });
 
 loadFolderButton.addEventListener("click", async () => {
-  const folder = imageFolderInput.value.trim();
-  if (!folder) {
-    initSaveStatus.textContent = "folder is required";
+  const selectedFiles = imageFilesFromPicker();
+  if (selectedFiles.length === 0) {
+    initSaveStatus.textContent = "choose a local image folder";
     return;
   }
-  initSaveStatus.textContent = "loading";
+
+  initSaveStatus.textContent = `uploading ${selectedFiles.length} images`;
   try {
-    const payload = await fetchJson("/api/initialization/folder", {
-      method: "POST",
-      body: JSON.stringify({
-        folder,
-        image_choice: imageChoice.value,
-      }),
-    });
+    const payload = await uploadSelectedImageFolder(selectedFiles);
     renderInitialization(payload);
     await loadStatus();
   } catch (error) {
@@ -497,6 +859,49 @@ cornerControls.addEventListener("click", async (event) => {
   renderInitialization(payload);
 });
 
+candidateControls.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-choice]");
+  if (!button || !state.initialization?.session_id) {
+    return;
+  }
+  const payload = await fetchJson("/api/initialization/3d-choice", {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: state.initialization.session_id,
+      choice: Number(button.dataset.choice),
+    }),
+  });
+  renderInitialization(payload);
+});
+
+threeDCanvas.addEventListener("pointerdown", (event) => {
+  if (!selected3DPatch(state.initialization)) {
+    return;
+  }
+  state.threeDView.dragging = true;
+  state.threeDView.lastX = event.clientX;
+  state.threeDView.lastY = event.clientY;
+  threeDCanvas.classList.add("is-dragging");
+  threeDCanvas.setPointerCapture(event.pointerId);
+});
+
+threeDCanvas.addEventListener("pointermove", update3DViewFromPointer);
+
+threeDCanvas.addEventListener("pointerup", (event) => {
+  state.threeDView.dragging = false;
+  threeDCanvas.classList.remove("is-dragging");
+  if (threeDCanvas.hasPointerCapture(event.pointerId)) {
+    threeDCanvas.releasePointerCapture(event.pointerId);
+  }
+});
+
+threeDCanvas.addEventListener("pointercancel", () => {
+  state.threeDView.dragging = false;
+  threeDCanvas.classList.remove("is-dragging");
+});
+
+reset3DViewButton.addEventListener("click", reset3DView);
+
 undoInitButton.addEventListener("click", async () => {
   if (!state.initialization?.session_id) {
     return;
@@ -523,7 +928,10 @@ initCanvas.addEventListener("click", (event) => {
   });
 });
 
-window.addEventListener("resize", drawInitialization);
+window.addEventListener("resize", () => {
+  drawInitialization();
+  drawSelected3DPreview();
+});
 
 Promise.all([loadParams(), loadStatus()]).catch((error) => {
   statusText.textContent = error.message;

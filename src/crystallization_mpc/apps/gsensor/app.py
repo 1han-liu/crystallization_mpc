@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
@@ -18,7 +22,10 @@ from crystallization_mpc.apps.central.params import (
     load_params,
     save_params_document,
 )
-from crystallization_mpc.apps.gsensor.initialization import GsensorInitializationManager
+from crystallization_mpc.apps.gsensor.initialization import (
+    IMAGE_EXTENSIONS,
+    GsensorInitializationManager,
+)
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for
 from crystallization_mpc.messaging.schema import utc_ts
@@ -29,6 +36,7 @@ PROJECT_ROOT = UI_DIR.parents[4]
 DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
 DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
+DEFAULT_UPLOAD_ROOT = PROJECT_ROOT / ".runtime" / "gsensor_uploads"
 logger = logging.getLogger(__name__)
 
 
@@ -37,9 +45,14 @@ class GsensorParamsUpdate(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-class InitializationFolderRequest(BaseModel):
-    folder: str
+class InitializationUploadedFile(BaseModel):
+    filename: str
+    content_base64: str
+
+
+class InitializationUploadFolderRequest(BaseModel):
     image_choice: str = "first"
+    files: list[InitializationUploadedFile] = Field(default_factory=list)
 
 
 class InitializationSessionRequest(BaseModel):
@@ -59,6 +72,10 @@ class InitializationCornerRequest(InitializationSessionRequest):
     corner: str
 
 
+class Initialization3DChoiceRequest(InitializationSessionRequest):
+    choice: int
+
+
 class InitializationResetRequest(BaseModel):
     session_id: str | None = None
 
@@ -72,6 +89,7 @@ class GsensorService:
         default_params_path: Optional[str | Path] = None,
         runtime_params_path: Optional[str | Path] = None,
         param_meta_path: Optional[str | Path] = None,
+        upload_root_path: Optional[str | Path] = None,
     ) -> None:
         self.url = url or os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")
         self.exchange = exchange or os.getenv("RABBIT_EXCHANGE", EXCHANGE)
@@ -87,6 +105,10 @@ class GsensorService:
         self.param_meta_path = Path(
             param_meta_path
             or os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH))
+        )
+        self.upload_root_path = Path(
+            upload_root_path
+            or os.getenv("GSENSOR_UPLOAD_ROOT", str(DEFAULT_UPLOAD_ROOT))
         )
         self.params: Dict[str, Any] = {}
         self.active = False
@@ -324,6 +346,64 @@ class GsensorService:
             self.stop_growth_rate()
         return self.status()
 
+    def start_uploaded_initialization(
+        self,
+        files: list[InitializationUploadedFile],
+        image_choice: str = "first",
+    ) -> Dict[str, Any]:
+        folder = self._save_uploaded_initialization_folder(files)
+        return self.initialization.start_folder(str(folder), image_choice)
+
+    def _save_uploaded_initialization_folder(
+        self,
+        files: list[InitializationUploadedFile],
+    ) -> Path:
+        if not files:
+            raise ValueError("Select an image folder before loading.")
+
+        folder = self.upload_root_path / uuid4().hex
+        folder.mkdir(parents=True, exist_ok=False)
+        saved_count = 0
+        used_names: set[str] = set()
+        for index, uploaded_file in enumerate(files, start=1):
+            safe_name = _safe_upload_filename(uploaded_file.filename, index)
+            if Path(safe_name).suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            target_name = _dedupe_filename(safe_name, used_names)
+            try:
+                target = folder / target_name
+                target.write_bytes(_decode_uploaded_file(uploaded_file.content_base64))
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(f"Invalid uploaded image data: {uploaded_file.filename}") from exc
+            saved_count += 1
+
+        if saved_count == 0:
+            raise ValueError("The selected folder does not contain supported image files.")
+        return folder
+
+
+def _safe_upload_filename(filename: str, index: int) -> str:
+    name = Path(filename.replace("\\", "/")).name or f"image_{index:05d}.bin"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def _dedupe_filename(filename: str, used_names: set[str]) -> str:
+    candidate = filename
+    path = Path(filename)
+    counter = 1
+    while candidate in used_names:
+        candidate = f"{path.stem}_{counter}{path.suffix}"
+        counter += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _decode_uploaded_file(content_base64: str) -> bytes:
+    content = content_base64.strip()
+    if "," in content and content.startswith("data:"):
+        content = content.split(",", 1)[1]
+    return base64.b64decode(content, validate=True)
+
 
 service = GsensorService()
 
@@ -380,10 +460,10 @@ def _raise_http_error(exc: Exception) -> None:
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@web_app.post("/api/initialization/folder")
-def start_initialization(payload: InitializationFolderRequest) -> Dict[str, Any]:
+@web_app.post("/api/initialization/upload-folder")
+def upload_initialization_folder(payload: InitializationUploadFolderRequest) -> Dict[str, Any]:
     try:
-        return service.initialization.start_folder(payload.folder, payload.image_choice)
+        return service.start_uploaded_initialization(payload.files, payload.image_choice)
     except Exception as exc:
         _raise_http_error(exc)
 
@@ -435,6 +515,14 @@ def choose_initialization_corner(payload: InitializationCornerRequest) -> Dict[s
         _raise_http_error(exc)
 
 
+@web_app.post("/api/initialization/3d-choice")
+def choose_initialization_3d_choice(payload: Initialization3DChoiceRequest) -> Dict[str, Any]:
+    try:
+        return service.initialization.select_3d_choice(payload.session_id, payload.choice)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
 @web_app.post("/api/initialization/undo")
 def undo_initialization(payload: InitializationSessionRequest) -> Dict[str, Any]:
     try:
@@ -454,11 +542,13 @@ def reset_initialization(payload: InitializationResetRequest) -> Dict[str, Any]:
 __all__ = [
     "GsensorParamsUpdate",
     "GsensorService",
+    "Initialization3DChoiceRequest",
     "InitializationCornerRequest",
-    "InitializationFolderRequest",
     "InitializationIsFullRequest",
     "InitializationPointRequest",
     "InitializationResetRequest",
     "InitializationSessionRequest",
+    "InitializationUploadFolderRequest",
+    "InitializationUploadedFile",
     "web_app",
 ]

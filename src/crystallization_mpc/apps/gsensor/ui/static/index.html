@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260507-init1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260522-3dpreview2">
   </head>
   <body>
     <div class="shell">
@@ -63,8 +63,8 @@
 
           <div class="folder-row">
             <label class="folder-field">
-              <span>Folder</span>
-              <input id="image-folder-input" type="text" placeholder="C:\path\to\images">
+              <span>Local Folder</span>
+              <input id="image-folder-picker" type="file" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,image/*" multiple webkitdirectory directory>
             </label>
             <label class="folder-field compact">
               <span>Image</span>
@@ -77,9 +77,22 @@
           </div>
 
           <div class="init-layout">
-            <div class="image-stage">
-              <canvas id="init-canvas"></canvas>
-              <p id="canvas-empty" class="canvas-empty muted">No image loaded</p>
+            <div class="init-main">
+              <div class="image-stage">
+                <canvas id="init-canvas"></canvas>
+                <p id="canvas-empty" class="canvas-empty muted">No image loaded</p>
+              </div>
+
+              <div class="three-d-preview" id="three-d-preview" hidden>
+                <div class="three-d-preview-head">
+                  <div>
+                    <p class="eyebrow">3D Preview</p>
+                    <h3 id="three-d-preview-title">Selected candidate</h3>
+                  </div>
+                  <button id="reset-3d-view" class="ghost">Reset View</button>
+                </div>
+                <canvas id="three-d-canvas"></canvas>
+              </div>
             </div>
 
             <aside class="init-side">
@@ -98,6 +111,11 @@
                 <button data-corner="A" class="ghost" disabled>A</button>
                 <button data-corner="B" class="ghost" disabled>B</button>
                 <button data-corner="C" class="ghost" disabled>C</button>
+              </div>
+
+              <div class="candidate-controls-wrap" id="candidate-controls-wrap" hidden>
+                <p class="eyebrow">3D Choice</p>
+                <div class="candidate-grid" id="candidate-controls"></div>
               </div>
 
               <div class="point-list-wrap">
@@ -137,6 +155,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260507-init1"></script>
+    <script src="/static/app.js?v=20260522-3dpreview2"></script>
   </body>
 </html>

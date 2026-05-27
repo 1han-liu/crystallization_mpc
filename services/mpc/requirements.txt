@@ -5,3 +5,4 @@ python-dotenv
 influxdb-client
 pika
 pyyaml
+scipy>=1.11,<2.0

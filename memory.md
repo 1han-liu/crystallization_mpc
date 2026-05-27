@@ -84,3 +84,52 @@
 - 变更文件：新增 `src/crystallization_mpc/apps/gsensor/initialization.py`、`tests/test_gsensor_initialization.py`；更新 `src/crystallization_mpc/apps/gsensor/app.py`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`app.js`、`styles.css`、`params_default.yaml`、`param_meta.yaml`；删除 `choose_is_full`、`choose_corner`、`get_points`、`get_side` 以及 `annotate_point`、`make_line`、`make_arrow`、`mark_point`、`create_button`、`calc_button_position`、`initialize_DSCGR` 等 MATLAB 桌面 UI 直译运行文件。
 - 验证：`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`pytest tests\test_gsensor_initialization.py tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py` 通过，结果为 17 passed，另有 pytest cache 权限 warning。
 - 备注：保留纯算法/几何转译函数，例如 `calc_intersect`、`calc_foot_point`、`calc_normal`、`reorient_points`、`calc_kernel_mask`；Web 初始化当前完成 2D 点选、full/non-full 分支、kernel 点、corner 选择和 overlay 数据，3D 恢复、`calc_2d_3d_info`、YOLO/Hough、增长率和 RabbitMQ 发布仍等待后续 MATLAB 源码接入。端口 `8001` 在当前 Windows 环境绑定失败，前台验证 `8011` 可启动。
+
+### 2026-05-21 - 迁移 Gsensor recover_3d
+
+- 任务：将 MATLAB `recover_3d.m` 转换到 Python `apps/gsensor/morphs`，保持固定 `m/w/u/v` 2D 坐标、`M.z = 0`，通过角度误差优化求解 `W/U/V` z 值的业务逻辑。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/morphs/recover_3d.py`、`tests/test_recover_3d.py`；更新 `pyproject.toml`、`plan.md`。
+- 验证：`python -m compileall src\crystallization_mpc\apps\gsensor\morphs tests\test_recover_3d.py` 通过；`pytest tests\test_recover_3d.py tests\test_gsensor_initialization.py` 通过，结果为 8 passed，另有 pytest cache 权限 warning。
+- 备注：MATLAB `fmincon` 用 SciPy `minimize(method="SLSQP")` 对应实现，线性不等式与上下界按原方向分支迁移；`get_angles_d` 与 `calc_angle_d` 当前按缺失依赖占位，后续收到源码后补齐真实实现。
+
+### 2026-05-22 - 迁移 Gsensor get_angles_d
+
+- 任务：将 MATLAB `get_angles_d.m` 转换到 Python `apps/gsensor/morphs`，按 corner `A/B/C` 返回 `UMW`、`VMW`、`UMV` 三个理论角度。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/morphs/get_angles_d.py`、`tests/test_get_angles_d.py`；更新 `plan.md`。
+- 验证：`python -m compileall src\crystallization_mpc\apps\gsensor\morphs tests\test_get_angles_d.py tests\test_recover_3d.py` 通过；`pytest tests\test_get_angles_d.py tests\test_recover_3d.py` 通过。
+- 备注：`recover_3d` 的角度表依赖已补齐；`calc_angle_d` 仍等待后续 MATLAB 源码接入。
+
+### 2026-05-22 - 迁移 Gsensor calc_angle_d
+
+- 任务：将 MATLAB `calc_angle_d.m` 转换到 Python `apps/gsensor/morphs`，按 `acosd(dot(line1,line2)/(norm(line1)*norm(line2)))` 计算向量夹角。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/morphs/calc_angle_d.py`、`tests/test_calc_angle_d.py`；更新 `src/crystallization_mpc/apps/gsensor/morphs/recover_3d.py`、`plan.md`。
+- 验证：`python -m compileall src\crystallization_mpc\apps\gsensor\morphs tests\test_calc_angle_d.py tests\test_get_angles_d.py tests\test_recover_3d.py` 通过；`pytest tests\test_calc_angle_d.py tests\test_get_angles_d.py tests\test_recover_3d.py` 通过。
+- 备注：`recover_3d` 的 `get_angles_d` 与 `calc_angle_d` 依赖均已补齐，已移除缺失依赖占位导入；零范数输入保持 MATLAB 公式语义，结果为 NaN。
+
+### 2026-05-22 - 拆分迁移 Gsensor recover_3d_all
+
+- 任务：将 MATLAB `recover_3d_all.m` 拆分迁移为后端 3D 候选生成与 Web 候选选择流程；不迁移 MATLAB `figure/axes/tiledlayout/uiwait/button` 桌面 UI。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/morphs/recover_3d_all.py`、`tests/test_recover_3d_all.py`；更新 `src/crystallization_mpc/apps/gsensor/initialization.py`、`app.py`、`ui/static/index.html`、`app.js`、`styles.css`、`tests/test_gsensor_initialization.py`、`plan.md`。
+- 验证：`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_recover_3d_all.py` 通过；`pytest tests\test_recover_3d_all.py tests\test_gsensor_initialization.py tests\test_calc_angle_d.py tests\test_get_angles_d.py tests\test_recover_3d.py` 通过，结果为 22 passed；`pytest tests\test_growth_rate_commands.py` 通过，结果为 7 passed；另有 pytest cache 权限 warning；实际调用 `recover_3d_all` 验证 full/non-full 候选数量为 1/16。
+- 备注：full mode 生成 `choice=2`、`direction=outwards`；non-full mode 按 MATLAB 原 16 个 direction 顺序生成候选。初始化状态改为 `ready_for_corner -> ready_for_3d_choice -> ready_for_3d`，最终选择保存 `selected_3d_choice` 与 `recovered_3d`；真实 `show_3d` 半透明 patch 展示等待后续 MATLAB 源码。
+
+### 2026-05-22 - Gsensor 初始化改为手动选择本地图片文件夹
+
+- 任务：将 Gsensor 初始化图片入口从依赖 Docker/服务器内文件夹路径，改为仅通过浏览器手动选择本地文件夹并上传图片；不再保留服务器路径输入作为后备。
+- 变更文件：更新 `.gitignore`、`src/crystallization_mpc/apps/gsensor/app.py`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`app.js`、`styles.css`、`tests/test_gsensor_initialization.py`、`plan.md`。
+- 验证：`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`pytest tests\test_recover_3d_all.py tests\test_calc_angle_d.py tests\test_get_angles_d.py tests\test_recover_3d.py tests\test_gsensor_initialization.py tests\test_growth_rate_commands.py` 通过，结果为 31 passed，另有 pytest cache 权限 warning。
+- 备注：前端使用 `webkitdirectory` 文件夹选择控件并以 JSON/base64 上传支持的图片扩展名，避免新增 `python-multipart` 运行依赖；后端保存到 `.runtime/gsensor_uploads` 并复用现有 `start_folder` 扫描逻辑，公开初始化入口只保留上传 API，`.runtime/` 已加入 `.gitignore`。
+
+### 2026-05-22 - 移除 Gsensor 初始化服务器路径后备
+
+- 任务：删除 Gsensor 初始化中手动输入服务器文件夹路径的后备方案，只保留浏览器手动选择本地文件夹并上传图片的入口。
+- 变更文件：更新 `docker-compose.yml`、`params_default.yaml`、`params_runtime.yaml`、`param_meta.yaml`、`src/crystallization_mpc/apps/gsensor/app.py`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`app.js`、`styles.css`、`tests/test_gsensor_initialization.py`、`tests/test_gsensor_param_telemetry.py`、`plan.md`、`memory.md`。
+- 验证：`.venv\Scripts\python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py tests\test_gsensor_param_telemetry.py` 通过；`.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py` 通过，结果为 24 passed，另有 pytest cache 权限 warning。
+- 备注：公开 API 删除 `/api/initialization/folder`，前端删除 Server Folder 输入；Docker 不再挂载 `GSENSOR_IMAGE_HOST_DIR:/data/images`；`image_folder` 不再作为 gsensor 参数发布。上传后的服务端临时目录仍用于后端读取和返回初始化图片。
+
+### 2026-05-22 - 调整 Gsensor Image Marking Reset 语义
+
+- 任务：将 Image Marking 的 `Reset` 从删除整个初始化 session 改为仅保留当前 load 的图片，清空 full/non-full 选择、点选、corner 和 3D 候选/选择结果，避免用户 reset 后必须重新 load 图片。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/initialization.py`、`tests/test_gsensor_initialization.py`、`memory.md`。
+- 验证：`.venv\Scripts\python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_growth_rate_commands.py` 通过，结果为 19 passed，另有 pytest cache 权限 warning。
+- 备注：UI 传入 `session_id` 时 reset 保留当前图片，并回到刚 load 完图片后等待选择 full/non-full 的步骤；无 `session_id` 的 `reset()` 仍作为服务内部/测试清理入口删除当前 active session。

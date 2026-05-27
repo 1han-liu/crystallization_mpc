@@ -17,10 +17,15 @@
 
 - 已完成：Gsensor Web 初始化 session 与 API，支持服务端图片文件夹扫描、first/latest 图片选择、full/non-full 选择、canvas 原图坐标点选、Undo/Reset、corner A/B/C 选择和 overlay 数据返回。
 - 已完成：初始化阶段的 2D 几何推进已接入纯计算函数，包括 `calc_intersect`、`calc_foot_point`、`calc_normal`、`reorient_points`；full mode 可由 opposite/adjacent 线求 `u/v/w`，non-full mode 可由 foot point 求 `u/v` 并使用人工 `w`。
+- 已完成：`recover_3d` 已迁移为 `src/crystallization_mpc/apps/gsensor/morphs/recover_3d.py`，固定 `m/w/u/v` 的 2D 坐标、令 `M.z = 0`，用 SciPy SLSQP 对应 MATLAB `fmincon` 求解 `W/U/V` 的 z 值；`get_angles_d` 与 `calc_angle_d` 均已迁移并直接接入。
+- 已完成：`get_angles_d` 已迁移为 `src/crystallization_mpc/apps/gsensor/morphs/get_angles_d.py`，按 corner `A/B/C` 返回 `UMW/VMW/UMV` 三个理论角度。
+- 已完成：`calc_angle_d` 已迁移为 `src/crystallization_mpc/apps/gsensor/morphs/calc_angle_d.py`，按 MATLAB `acosd(dot(line1,line2)/(norm(line1)*norm(line2)))` 计算两向量夹角。
+- 已完成：`recover_3d_all` 已拆分迁移，`src/crystallization_mpc/apps/gsensor/morphs/recover_3d_all.py` 只生成 3D 候选解，初始化 session/API/UI 负责候选展示、选择和最终 `M/W/U/V` 保存；真实 `show_3d` 半透明 patch 展示等待后续源码接入。
 - 已完成：删除 MATLAB 桌面 UI 原语直译运行文件，不再保留 `figure/uiwait/getCursorInfo/uicontrol/pause` 等运行路径；保留纯算法/几何转译函数。
-- 已完成：新增 `image_folder` gsensor 参数与元数据，供参数抽屉和初始化入口共享。
+- 已完成：移除 `image_folder` gsensor 参数与元数据；初始化入口不再依赖参数抽屉中的服务器路径。
+- 已完成：Gsensor 初始化图片入口仅支持浏览器手动选择本地文件夹，前端上传选中图片到后端 `.runtime/gsensor_uploads` 后复用现有文件夹扫描流程；不再保留服务器路径输入或 Docker 挂载后备。
 - 已验证：`python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`pytest tests\test_gsensor_initialization.py tests\test_gsensor_param_telemetry.py tests\test_growth_rate_commands.py` 通过，17 passed。
-- 未完成：`recover_3d_all`、`recover_3d`、`show_3d`、`calc_2d_3d_info` 尚未迁移，初始化流程目前在 `ready_for_3d` 停住，不伪造 3D 结果。
+- 未完成：`show_3d`、`calc_2d_3d_info` 尚未迁移；初始化流程现在可完成 3D 候选选择，但不伪造真实半透明 3D patch 展示或后续 2D/3D 信息。
 - 未完成：`measure_growth_rate -> update_uv_struct -> update_line -> update_EKF_G` 每帧检测链路、YOLO/edge + Hough、增长率/EKF 输出和 gsensor -> controller RabbitMQ 发布尚未接入。
 - 未完成：`gsensor_measurement` Influx measurement、检测失败/停止事件和测量结果持久化尚未实现。
 
@@ -47,6 +52,8 @@
 - 3D 生成时机：3D 图在初始化阶段、2D 点选完成并选择 corner A/B/C 后生成。`initialize_DSCGR.m` 第 9 行先调用 `choose_corner(I)`，第 10 行调用 `recover_3d_all(...)`。
 - 3D 候选生成：`recover_3d_all.m` 第 34 行开始为每个候选方向生成 3D 结果；内部调用 `recover_3d(...)` 计算 `M/W/U/V` 的 3D 坐标，并调用 `show_3d(...)` 展示候选图。
 - 3D 展示方式：`show_3d.m` 不是 `plot3` 或 `surf`，而是先 `imshow(I)`，再用 `patch(mesh, ...)` 绘制半透明 3D 面片。Python/UI 迁移时应保留“图像底图 + 半透明面片候选”的交互语义。
+- 3D 转换与 UI 校验流程：2D 点选完成后先选择 corner A/B/C；选择 corner 后立即调用 `recover_3d_all(...)` 生成该 corner 对应的 3D candidate，并在用户确认 candidate 前显示每个候选的 `W.z/U.z/V.z`、理论角度、恢复后实际角度与 residual。用户据此选择 3D candidate；选中后保留同一组诊断信息，并显示独立 3D preview。corner A/B/C 只影响 `get_angles_d(corner)` 选用的理论角度表和 3D z 恢复结果，不改变 2D `m/u/v/w` 求交结果。
+- 3D 异常判定建议：UI 应标记 z 尺度异常或角度 residual 异常的 candidate，例如 `max(abs(W.z), abs(U.z), abs(V.z))` 远大于 2D 图像尺度、或 `UMW/VMW/UMV` 任一 residual 超过可接受阈值时显示 suspicious；阈值后续应结合真实实验图像和 MATLAB 输出确认，初期先作为人工选择提示，不自动拒绝。
 - 初始化后信息：3D 选定后，`calc_2d_3d_info.m` 用 `M/W/U/V` 计算 u/v 面的 3D 法向量、投影修正和 Hough 初始参数。
 - 后续测量链路：每张新图按 `measure_growth_rate -> update_uv_struct -> update_line -> update_EKF_G` 执行。`update_line.m` 会重新 `imread` 图片，使用 YOLO/edge + Hough 查找当前边线，再计算相对初始边的距离，用于增长率和 EKF 更新。
 
