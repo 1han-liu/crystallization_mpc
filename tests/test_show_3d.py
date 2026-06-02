@@ -26,6 +26,25 @@ def test_show_3d_returns_matlab_patch_payload_with_flipped_z():
     assert payload["face_vertex_cdata"] == [1.0, 0.0, 0.0, 0.0]
     assert payload["face_color"] == "flat"
     assert payload["face_alpha"] == 0.1
+    assert payload["reference_2d"]["type"] == "footprint"
+    np.testing.assert_allclose(
+        payload["reference_2d"]["vertices"],
+        [
+            [1.0, 2.0, 0.0],
+            [4.0, 5.0, 0.0],
+            [7.0, 8.0, 0.0],
+            [9.0, 10.0, 0.0],
+        ],
+    )
+    assert payload["reference_2d"]["edges"] == [
+        [1, 2],
+        [1, 3],
+        [1, 4],
+        [2, 3],
+        [2, 4],
+        [3, 4],
+    ]
+    assert payload["reference_2d"]["labels"] == ["M", "W", "U", "V"]
 
 
 def test_show_3d_pads_2d_points_to_3d():

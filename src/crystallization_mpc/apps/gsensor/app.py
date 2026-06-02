@@ -32,6 +32,7 @@ from crystallization_mpc.messaging.schema import utc_ts
 
 ROLE = "gsensor"
 UI_DIR = Path(__file__).resolve().parent / "ui"
+GSENSOR_IMGS_DIR = Path(__file__).resolve().parent / "imgs"
 PROJECT_ROOT = UI_DIR.parents[4]
 DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
 DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
@@ -415,6 +416,7 @@ async def lifespan(_: FastAPI):
 
 
 web_app = FastAPI(title="Crystallization MPC Gsensor UI", lifespan=lifespan)
+web_app.mount("/static/imgs", StaticFiles(directory=GSENSOR_IMGS_DIR), name="gsensor-imgs")
 web_app.mount("/static", StaticFiles(directory=UI_DIR / "static"), name="static")
 
 

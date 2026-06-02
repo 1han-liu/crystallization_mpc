@@ -22,9 +22,13 @@ const threeDPreview = document.querySelector("#three-d-preview");
 const threeDPreviewTitle = document.querySelector("#three-d-preview-title");
 const threeDCanvas = document.querySelector("#three-d-canvas");
 const reset3DViewButton = document.querySelector("#reset-3d-view");
+const threeDSnapshots = document.querySelector("#three-d-snapshots");
+const threeDSnapshotGrid = document.querySelector("#three-d-snapshot-grid");
+const clear3DSnapshotsButton = document.querySelector("#clear-3d-snapshots");
 const initStepTitle = document.querySelector("#init-step-title");
 const initStepPrompt = document.querySelector("#init-step-prompt");
 const fullModeControls = document.querySelector("#full-mode-controls");
+const cornerReference = document.querySelector("#corner-reference");
 const cornerControls = document.querySelector("#corner-controls");
 const candidateControlsWrap = document.querySelector("#candidate-controls-wrap");
 const candidateControls = document.querySelector("#candidate-controls");
@@ -52,6 +56,12 @@ const state = {
     lastX: 0,
     lastY: 0,
     patchKey: null,
+    viewInitialized: false,
+  },
+  threeDSnapshots: {
+    scope: null,
+    order: [],
+    items: new Map(),
   },
 };
 
@@ -276,6 +286,7 @@ async function applyParams() {
 }
 
 function renderInitialization(payload) {
+  ensure3DSnapshotScope(payload);
   state.initialization = payload;
   const hasSession = Boolean(payload?.session_id);
   const step = payload?.current_step || null;
@@ -297,6 +308,8 @@ function renderInitialization(payload) {
     button.classList.toggle("selected", selected);
   });
 
+  cornerReference.hidden = step?.type !== "corner";
+
   cornerControls.querySelectorAll("button").forEach((button) => {
     button.disabled = !hasSession || step?.type !== "corner";
     button.classList.toggle("selected", payload?.corner === button.dataset.corner);
@@ -307,6 +320,7 @@ function renderInitialization(payload) {
   maybeLoadInitializationImage(payload);
   drawInitialization();
   drawSelected3DPreview();
+  render3DSnapshots();
 }
 
 function renderCandidateControls(payload) {
@@ -405,6 +419,132 @@ function selected3DPatch(payload) {
   return candidate?.show_3d || null;
 }
 
+function reference2DPayload(patch) {
+  const vertices = Array.isArray(patch?.vertices) ? patch.vertices : [];
+  const fallbackVertices = vertices.map((vertex) => [
+    Number(vertex?.[0]) || 0,
+    Number(vertex?.[1]) || 0,
+    0,
+  ]);
+  const reference = patch?.reference_2d || {};
+  const referenceVertices = Array.isArray(reference.vertices) && reference.vertices.length
+    ? reference.vertices
+    : fallbackVertices;
+  const edges = Array.isArray(reference.edges) && reference.edges.length
+    ? reference.edges
+    : defaultReferenceEdges(referenceVertices.length);
+  const labels = Array.isArray(reference.labels) && reference.labels.length
+    ? reference.labels
+    : ["M", "W", "U", "V"].slice(0, referenceVertices.length);
+  return { vertices: referenceVertices, edges, labels };
+}
+
+function defaultReferenceEdges(count) {
+  const edges = [];
+  for (let left = 1; left <= count; left += 1) {
+    for (let right = left + 1; right <= count; right += 1) {
+      edges.push([left, right]);
+    }
+  }
+  return edges;
+}
+
+function selected3DCandidate(payload) {
+  if (payload?.selected_3d_choice == null) {
+    return null;
+  }
+  return (payload?.candidates_3d || []).find((item) => item.choice === payload.selected_3d_choice) || null;
+}
+
+function threeDSnapshotScope(payload) {
+  if (!payload?.session_id || !payload?.corner) {
+    return null;
+  }
+  return `${payload.session_id}:${payload.corner}`;
+}
+
+function ensure3DSnapshotScope(payload) {
+  const scope = threeDSnapshotScope(payload);
+  if (scope === state.threeDSnapshots.scope) {
+    return;
+  }
+  state.threeDSnapshots.scope = scope;
+  state.threeDSnapshots.order = [];
+  state.threeDSnapshots.items = new Map();
+  state.threeDView.patchKey = null;
+  state.threeDView.viewInitialized = false;
+  state.threeDView.yaw = default3DView.yaw;
+  state.threeDView.pitch = default3DView.pitch;
+}
+
+function captureCurrent3DSnapshot() {
+  const payload = state.initialization;
+  const patch = selected3DPatch(payload);
+  const candidate = selected3DCandidate(payload);
+  if (!patch || !candidate || !threeDCanvas.width || !threeDCanvas.height) {
+    return;
+  }
+  const key = String(candidate.choice);
+  const item = {
+    key,
+    choice: candidate.choice,
+    label: candidate.label || `Choice ${candidate.choice}`,
+    image: threeDCanvas.toDataURL("image/png"),
+    yaw: state.threeDView.yaw,
+    pitch: state.threeDView.pitch,
+  };
+  if (!state.threeDSnapshots.items.has(key)) {
+    state.threeDSnapshots.order.push(key);
+  }
+  state.threeDSnapshots.items.set(key, item);
+  render3DSnapshots();
+}
+
+function clear3DSnapshots() {
+  state.threeDSnapshots.order = [];
+  state.threeDSnapshots.items = new Map();
+  render3DSnapshots();
+}
+
+function render3DSnapshots() {
+  const items = state.threeDSnapshots.order
+    .map((key) => state.threeDSnapshots.items.get(key))
+    .filter(Boolean);
+  threeDSnapshots.hidden = items.length === 0;
+  clear3DSnapshotsButton.disabled = items.length === 0;
+  threeDSnapshotGrid.innerHTML = "";
+  items.forEach((item) => {
+    const wrapper = document.createElement("figure");
+    wrapper.className = "three-d-snapshot";
+    const image = document.createElement("img");
+    image.src = item.image;
+    image.alt = item.label;
+    const caption = document.createElement("span");
+    caption.textContent = `${item.label} (${formatRadians(item.yaw)}, ${formatRadians(item.pitch)})`;
+    wrapper.appendChild(image);
+    wrapper.appendChild(caption);
+    threeDSnapshotGrid.appendChild(wrapper);
+  });
+}
+
+function formatRadians(value) {
+  return `${Number(value || 0).toFixed(2)} rad`;
+}
+
+function saved3DViewForSelectedCandidate() {
+  const choice = state.initialization?.selected_3d_choice;
+  if (choice == null) {
+    return null;
+  }
+  const item = state.threeDSnapshots.items.get(String(choice));
+  const yaw = Number(item?.yaw);
+  const pitch = Number(item?.pitch);
+  if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) {
+    return null;
+  }
+  return { yaw, pitch };
+}
+
 function drawSelected3DPreview() {
   const patch = selected3DPatch(state.initialization);
   const choice = state.initialization?.selected_3d_choice;
@@ -432,15 +572,24 @@ function draw3DPreview(patch) {
   }
   size3DCanvas();
   const transformed = vertices.map((vertex) => transform3DVertex(vertex));
-  const projected = project3DVertices(transformed, threeDCanvas.width, threeDCanvas.height);
+  const reference2D = reference2DPayload(patch);
+  const referenceTransformed = reference2D.vertices.map((vertex) => transform3DVertex(vertex));
+  const projected = project3DVertices(
+    [...transformed, ...referenceTransformed],
+    threeDCanvas.width,
+    threeDCanvas.height,
+  );
+  const projectedPatchPoints = projected.points.slice(0, transformed.length);
+  const projectedReferencePoints = projected.points.slice(transformed.length);
   const alpha = Math.max(0, Math.min(Number(patch.face_alpha) || 0.16, 1));
   const sortedFaces = faces.slice().sort((left, right) => averageFaceZ(transformed, right) - averageFaceZ(transformed, left));
 
   threeDContext.clearRect(0, 0, threeDCanvas.width, threeDCanvas.height);
   draw3DAxes(projected.scale, threeDCanvas.width, threeDCanvas.height);
+  draw2DReference(projectedReferencePoints, reference2D.edges, reference2D.labels);
   threeDContext.save();
   sortedFaces.forEach((face) => {
-    const points = patchFaceVertices(projected.points, face);
+    const points = patchFaceVertices(projectedPatchPoints, face);
     if (points.length < 3) {
       return;
     }
@@ -455,18 +604,27 @@ function draw3DPreview(patch) {
     threeDContext.fill();
     threeDContext.stroke();
   });
-  draw3DVertices(projected.points);
+  draw3DVertices(projectedPatchPoints);
   threeDContext.restore();
 }
 
 function applyInitial3DView(patch) {
-  const key = JSON.stringify(patch?.vertices || []);
+  const choice = state.initialization?.selected_3d_choice ?? "selected";
+  const key = `${choice}:${JSON.stringify(patch?.vertices || [])}`;
   if (state.threeDView.patchKey === key) {
     return;
   }
-  const view = bestInitial3DView(patch);
-  state.threeDView.yaw = view.yaw;
-  state.threeDView.pitch = view.pitch;
+  const savedView = saved3DViewForSelectedCandidate();
+  if (savedView) {
+    state.threeDView.yaw = savedView.yaw;
+    state.threeDView.pitch = savedView.pitch;
+    state.threeDView.viewInitialized = true;
+  } else if (!state.threeDView.viewInitialized) {
+    const view = bestInitial3DView(patch);
+    state.threeDView.yaw = view.yaw;
+    state.threeDView.pitch = view.pitch;
+    state.threeDView.viewInitialized = true;
+  }
   state.threeDView.patchKey = key;
 }
 
@@ -566,14 +724,18 @@ function project3DVertices(points, width, height) {
   };
 }
 
-function patchFaceVertices(points, face) {
-  if (!Array.isArray(face)) {
+function indexedVertices(points, indexes) {
+  if (!Array.isArray(indexes)) {
     return [];
   }
-  const indexOffset = face.some((index) => Number(index) === 0) ? 0 : 1;
-  return face
+  const indexOffset = indexes.some((index) => Number(index) === 0) ? 0 : 1;
+  return indexes
     .map((index) => points[Number(index) - indexOffset])
     .filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+}
+
+function patchFaceVertices(points, face) {
+  return indexedVertices(points, face);
 }
 
 function averageFaceZ(points, face) {
@@ -595,6 +757,75 @@ function faceShade(points, face) {
   const light = normalizeVector({ x: -0.2, y: 0.4, z: 1 });
   const brightness = Math.max(0.25, Math.abs(dotProduct(normal, light)));
   return Math.round(145 + brightness * 80);
+}
+
+function convexHull2D(points) {
+  const unique = [];
+  points.forEach((point) => {
+    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+      return;
+    }
+    const duplicate = unique.some((existing) => (
+      Math.abs(existing.x - point.x) < 0.001 && Math.abs(existing.y - point.y) < 0.001
+    ));
+    if (!duplicate) {
+      unique.push(point);
+    }
+  });
+  if (unique.length <= 2) {
+    return unique;
+  }
+  const sorted = unique.slice().sort((left, right) => (
+    left.x === right.x ? left.y - right.y : left.x - right.x
+  ));
+  const cross = (origin, left, right) => (
+    (left.x - origin.x) * (right.y - origin.y)
+    - (left.y - origin.y) * (right.x - origin.x)
+  );
+  const lower = [];
+  sorted.forEach((point) => {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+      lower.pop();
+    }
+    lower.push(point);
+  });
+  const upper = [];
+  sorted.slice().reverse().forEach((point) => {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+      upper.pop();
+    }
+    upper.push(point);
+  });
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+
+function draw2DReference(points) {
+  const polygon = convexHull2D(points);
+  if (polygon.length < 3) {
+    return;
+  }
+  const bounds = polygon.reduce((acc, point) => ({
+    minX: Math.min(acc.minX, point.x),
+    maxX: Math.max(acc.maxX, point.x),
+    minY: Math.min(acc.minY, point.y),
+    maxY: Math.max(acc.maxY, point.y),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  threeDContext.save();
+  const gradient = threeDContext.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
+  gradient.addColorStop(0, "rgba(247, 235, 164, 0.46)");
+  gradient.addColorStop(1, "rgba(179, 176, 151, 0.30)");
+  threeDContext.fillStyle = gradient;
+  threeDContext.strokeStyle = "rgba(126, 116, 72, 0.72)";
+  threeDContext.lineWidth = 1.4;
+  threeDContext.beginPath();
+  threeDContext.moveTo(polygon[0].x, polygon[0].y);
+  polygon.slice(1).forEach((point) => {
+    threeDContext.lineTo(point.x, point.y);
+  });
+  threeDContext.closePath();
+  threeDContext.fill();
+  threeDContext.stroke();
+  threeDContext.restore();
 }
 
 function draw3DVertices(points) {
@@ -683,7 +914,9 @@ function reset3DView() {
   const view = bestInitial3DView(patch);
   state.threeDView.yaw = view.yaw;
   state.threeDView.pitch = view.pitch;
+  state.threeDView.viewInitialized = true;
   drawSelected3DPreview();
+  captureCurrent3DSnapshot();
 }
 
 function overlayColor(role) {
@@ -864,11 +1097,16 @@ candidateControls.addEventListener("click", async (event) => {
   if (!button || !state.initialization?.session_id) {
     return;
   }
+  const nextChoice = Number(button.dataset.choice);
+  if (state.initialization.selected_3d_choice != null
+      && state.initialization.selected_3d_choice !== nextChoice) {
+    captureCurrent3DSnapshot();
+  }
   const payload = await fetchJson("/api/initialization/3d-choice", {
     method: "POST",
     body: JSON.stringify({
       session_id: state.initialization.session_id,
-      choice: Number(button.dataset.choice),
+      choice: nextChoice,
     }),
   });
   renderInitialization(payload);
@@ -888,10 +1126,14 @@ threeDCanvas.addEventListener("pointerdown", (event) => {
 threeDCanvas.addEventListener("pointermove", update3DViewFromPointer);
 
 threeDCanvas.addEventListener("pointerup", (event) => {
+  const wasDragging = state.threeDView.dragging;
   state.threeDView.dragging = false;
   threeDCanvas.classList.remove("is-dragging");
   if (threeDCanvas.hasPointerCapture(event.pointerId)) {
     threeDCanvas.releasePointerCapture(event.pointerId);
+  }
+  if (wasDragging) {
+    captureCurrent3DSnapshot();
   }
 });
 
@@ -901,6 +1143,8 @@ threeDCanvas.addEventListener("pointercancel", () => {
 });
 
 reset3DViewButton.addEventListener("click", reset3DView);
+
+clear3DSnapshotsButton.addEventListener("click", clear3DSnapshots);
 
 undoInitButton.addEventListener("click", async () => {
   if (!state.initialization?.session_id) {

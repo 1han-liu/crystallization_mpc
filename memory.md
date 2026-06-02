@@ -133,3 +133,17 @@
 - 变更文件：更新 `src/crystallization_mpc/apps/gsensor/initialization.py`、`tests/test_gsensor_initialization.py`、`memory.md`。
 - 验证：`.venv\Scripts\python -m compileall src\crystallization_mpc\apps\gsensor tests\test_gsensor_initialization.py` 通过；`.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_growth_rate_commands.py` 通过，结果为 19 passed，另有 pytest cache 权限 warning。
 - 备注：UI 传入 `session_id` 时 reset 保留当前图片，并回到刚 load 完图片后等待选择 full/non-full 的步骤；无 `session_id` 的 `reset()` 仍作为服务内部/测试清理入口删除当前 active session。
+
+### 2026-05-28 - Gsensor 3D 预览叠加 2D footprint
+
+- 任务：在生成的 3D 候选预览中同时展示由选点数据得到的 2D footprint，方便实验员比较 non-full 模式下异常 3D 候选。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/utils/show_3d.py`、`src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`tests/test_show_3d.py`、`memory.md`。
+- 验证：`.venv\Scripts\python -m compileall src\crystallization_mpc\apps\gsensor tests\test_show_3d.py` 通过；设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_show_3d.py tests\test_recover_3d_all.py tests\test_gsensor_initialization.py -p no:cacheprovider` 通过，结果为 17 passed。
+- 备注：`show_3d` payload 现在携带 `reference_2d`，使用 M/W/U/V 的原始 x/y 并固定 z=0；前端 3D canvas 将该 footprint 作为蓝色虚线参考层和 3D patch 同时绘制。首次未设置测试上传目录时，`tests/test_gsensor_initialization.py` 中两个上传 API 用例因本地 `.runtime/gsensor_uploads` 权限失败，隔离到测试目录后通过。
+
+### 2026-05-28 - Gsensor 3D 候选视角快照
+
+- 任务：在实验员旋转 3D 候选时保留当前视角快照，并在切换候选时沿用上一候选的 yaw/pitch，减少 non-full 多候选比较时的重复手动旋转。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`src/crystallization_mpc/apps/gsensor/ui/static/styles.css`、`memory.md`。
+- 验证：`.venv\Scripts\python -m compileall src\crystallization_mpc\apps\gsensor tests\test_show_3d.py` 通过；设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_show_3d.py tests\test_recover_3d_all.py tests\test_gsensor_initialization.py -p no:cacheprovider` 通过，结果为 17 passed；`git diff --check` 无空白错误。
+- 备注：前端在 3D canvas pointer up 时更新当前候选快照，切换候选前也会保存当前画面；快照按初始化 session + corner 作用域隔离，重新选择 corner 或新 session 会清空旧快照。当前环境没有 `node` 命令，因此未执行 JS 语法检查。

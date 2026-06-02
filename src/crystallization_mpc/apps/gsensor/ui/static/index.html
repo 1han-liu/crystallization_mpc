@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260522-3dpreview2">
+    <link rel="stylesheet" href="/static/styles.css?v=20260601-corner-imgs">
   </head>
   <body>
     <div class="shell">
@@ -92,6 +92,13 @@
                   <button id="reset-3d-view" class="ghost">Reset View</button>
                 </div>
                 <canvas id="three-d-canvas"></canvas>
+                <div class="three-d-snapshots" id="three-d-snapshots" hidden>
+                  <div class="three-d-snapshots-head">
+                    <p class="eyebrow">Snapshots</p>
+                    <button id="clear-3d-snapshots" class="ghost">Clear</button>
+                  </div>
+                  <div class="three-d-snapshot-grid" id="three-d-snapshot-grid"></div>
+                </div>
               </div>
             </div>
 
@@ -105,6 +112,24 @@
               <div class="segmented" id="full-mode-controls">
                 <button data-full-mode="true" class="ghost" disabled>Yes</button>
                 <button data-full-mode="false" class="ghost" disabled>No</button>
+              </div>
+
+              <div class="corner-reference" id="corner-reference" hidden>
+                <p class="eyebrow">Corner Reference</p>
+                <div class="corner-reference-grid">
+                  <figure>
+                    <img src="/static/imgs/corner_A.jpg" alt="Corner A">
+                    <figcaption>A</figcaption>
+                  </figure>
+                  <figure>
+                    <img src="/static/imgs/corner_B.jpg" alt="Corner B">
+                    <figcaption>B</figcaption>
+                  </figure>
+                  <figure>
+                    <img src="/static/imgs/corner_C.jpg" alt="Corner C">
+                    <figcaption>C</figcaption>
+                  </figure>
+                </div>
               </div>
 
               <div class="segmented" id="corner-controls">
@@ -155,6 +180,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260522-3dpreview2"></script>
+    <script src="/static/app.js?v=20260601-corner-imgs"></script>
   </body>
 </html>

@@ -271,6 +271,56 @@ button:disabled {
   cursor: grabbing;
 }
 
+.three-d-snapshots {
+  display: grid;
+  gap: 10px;
+}
+
+.three-d-snapshots[hidden] {
+  display: none;
+}
+
+.three-d-snapshots-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.three-d-snapshots-head .eyebrow {
+  margin: 0;
+}
+
+.three-d-snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.three-d-snapshot {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px;
+  background: #ffffff;
+}
+
+.three-d-snapshot img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.three-d-snapshot span {
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .init-side {
   display: grid;
   gap: 14px;
@@ -296,6 +346,48 @@ button:disabled {
 
 #full-mode-controls {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.corner-reference {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.corner-reference[hidden] {
+  display: none;
+}
+
+.corner-reference .eyebrow {
+  margin: 0 0 8px;
+}
+
+.corner-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.corner-reference figure {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.corner-reference img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.corner-reference figcaption {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 .candidate-controls-wrap {
