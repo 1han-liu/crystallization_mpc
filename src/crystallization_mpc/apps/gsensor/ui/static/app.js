@@ -28,7 +28,8 @@ const clear3DSnapshotsButton = document.querySelector("#clear-3d-snapshots");
 const initStepTitle = document.querySelector("#init-step-title");
 const initStepPrompt = document.querySelector("#init-step-prompt");
 const fullModeControls = document.querySelector("#full-mode-controls");
-const cornerReference = document.querySelector("#corner-reference");
+const cornerReferenceInset = document.querySelector("#corner-reference-inset");
+const cornerReferenceImage = document.querySelector("#corner-reference-image");
 const cornerControls = document.querySelector("#corner-controls");
 const candidateControlsWrap = document.querySelector("#candidate-controls-wrap");
 const candidateControls = document.querySelector("#candidate-controls");
@@ -63,6 +64,7 @@ const state = {
     order: [],
     items: new Map(),
   },
+  cornerRequestInFlight: false,
 };
 
 function setDrawerOpen(open) {
@@ -308,15 +310,10 @@ function renderInitialization(payload) {
     button.classList.toggle("selected", selected);
   });
 
-  cornerReference.hidden = step?.type !== "corner";
-
-  cornerControls.querySelectorAll("button").forEach((button) => {
-    button.disabled = !hasSession || step?.type !== "corner";
-    button.classList.toggle("selected", payload?.corner === button.dataset.corner);
-  });
-
   renderCandidateControls(payload);
   renderPointList(payload);
+  renderCornerControls(payload);
+  renderCornerReferenceInset(payload);
   maybeLoadInitializationImage(payload);
   drawInitialization();
   drawSelected3DPreview();
@@ -351,6 +348,42 @@ function renderPointList(payload) {
   });
 }
 
+function canCompareCorner(payload) {
+  return Boolean(
+    payload?.session_id
+    && ["ready_for_corner", "ready_for_3d_choice", "ready_for_3d"].includes(payload?.status)
+  );
+}
+
+function activeCornerReference(payload) {
+  if (!canCompareCorner(payload)) {
+    return null;
+  }
+  return payload?.corner || null;
+}
+
+function renderCornerControls(payload) {
+  const enabled = canCompareCorner(payload) && !state.cornerRequestInFlight;
+  const activeCorner = activeCornerReference(payload);
+  cornerControls.querySelectorAll("button").forEach((button) => {
+    button.disabled = !enabled;
+    button.classList.toggle("selected", activeCorner === button.dataset.corner);
+  });
+}
+
+function renderCornerReferenceInset(payload) {
+  const corner = activeCornerReference(payload);
+  if (!corner || !state.imageReady) {
+    cornerReferenceInset.hidden = true;
+    cornerReferenceImage.removeAttribute("src");
+    return;
+  }
+
+  cornerReferenceImage.src = `/static/imgs/corner_${corner}.jpg`;
+  cornerReferenceImage.alt = `Corner ${corner}`;
+  cornerReferenceInset.hidden = false;
+}
+
 function appendPointListItem(key, point, computed) {
   const item = document.createElement("li");
   const coords = Array.isArray(point) ? point.slice(0, 2).map((value) => Number(value).toFixed(1)).join(", ") : "";
@@ -383,6 +416,8 @@ initImage.addEventListener("load", () => {
   initCanvas.height = initImage.naturalHeight;
   canvasEmpty.hidden = true;
   drawInitialization();
+  renderCornerReferenceInset(state.initialization);
+  drawSelected3DPreview();
 });
 
 initImage.addEventListener("error", () => {
@@ -417,36 +452,6 @@ function selected3DPatch(payload) {
   }
   const candidate = (payload?.candidates_3d || []).find((item) => item.choice === payload.selected_3d_choice);
   return candidate?.show_3d || null;
-}
-
-function reference2DPayload(patch) {
-  const vertices = Array.isArray(patch?.vertices) ? patch.vertices : [];
-  const fallbackVertices = vertices.map((vertex) => [
-    Number(vertex?.[0]) || 0,
-    Number(vertex?.[1]) || 0,
-    0,
-  ]);
-  const reference = patch?.reference_2d || {};
-  const referenceVertices = Array.isArray(reference.vertices) && reference.vertices.length
-    ? reference.vertices
-    : fallbackVertices;
-  const edges = Array.isArray(reference.edges) && reference.edges.length
-    ? reference.edges
-    : defaultReferenceEdges(referenceVertices.length);
-  const labels = Array.isArray(reference.labels) && reference.labels.length
-    ? reference.labels
-    : ["M", "W", "U", "V"].slice(0, referenceVertices.length);
-  return { vertices: referenceVertices, edges, labels };
-}
-
-function defaultReferenceEdges(count) {
-  const edges = [];
-  for (let left = 1; left <= count; left += 1) {
-    for (let right = left + 1; right <= count; right += 1) {
-      edges.push([left, right]);
-    }
-  }
-  return edges;
 }
 
 function selected3DCandidate(payload) {
@@ -572,21 +577,23 @@ function draw3DPreview(patch) {
   }
   size3DCanvas();
   const transformed = vertices.map((vertex) => transform3DVertex(vertex));
-  const reference2D = reference2DPayload(patch);
-  const referenceTransformed = reference2D.vertices.map((vertex) => transform3DVertex(vertex));
+  const imagePlane = loadedImagePlane();
+  const imageTransformed = imagePlane
+    ? imagePlane.vertices.map((vertex) => transform3DVertex(vertex))
+    : [];
   const projected = project3DVertices(
-    [...transformed, ...referenceTransformed],
+    [...transformed, ...imageTransformed],
     threeDCanvas.width,
     threeDCanvas.height,
   );
   const projectedPatchPoints = projected.points.slice(0, transformed.length);
-  const projectedReferencePoints = projected.points.slice(transformed.length);
+  const projectedImagePoints = projected.points.slice(transformed.length);
   const alpha = Math.max(0, Math.min(Number(patch.face_alpha) || 0.16, 1));
   const sortedFaces = faces.slice().sort((left, right) => averageFaceZ(transformed, right) - averageFaceZ(transformed, left));
 
   threeDContext.clearRect(0, 0, threeDCanvas.width, threeDCanvas.height);
+  drawLoadedImagePlane(projectedImagePoints, imagePlane);
   draw3DAxes(projected.scale, threeDCanvas.width, threeDCanvas.height);
-  draw2DReference(projectedReferencePoints, reference2D.edges, reference2D.labels);
   threeDContext.save();
   sortedFaces.forEach((face) => {
     const points = patchFaceVertices(projectedPatchPoints, face);
@@ -605,6 +612,49 @@ function draw3DPreview(patch) {
     threeDContext.stroke();
   });
   draw3DVertices(projectedPatchPoints);
+  threeDContext.restore();
+}
+
+function loadedImagePlane() {
+  if (!state.imageReady || !initImage.naturalWidth || !initImage.naturalHeight) {
+    return null;
+  }
+  const width = initImage.naturalWidth;
+  const height = initImage.naturalHeight;
+  return {
+    width,
+    height,
+    vertices: [
+      [0, 0, 0],
+      [width, 0, 0],
+      [width, height, 0],
+      [0, height, 0],
+    ],
+  };
+}
+
+function drawLoadedImagePlane(points, imagePlane) {
+  if (!imagePlane || points.length < 4) {
+    return;
+  }
+  const [topLeft, topRight, _bottomRight, bottomLeft] = points;
+  if (![topLeft, topRight, bottomLeft].every((point) => (
+    Number.isFinite(point?.x) && Number.isFinite(point?.y)
+  ))) {
+    return;
+  }
+  threeDContext.save();
+  threeDContext.imageSmoothingEnabled = true;
+  threeDContext.imageSmoothingQuality = "high";
+  threeDContext.setTransform(
+    (topRight.x - topLeft.x) / imagePlane.width,
+    (topRight.y - topLeft.y) / imagePlane.width,
+    (bottomLeft.x - topLeft.x) / imagePlane.height,
+    (bottomLeft.y - topLeft.y) / imagePlane.height,
+    topLeft.x,
+    topLeft.y,
+  );
+  threeDContext.drawImage(initImage, 0, 0, imagePlane.width, imagePlane.height);
   threeDContext.restore();
 }
 
@@ -757,75 +807,6 @@ function faceShade(points, face) {
   const light = normalizeVector({ x: -0.2, y: 0.4, z: 1 });
   const brightness = Math.max(0.25, Math.abs(dotProduct(normal, light)));
   return Math.round(145 + brightness * 80);
-}
-
-function convexHull2D(points) {
-  const unique = [];
-  points.forEach((point) => {
-    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
-      return;
-    }
-    const duplicate = unique.some((existing) => (
-      Math.abs(existing.x - point.x) < 0.001 && Math.abs(existing.y - point.y) < 0.001
-    ));
-    if (!duplicate) {
-      unique.push(point);
-    }
-  });
-  if (unique.length <= 2) {
-    return unique;
-  }
-  const sorted = unique.slice().sort((left, right) => (
-    left.x === right.x ? left.y - right.y : left.x - right.x
-  ));
-  const cross = (origin, left, right) => (
-    (left.x - origin.x) * (right.y - origin.y)
-    - (left.y - origin.y) * (right.x - origin.x)
-  );
-  const lower = [];
-  sorted.forEach((point) => {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
-      lower.pop();
-    }
-    lower.push(point);
-  });
-  const upper = [];
-  sorted.slice().reverse().forEach((point) => {
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
-      upper.pop();
-    }
-    upper.push(point);
-  });
-  return lower.slice(0, -1).concat(upper.slice(0, -1));
-}
-
-function draw2DReference(points) {
-  const polygon = convexHull2D(points);
-  if (polygon.length < 3) {
-    return;
-  }
-  const bounds = polygon.reduce((acc, point) => ({
-    minX: Math.min(acc.minX, point.x),
-    maxX: Math.max(acc.maxX, point.x),
-    minY: Math.min(acc.minY, point.y),
-    maxY: Math.max(acc.maxY, point.y),
-  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
-  threeDContext.save();
-  const gradient = threeDContext.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
-  gradient.addColorStop(0, "rgba(247, 235, 164, 0.46)");
-  gradient.addColorStop(1, "rgba(179, 176, 151, 0.30)");
-  threeDContext.fillStyle = gradient;
-  threeDContext.strokeStyle = "rgba(126, 116, 72, 0.72)";
-  threeDContext.lineWidth = 1.4;
-  threeDContext.beginPath();
-  threeDContext.moveTo(polygon[0].x, polygon[0].y);
-  polygon.slice(1).forEach((point) => {
-    threeDContext.lineTo(point.x, point.y);
-  });
-  threeDContext.closePath();
-  threeDContext.fill();
-  threeDContext.stroke();
-  threeDContext.restore();
 }
 
 function draw3DVertices(points) {
@@ -1082,14 +1063,25 @@ cornerControls.addEventListener("click", async (event) => {
   if (!button || !state.initialization?.session_id) {
     return;
   }
-  const payload = await fetchJson("/api/initialization/corner", {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: state.initialization.session_id,
-      corner: button.dataset.corner,
-    }),
-  });
-  renderInitialization(payload);
+  const selectedCorner = button.dataset.corner;
+  state.cornerRequestInFlight = true;
+  renderCornerControls(state.initialization);
+  try {
+    const payload = await fetchJson("/api/initialization/corner", {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: state.initialization.session_id,
+        corner: selectedCorner,
+      }),
+    });
+    renderInitialization(payload);
+  } catch (error) {
+    initSaveStatus.textContent = error.message;
+  } finally {
+    state.cornerRequestInFlight = false;
+    renderCornerControls(state.initialization);
+    renderCornerReferenceInset(state.initialization);
+  }
 });
 
 candidateControls.addEventListener("click", async (event) => {
@@ -1174,6 +1166,7 @@ initCanvas.addEventListener("click", (event) => {
 
 window.addEventListener("resize", () => {
   drawInitialization();
+  renderCornerReferenceInset(state.initialization);
   drawSelected3DPreview();
 });
 

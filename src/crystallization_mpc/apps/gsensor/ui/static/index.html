@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260601-corner-imgs">
+    <link rel="stylesheet" href="/static/styles.css?v=20260619-corner-inset">
   </head>
   <body>
     <div class="shell">
@@ -80,6 +80,9 @@
             <div class="init-main">
               <div class="image-stage">
                 <canvas id="init-canvas"></canvas>
+                <div class="corner-reference-inset" id="corner-reference-inset" hidden>
+                  <img id="corner-reference-image" alt="">
+                </div>
                 <p id="canvas-empty" class="canvas-empty muted">No image loaded</p>
               </div>
 
@@ -112,24 +115,6 @@
               <div class="segmented" id="full-mode-controls">
                 <button data-full-mode="true" class="ghost" disabled>Yes</button>
                 <button data-full-mode="false" class="ghost" disabled>No</button>
-              </div>
-
-              <div class="corner-reference" id="corner-reference" hidden>
-                <p class="eyebrow">Corner Reference</p>
-                <div class="corner-reference-grid">
-                  <figure>
-                    <img src="/static/imgs/corner_A.jpg" alt="Corner A">
-                    <figcaption>A</figcaption>
-                  </figure>
-                  <figure>
-                    <img src="/static/imgs/corner_B.jpg" alt="Corner B">
-                    <figcaption>B</figcaption>
-                  </figure>
-                  <figure>
-                    <img src="/static/imgs/corner_C.jpg" alt="Corner C">
-                    <figcaption>C</figcaption>
-                  </figure>
-                </div>
               </div>
 
               <div class="segmented" id="corner-controls">
@@ -180,6 +165,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260601-corner-imgs"></script>
+    <script src="/static/app.js?v=20260619-corner-inset"></script>
   </body>
 </html>

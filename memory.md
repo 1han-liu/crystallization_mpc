@@ -147,3 +147,38 @@
 - 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`src/crystallization_mpc/apps/gsensor/ui/static/styles.css`、`memory.md`。
 - 验证：`.venv\Scripts\python -m compileall src\crystallization_mpc\apps\gsensor tests\test_show_3d.py` 通过；设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_show_3d.py tests\test_recover_3d_all.py tests\test_gsensor_initialization.py -p no:cacheprovider` 通过，结果为 17 passed；`git diff --check` 无空白错误。
 - 备注：前端在 3D canvas pointer up 时更新当前候选快照，切换候选前也会保存当前画面；快照按初始化 session + corner 作用域隔离，重新选择 corner 或新 session 会清空旧快照。当前环境没有 `node` 命令，因此未执行 JS 语法检查。
+
+### 2026-06-11 - Gsensor 3D 预览 2D 底层改为原图
+
+- 任务：将 Gsensor 3D 预览中的 2D 底层从 M/W/U/V footprint 渲染图形改为当前初始化 session 已加载的原始图片。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/utils/show_3d.py`、`src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`tests/test_show_3d.py`、`memory.md`。
+- 验证：`.venv\Scripts\python -m py_compile src\crystallization_mpc\apps\gsensor\utils\show_3d.py tests\test_show_3d.py` 通过；设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_show_3d.py tests\test_recover_3d_all.py tests\test_gsensor_initialization.py -p no:cacheprovider` 通过，结果为 17 passed。
+- 备注：`show_3d` 不再输出 `reference_2d`；前端删除 footprint/convex hull 绘制逻辑，改为把 `initImage` 作为 z=0 图片平面投影到 3D canvas 后再绘制 3D patch，不保留旧 2D 图形作为 fallback。全量 `compileall` 在当前环境被既有 `__pycache__` 权限问题阻断，因此只编译本次改动的 Python 文件。
+
+### 2026-06-11 - Gsensor Choose Corner 参考图改为主图叠加
+
+- 任务：将 Choose Corner 阶段的 A/B/C 参考图从右侧小图列表改为半透明覆盖在 Image Marking 主图上，方便实验者直观对比。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/styles.css`、`memory.md`。
+- 验证：设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_show_3d.py -p no:cacheprovider` 通过，结果为 14 passed；`git diff --check` 无空白错误。当前环境没有 `node` 命令，因此未执行 JS 语法检查。
+- 备注：删除原 `Corner Reference` 小图展示；新增 `corner-overlay` 覆盖层，A/B/C 按钮在 `ready_for_corner`、`ready_for_3d_choice`、`ready_for_3d` 阶段保持可用，点击后显示对应 `/static/imgs/corner_*.jpg` 并沿用原有选择 corner API，不改后端计算逻辑。
+
+### 2026-06-11 - 撤销 Choose Corner 错误视觉映射
+
+- 任务：用户确认问题不是参考图显示错误，而是按钮 selected 状态跳选；撤销先前误判加入的 A/B/C 参考图显示映射。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`memory.md`。
+- 验证：设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_show_3d.py -p no:cacheprovider` 通过，结果为 14 passed；`git diff --check` 无空白错误。当前环境没有 `node` 命令，因此未执行 JS 语法检查。
+- 备注：后端 corner 值仍按按钮 A/B/C 原样提交；前端叠加图也恢复为直接使用 `/static/imgs/corner_${corner}.jpg`，不再做 `A/B/C` 到其他图片文件的映射。
+
+### 2026-06-11 - 修正 Choose Corner 按钮跳选
+
+- 任务：修正 Choose Corner 点击 A/B/C 后按钮 selected 状态出现循环跳选的问题，避免 UI 显示与实验者实际选择产生歧义。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`memory.md`。
+- 验证：设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_show_3d.py -p no:cacheprovider` 通过，结果为 14 passed；`git diff --check` 无空白错误。当前环境没有 `node` 命令，因此未执行 JS 语法检查。
+- 备注：删除 `previewCorner` 临时状态，让 corner 按钮 selected 和叠加图显示都只以当前后端 payload 的 `corner` 为单一来源；点击 corner 时临时禁用按钮，等待 `/api/initialization/corner` 返回后再渲染。
+
+### 2026-06-19 - Gsensor Choose Corner 参考图改为左上角 inset
+
+- 任务：将 Choose Corner 阶段的 A/B/C 参考图从主图全尺寸半透明叠加，改为显示在 Image Marking 主图左上角的小型参考图，避免遮挡主图点选和观察。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/styles.css`、`memory.md`。
+- 验证：设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_show_3d.py -p no:cacheprovider` 通过，结果为 14 passed；`git diff --check` 无空白错误，仅有既有 LF/CRLF 提示。
+- 备注：删除旧的 `corner-overlay` DOM/JS/CSS 命名和按 canvas 尺寸同步 overlay 的逻辑，改为 `corner-reference-inset`；参考图使用固定左上角浮层、清晰不透明显示，并保留 `pointer-events: none` 以免拦截主图交互。
