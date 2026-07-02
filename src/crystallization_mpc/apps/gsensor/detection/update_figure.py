@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
-def update_figure(u_struct, v_struct, I, file):
+def update_figure(u_struct, v_struct, I, file, output_dir: str | Path | None = None):
     image = _to_rgb_image(I)
     draw = ImageDraw.Draw(image)
 
@@ -29,7 +29,7 @@ def update_figure(u_struct, v_struct, I, file):
         width=2,
     )
 
-    image_dir = Path("..") / "gsensor_data" / "images"
+    image_dir = Path("..") / "gsensor_data" / "images" if output_dir is None else Path(output_dir)
     image_dir.mkdir(parents=True, exist_ok=True)
     image_path = image_dir / _output_name(file)
     image.save(image_path)

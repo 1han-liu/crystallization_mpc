@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,14 +16,30 @@ from crystallization_mpc.apps.gsensor.detection.find_edge_points_yolov import (
 )
 from crystallization_mpc.apps.gsensor.utils.reorient_line import reorient_line
 
+logger = logging.getLogger(__name__)
+
 
 def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
     old_line = line
     path = _image_file_path(image_file)
+    logger.warning("update_line start: image=%s", path)
     I_orig = imread(path)
+    logger.warning(
+        "update_line image loaded: image=%s shape=%s dtype=%s",
+        path,
+        getattr(I_orig, "shape", None),
+        getattr(I_orig, "dtype", None),
+    )
     I = I_orig
 
+    logger.warning("update_line YOLO edge detection start: image=%s", path)
     I = find_edge_points_yolov(I, kernel)
+    logger.warning(
+        "update_line YOLO edge detection done: image=%s edge_pixels=%s",
+        path,
+        int(np.count_nonzero(I)),
+    )
+    logger.warning("update_line mask start: image=%s", path)
     I, _ = calc_masked_image(
         I,
         line.point1,
@@ -31,13 +48,28 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
         _param(params_G, "width"),
         _param(params_G, "ratio"),
     )
+    logger.warning(
+        "update_line mask done: image=%s masked_edge_pixels=%s",
+        path,
+        int(np.count_nonzero(I)),
+    )
 
+    logger.warning("update_line hough start: image=%s", path)
     Hs, thetas, rhos = hough(I, theta=calc_theta_range(line.theta, _param(params_G, "delta_theta")))
+    logger.warning(
+        "update_line hough done: image=%s H_shape=%s theta_count=%s rho_count=%s",
+        path,
+        Hs.shape,
+        len(thetas),
+        len(rhos),
+    )
     rho_min = line.rho - _param(params_G, "width") / _param(params_G, "width_divider")
     rho_max = line.rho + _param(params_G, "width") / _param(params_G, "width_divider")
     Hs[(rhos < rho_min) | (rhos > rho_max), :] = 0
     peaks = houghpeaks(Hs, _param(params_G, "num_peak"), nhood_size=(9, 1))
+    logger.warning("update_line hough peaks done: image=%s peak_count=%s", path, len(peaks))
     lines = houghlines(I, thetas, rhos, peaks, fill_gap=5, min_length=7)
+    logger.warning("update_line hough lines done: image=%s line_count=%s", path, len(lines))
 
     dist2o = np.inf
     line_cand = None
@@ -60,6 +92,7 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
         line = line_cand
 
     dist = abs(np.dot(_point3(line.point1) - _point3(t), _point3(n)))
+    logger.warning("update_line done: image=%s dist=%s", path, dist)
     return line, dist, I_orig
 
 

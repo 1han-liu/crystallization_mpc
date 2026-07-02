@@ -33,6 +33,8 @@ const cornerReferenceImage = document.querySelector("#corner-reference-image");
 const cornerControls = document.querySelector("#corner-controls");
 const candidateControlsWrap = document.querySelector("#candidate-controls-wrap");
 const candidateControls = document.querySelector("#candidate-controls");
+const runDscgrButton = document.querySelector("#run-dscgr");
+const dscgrStatus = document.querySelector("#dscgr-status");
 const pointList = document.querySelector("#point-list");
 const initSaveStatus = document.querySelector("#init-save-status");
 
@@ -65,6 +67,7 @@ const state = {
     items: new Map(),
   },
   cornerRequestInFlight: false,
+  dscgrInFlight: false,
 };
 
 function setDrawerOpen(open) {
@@ -243,6 +246,7 @@ function renderStatus(payload) {
     measurement_running: payload.measurement_running,
     last_measurement_step_at: payload.last_measurement_step_at || null,
     measurement_step_count: payload.measurement_step_count || 0,
+    last_dscgr_result: payload.last_dscgr_result || null,
   }, null, 2);
   renderInitialization(payload.initialization || null);
 }
@@ -303,6 +307,7 @@ function renderInitialization(payload) {
 
   undoInitButton.disabled = !payload?.can_undo;
   resetInitButton.disabled = !hasSession;
+  runDscgrButton.disabled = payload?.status !== "ready_for_3d" || state.dscgrInFlight;
 
   fullModeControls.querySelectorAll("button").forEach((button) => {
     button.disabled = !hasSession || step?.key !== "is_full";
@@ -985,6 +990,29 @@ async function submitInitializationPoint(event) {
   renderInitialization(nextPayload);
 }
 
+async function runDscgr() {
+  if (!state.initialization?.session_id || state.initialization.status !== "ready_for_3d") {
+    return;
+  }
+  state.dscgrInFlight = true;
+  runDscgrButton.disabled = true;
+  dscgrStatus.textContent = "running";
+  try {
+    const result = await fetchJson("/api/dscgr/run", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.initialization.session_id }),
+    });
+    const count = Array.isArray(result.processed_ptrs) ? result.processed_ptrs.length : 0;
+    dscgrStatus.textContent = `done: ${count} frames, ${result.output_dir || ""}`;
+    await loadStatus();
+  } catch (error) {
+    dscgrStatus.textContent = error.message;
+  } finally {
+    state.dscgrInFlight = false;
+    renderInitialization(state.initialization);
+  }
+}
+
 refreshButton.addEventListener("click", async () => {
   await loadStatus();
 });
@@ -1102,6 +1130,10 @@ candidateControls.addEventListener("click", async (event) => {
     }),
   });
   renderInitialization(payload);
+});
+
+runDscgrButton.addEventListener("click", async () => {
+  await runDscgr();
 });
 
 threeDCanvas.addEventListener("pointerdown", (event) => {

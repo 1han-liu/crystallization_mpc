@@ -22,6 +22,8 @@ from crystallization_mpc.apps.central.params import (
     load_params,
     save_params_document,
 )
+from crystallization_mpc.apps.gsensor.DSCGR import DSCGR
+from crystallization_mpc.apps.gsensor.detection.initialize_DSCGR import initialize_DSCGR
 from crystallization_mpc.apps.gsensor.initialization import (
     IMAGE_EXTENSIONS,
     GsensorInitializationManager,
@@ -38,6 +40,7 @@ DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
 DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
 DEFAULT_UPLOAD_ROOT = PROJECT_ROOT / ".runtime" / "gsensor_uploads"
+DEFAULT_DSCGR_OUTPUT_ROOT = PROJECT_ROOT / ".runtime" / "dscgr_runs"
 logger = logging.getLogger(__name__)
 
 
@@ -81,6 +84,10 @@ class InitializationResetRequest(BaseModel):
     session_id: str | None = None
 
 
+class DscgrRunRequest(BaseModel):
+    session_id: str | None = None
+
+
 class GsensorService:
     def __init__(
         self,
@@ -91,6 +98,7 @@ class GsensorService:
         runtime_params_path: Optional[str | Path] = None,
         param_meta_path: Optional[str | Path] = None,
         upload_root_path: Optional[str | Path] = None,
+        dscgr_output_root_path: Optional[str | Path] = None,
     ) -> None:
         self.url = url or os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")
         self.exchange = exchange or os.getenv("RABBIT_EXCHANGE", EXCHANGE)
@@ -111,6 +119,10 @@ class GsensorService:
             upload_root_path
             or os.getenv("GSENSOR_UPLOAD_ROOT", str(DEFAULT_UPLOAD_ROOT))
         )
+        self.dscgr_output_root_path = Path(
+            dscgr_output_root_path
+            or os.getenv("GSENSOR_DSCGR_OUTPUT_ROOT", str(DEFAULT_DSCGR_OUTPUT_ROOT))
+        )
         self.params: Dict[str, Any] = {}
         self.active = False
         self.initialized = False
@@ -121,6 +133,7 @@ class GsensorService:
         self.last_params_message: Dict[str, Any] | None = None
         self.last_measurement_step_at: str | None = None
         self.measurement_step_count = 0
+        self.last_dscgr_result: Dict[str, Any] | None = None
         self.initialization = GsensorInitializationManager()
         self._consumer_thread: threading.Thread | None = None
         self._measurement_thread: threading.Thread | None = None
@@ -338,6 +351,7 @@ class GsensorService:
                 "last_params_message": self.last_params_message,
                 "last_measurement_step_at": self.last_measurement_step_at,
                 "measurement_step_count": self.measurement_step_count,
+                "last_dscgr_result": self.last_dscgr_result,
             }
 
     def set_active(self, active: bool) -> Dict[str, Any]:
@@ -381,6 +395,40 @@ class GsensorService:
         if saved_count == 0:
             raise ValueError("The selected folder does not contain supported image files.")
         return folder
+
+    def run_dscgr(self, session_id: str | None = None) -> Dict[str, Any]:
+        payload = self.initialization.payload(session_id)
+        logger.warning(
+            "DSCGR service request: session_id=%s status=%s image_folder=%s",
+            session_id,
+            payload.get("status"),
+            payload.get("image_folder"),
+        )
+        if payload.get("status") != "ready_for_3d":
+            raise ValueError("Complete initialization and select a 3D candidate before running DSCGR.")
+
+        uv_struct_list, kernel = initialize_DSCGR(
+            self.initialization,
+            session_id=session_id,
+        )
+        logger.warning("DSCGR initialization ready: session_id=%s", session_id)
+        output_dir = self.dscgr_output_root_path / uuid4().hex
+        result = DSCGR(
+            payload["image_folder"],
+            self.current_params(),
+            uv_struct_list,
+            kernel,
+            output_dir=output_dir,
+        )
+        with self._lock:
+            self.last_dscgr_result = result
+        logger.warning(
+            "DSCGR service done: session_id=%s processed_ptrs=%s output_dir=%s",
+            session_id,
+            result.get("processed_ptrs"),
+            result.get("output_dir"),
+        )
+        return result
 
 
 def _safe_upload_filename(filename: str, index: int) -> str:
@@ -541,9 +589,19 @@ def reset_initialization(payload: InitializationResetRequest) -> Dict[str, Any]:
         _raise_http_error(exc)
 
 
+@web_app.post("/api/dscgr/run")
+def run_dscgr(payload: DscgrRunRequest) -> Dict[str, Any]:
+    logger.warning("DSCGR API request received: session_id=%s", payload.session_id)
+    try:
+        return service.run_dscgr(payload.session_id)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
 __all__ = [
     "GsensorParamsUpdate",
     "GsensorService",
+    "DscgrRunRequest",
     "Initialization3DChoiceRequest",
     "InitializationCornerRequest",
     "InitializationIsFullRequest",

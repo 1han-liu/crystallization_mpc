@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -56,7 +54,6 @@ def _manager_with_ready_session(tmp_path):
 
 def test_initialize_DSCGR_finalizes_completed_web_session(monkeypatch, tmp_path):
     manager, session = _manager_with_ready_session(tmp_path)
-    saved = {}
 
     def fake_calc_2d_3d_info(M, W, U, V, u_op, v_op, u_ad, v_ad, is_full):
         assert M == session.recovered_3d["M"]
@@ -70,26 +67,14 @@ def test_initialize_DSCGR_finalizes_completed_web_session(monkeypatch, tmp_path)
         assert is_full is True
         return "u_struct", "v_struct"
 
-    def fake_save(path, variables):
-        saved["path"] = Path(path)
-        saved["variables"] = variables
-
     monkeypatch.setattr(module, "calc_2d_3d_info", fake_calc_2d_3d_info)
-    monkeypatch.setattr(module, "save_DSCGR_info", fake_save)
 
     uv_struct_list, kernel = module.initialize_DSCGR(
         manager,
         session.session_id,
-        output_dir=tmp_path / "gsensor_data",
     )
 
     assert uv_struct_list == ["u_struct", "v_struct"]
-    assert saved["path"] == tmp_path / "gsensor_data" / "DSCGR_info.mat"
-    assert saved["variables"]["path"] == session.selected_image
-    assert saved["variables"]["I"] is None
-    assert saved["variables"]["corner"] == "A"
-    assert saved["variables"]["m"] == [0.0, 0.0, 0.0]
-    assert saved["variables"]["w"] == [10.0, 10.0, 0.0]
     np.testing.assert_allclose(kernel.k_c_cell[0], [1.0, 0.0, 0.0])
     np.testing.assert_allclose(kernel.k_o_cell[3], [4.0, 1.0, 0.0])
 
@@ -100,7 +85,7 @@ def test_initialize_DSCGR_requires_selected_3d_candidate(tmp_path):
     session.recovered_3d = None
 
     with pytest.raises(ValueError, match="select a 3D candidate"):
-        module.initialize_DSCGR(manager, session.session_id, output_dir=tmp_path / "data")
+        module.initialize_DSCGR(manager, session.session_id)
 
 
 def test_initialize_DSCGR_requires_complete_kernel_points(tmp_path):
@@ -108,4 +93,18 @@ def test_initialize_DSCGR_requires_complete_kernel_points(tmp_path):
     session.points.pop("kernel.k_o_cell.4")
 
     with pytest.raises(ValueError, match="kernel points are incomplete"):
-        module.initialize_DSCGR(manager, session.session_id, output_dir=tmp_path / "data")
+        module.initialize_DSCGR(manager, session.session_id)
+
+
+def test_initialize_DSCGR_does_not_write_mat_file(monkeypatch, tmp_path):
+    manager, session = _manager_with_ready_session(tmp_path)
+    monkeypatch.setattr(module, "calc_2d_3d_info", lambda *args: ("u_struct", "v_struct"))
+
+    uv_struct_list, kernel = module.initialize_DSCGR(
+        manager,
+        session.session_id,
+    )
+
+    assert uv_struct_list == ["u_struct", "v_struct"]
+    np.testing.assert_allclose(kernel.k_c_cell[0], [1.0, 0.0, 0.0])
+    assert not list(tmp_path.rglob("*.mat"))

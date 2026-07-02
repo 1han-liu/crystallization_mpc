@@ -46,3 +46,21 @@ def test_update_figure_uses_matlab_uppercase_png_replacement(monkeypatch, tmp_pa
 
     assert output_path.name == "frame.png"
     assert output_path.exists()
+
+
+def test_update_figure_accepts_output_dir(tmp_path):
+    image = np.zeros((8, 8), dtype=np.uint8)
+    u_struct = _struct([1, 1], [6, 1], [1, 2], [6, 2])
+    v_struct = _struct([1, 4], [6, 4], [1, 5], [6, 5])
+    output_dir = tmp_path / "overlays"
+
+    output_path = update_figure(
+        u_struct,
+        v_struct,
+        image,
+        SimpleNamespace(name="frame.PNG"),
+        output_dir=output_dir,
+    )
+
+    assert output_path == output_dir / "frame.jpg"
+    assert output_path.exists()

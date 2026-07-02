@@ -182,3 +182,18 @@
 - 变更文件：更新 `src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/styles.css`、`memory.md`。
 - 验证：设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_gsensor_initialization.py tests\test_show_3d.py -p no:cacheprovider` 通过，结果为 14 passed；`git diff --check` 无空白错误，仅有既有 LF/CRLF 提示。
 - 备注：删除旧的 `corner-overlay` DOM/JS/CSS 命名和按 canvas 尺寸同步 overlay 的逻辑，改为 `corner-reference-inset`；参考图使用固定左上角浮层、清晰不透明显示，并保留 `pointer-events: none` 以免拦截主图交互。
+
+### 2026-07-02 - Gsensor DSCGR 离线测试脚本与 UI 触发入口
+
+- 任务：将 MATLAB `DSCGR.m` 离线测试主循环接入 Python 项目；确认 DSCGR 与后续 controller 在线“测量生长速率”函数是分开的流程。Python 版 DSCGR 作为 Gsensor 初始化完成后的可选离线测试动作，不触发 `G_active`、不启动 controller、不写 `.mat`。
+- 变更文件：新增 `src/crystallization_mpc/apps/gsensor/DSCGR.py`、`src/crystallization_mpc/apps/gsensor/detection/params.py`、`tests/test_DSCGR.py`、`tests/test_gsensor_detection_params.py`；更新 `src/crystallization_mpc/apps/gsensor/app.py`、`src/crystallization_mpc/apps/gsensor/detection/initialize_DSCGR.py`、`src/crystallization_mpc/apps/gsensor/detection/update_figure.py`、`src/crystallization_mpc/apps/gsensor/ui/static/index.html`、`src/crystallization_mpc/apps/gsensor/ui/static/app.js`、`src/crystallization_mpc/apps/gsensor/ui/static/styles.css`、`tests/test_initialize_DSCGR.py`、`tests/test_update_figure.py`。
+- 验证：设置 `GSENSOR_UPLOAD_ROOT=tests\.tmp_gsensor_uploads` 后运行 `.venv\Scripts\python -m pytest tests\test_DSCGR.py tests\test_gsensor_detection_params.py tests\test_update_figure.py tests\test_initialize_DSCGR.py tests\test_gsensor_initialization.py -q -p no:cacheprovider` 通过，结果为 24 passed；运行 `.venv\Scripts\python -m pytest tests\test_growth_rate_commands.py tests\test_DSCGR.py -q -p no:cacheprovider` 通过，结果为 10 passed；运行 `.venv\Scripts\python -m py_compile src\crystallization_mpc\apps\gsensor\app.py src\crystallization_mpc\apps\gsensor\DSCGR.py tests\test_DSCGR.py` 通过；`git diff --check` 无空白错误，仅有既有 LF/CRLF 提示；当前环境无 `node` 命令，未执行 JS 语法检查。
+- 备注：`DSCGR.py` 是最小离线脚本入口，函数名为 `DSCGR(folder_G, params, uv_struct_list, kernel, output_dir="imgs")`；保留 MATLAB 中有意跳帧行为，默认处理 `ptr=2,4,6...`；输出 `DSCGR_data.json`、`DSCGR_data.csv` 和 `overlays/` 检测叠加图，不保存 `.mat`。Web UI 新增 `Run DSCGR` 按钮，只在初始化状态 `ready_for_3d` 后启用；后端新增 `POST /api/dscgr/run`，输出目录为 `.runtime/dscgr_runs/<uuid>/`。`detection/params.py::build_params_G` 只把全局扁平参数 `params_G.*` 转为检测函数需要的小结构，不在 `update_line()` 内做兼容。真实完整运行 DSCGR 仍依赖后续补齐/修正底层算法问题：`create_EKF_G()` 仍使用 `extendedKalmanFilter` 占位，Hough MATLAB parity 测试目前仍有 rho 范围与 `houghpeaks` 差异。
+
+### 2026-07-02 - Gsensor 用普通 Kalman Filter 替换 MATLAB EKF 占位
+
+- 任务：把 `create_EKF_G()` 里原来的 `extendedKalmanFilter` 占位实现掉，避免 DSCGR 跑到 `initialize_uv_struct()` 时因为滤波器未实现而中断。
+- 变更文件：更新 `src/crystallization_mpc/apps/gsensor/detection/create_EKF.py`；新增 `tests/test_create_EKF.py`。
+- 原因：MATLAB 原代码用的是 `extendedKalmanFilter`，但这里的生长速率状态模型本身是线性的：状态是 `[distance, growth_rate, acceleration]`，下一步状态就是“距离按速度和加速度往前推”，观测值也是同一组量。通俗说，EKF 是给“弯的、非线性的关系”用的；当前这段关系是直的，所以普通 Kalman Filter 就够用，不需要额外引入第三方 EKF 包。
+- 实现：新增 `GrowthRateKalmanFilter`，提供现有 `update_EKF_G()` 需要的 `predict()` 和 `correct(measurement)` 两个方法；`create_EKF_G()` 仍保留原函数名，让上层代码不用改。代码注释已写明：MATLAB 用的是 EKF，但 Python 这里因为模型是线性的，所以用普通 Kalman Filter。
+- 验证：运行 `.venv\Scripts\python -m pytest tests\test_DSCGR.py tests\test_create_EKF.py tests\test_update_EKF_G.py -q -p no:cacheprovider` 通过，结果为 7 passed；运行 `.venv\Scripts\python -m py_compile src\crystallization_mpc\apps\gsensor\detection\create_EKF.py tests\test_create_EKF.py` 通过；`git diff --check -- src\crystallization_mpc\apps\gsensor\detection\create_EKF.py tests\test_create_EKF.py` 无空白错误，仅有既有 LF/CRLF 提示。

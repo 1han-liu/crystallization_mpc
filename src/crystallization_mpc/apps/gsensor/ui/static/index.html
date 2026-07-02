@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260619-corner-inset">
+    <link rel="stylesheet" href="/static/styles.css?v=20260702-dscgr">
   </head>
   <body>
     <div class="shell">
@@ -128,6 +128,12 @@
                 <div class="candidate-grid" id="candidate-controls"></div>
               </div>
 
+              <div class="dscgr-controls">
+                <p class="eyebrow">Offline Test</p>
+                <button id="run-dscgr" class="primary" disabled>Run DSCGR</button>
+                <p id="dscgr-status" class="save-status muted">idle</p>
+              </div>
+
               <div class="point-list-wrap">
                 <p class="eyebrow">Points</p>
                 <ol id="point-list" class="point-list"></ol>
@@ -165,6 +171,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260619-corner-inset"></script>
+    <script src="/static/app.js?v=20260702-dscgr"></script>
   </body>
 </html>

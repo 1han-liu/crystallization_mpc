@@ -8,10 +8,12 @@
 
 ```python
 Hs, thetas, rhos = hough(I, theta=calc_theta_range(line.theta, params_G.delta_theta))
-Hs[(rhos < rho_min) | (rhos > rho_max), :] = 0
+Hs(rhos < rho_min | rhos > rho_max) = 0
 peaks = houghpeaks(Hs, params_G.num_peak, nhood_size=(9, 1))
 lines = houghlines(I, thetas, rhos, peaks, fill_gap=5, min_length=7)
 ```
+
+注意：`H_rho_filtered` 对应的是当前 MATLAB 代码实际执行后的 `Hs`。这里要复现当前 MATLAB 语句 `Hs(rhos < rho_min | rhos > rho_max) = 0`，而不是先改成按 rho 行过滤的理想逻辑。Python 对照测试中应按 MATLAB 的列优先线性索引语义复现这一句。
 
 因此测试应优先覆盖：
 

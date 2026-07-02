@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,7 @@ TOPK = 300
 MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "best_1000_608.onnx"
 
 _RUNNER = None
+logger = logging.getLogger(__name__)
 
 
 class YoloV8SegRunner(Protocol):
@@ -35,15 +37,22 @@ class OnnxRuntimeYoloV8Seg:
             ) from exc
 
         self.model_path = Path(model_path)
+        logger.warning("YOLO ONNX session init start: model=%s", self.model_path)
         self.session = ort.InferenceSession(
             str(self.model_path),
             providers=providers or ["CPUExecutionProvider"],
         )
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [output.name for output in self.session.get_outputs()]
+        logger.warning("YOLO ONNX session init done: outputs=%s", self.output_names)
 
     def run(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        logger.warning("YOLO ONNX inference start: input_shape=%s dtype=%s", x.shape, x.dtype)
         outputs = self.session.run(self.output_names, {self.input_name: x})
+        logger.warning(
+            "YOLO ONNX inference done: output_shapes=%s",
+            [np.asarray(output).shape for output in outputs],
+        )
         if len(outputs) < 2:
             raise ValueError("YOLOv8 segmentation ONNX model must return det and proto outputs.")
         return outputs[0], outputs[1]
@@ -62,15 +71,26 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
     I0 = np.asarray(I)
     H0 = I0.shape[0]
     W0 = I0.shape[1]
+    logger.warning(
+        "find_edge_points_yolov start: image_shape=%s dtype=%s",
+        I0.shape,
+        I0.dtype,
+    )
 
     I_lb, _ratio, pad = letterbox(I0, (IMGSZ, IMGSZ))
     X = np.asarray(I_lb, dtype=np.float32) / 255.0
     X = np.transpose(X, (2, 0, 1))[np.newaxis, :, :, :]
 
     out1, out2 = runner.run(X)
+    logger.warning("find_edge_points_yolov normalize outputs start")
     det, proto = normalize_outputs(out1, out2)
     det = _det_rows(det)
     proto = np.squeeze(proto)
+    logger.warning(
+        "find_edge_points_yolov normalize outputs done: det_shape=%s proto_shape=%s",
+        det.shape,
+        proto.shape,
+    )
 
     proto_c, proto_h, proto_w = proto.shape
     if proto_c != 32:
@@ -89,6 +109,7 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
     xywh = xywh[keep, :]
     score = score[keep]
     coeffs = coeffs[keep, :]
+    logger.warning("find_edge_points_yolov confidence filter done: kept=%s", score.size)
 
     if score.size > TOPK:
         selected = np.argsort(score)[::-1][:TOPK]
@@ -113,11 +134,13 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
     idx = nms_xyxy_idx(xyxy, score, IOU_TH)
     xyxy = xyxy[idx, :]
     coeffs = coeffs[idx, :]
+    logger.warning("find_edge_points_yolov nms done: kept=%s", xyxy.shape[0])
 
     padw = pad[0]
     padh = pad[1]
     mask_union = np.zeros((H0, W0), dtype=bool)
 
+    logger.warning("find_edge_points_yolov mask loop start: count=%s", xyxy.shape[0])
     for ii in range(xyxy.shape[0]):
         ci = coeffs[ii, :].astype(np.float32).reshape(-1, 1)
         m = _sigmoid((P @ ci).reshape(-1))
@@ -148,31 +171,73 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
         mask_ori = bwareaopen(mask_lin, 20)
         mask_union = mask_union | mask_ori
 
+    logger.warning(
+        "find_edge_points_yolov mask loop done: union_pixels=%s",
+        int(np.count_nonzero(mask_union)),
+    )
     mask_big = largest_component(mask_union)
     if not np.any(mask_big):
+        logger.warning("find_edge_points_yolov done: no largest component")
         return np.zeros((H0, W0), dtype=bool)
 
     boundary = bwperim(mask_big)
     y, x = np.nonzero(boundary)
     if x.size < 3:
+        logger.warning("find_edge_points_yolov done: boundary too small")
         return np.zeros((H0, W0), dtype=bool)
 
+    logger.warning("find_edge_points_yolov convex hull start: points=%s", x.size)
     points = np.column_stack([x, y])
     hull = ConvexHull(points)
     hull_points = points[hull.vertices]
     hull_mask = poly2mask(hull_points[:, 0], hull_points[:, 1], H0, W0)
+    logger.warning("find_edge_points_yolov convex hull done: vertices=%s", len(hull.vertices))
 
+    logger.warning("find_edge_points_yolov post hull perimeter start")
     edge_mask = bwperim(hull_mask)
     I_wo_kernel = edge_mask.copy()
+    logger.warning(
+        "find_edge_points_yolov post hull perimeter done: edge_pixels=%s",
+        int(np.count_nonzero(edge_mask)),
+    )
 
+    logger.warning("find_edge_points_yolov kernel mask start")
     I_kernel = calc_kernel_mask(edge_mask, kernel)
+    logger.warning(
+        "find_edge_points_yolov kernel mask done: kernel_pixels=%s",
+        int(np.count_nonzero(I_kernel)),
+    )
     edge_mask[I_kernel] = True
+    logger.warning("find_edge_points_yolov large closing start: radius=100")
     edge_mask = ndimage.binary_closing(edge_mask, structure=disk_strel(100))
+    logger.warning(
+        "find_edge_points_yolov large closing done: edge_pixels=%s",
+        int(np.count_nonzero(edge_mask)),
+    )
+    logger.warning("find_edge_points_yolov keep largest start")
     edge_mask = keep_largest_by_area_open(edge_mask)
+    logger.warning(
+        "find_edge_points_yolov keep largest done: edge_pixels=%s",
+        int(np.count_nonzero(edge_mask)),
+    )
 
     edge_mask = edge_mask & I_wo_kernel
+    logger.warning(
+        "find_edge_points_yolov restore original edge done: edge_pixels=%s",
+        int(np.count_nonzero(edge_mask)),
+    )
+    logger.warning("find_edge_points_yolov edge nothinning start")
     edge_mask = edge_nothinning(edge_mask)
+    logger.warning(
+        "find_edge_points_yolov edge nothinning done: edge_pixels=%s",
+        int(np.count_nonzero(edge_mask)),
+    )
+    logger.warning("find_edge_points_yolov final dilation start")
     edge_mask = ndimage.binary_dilation(edge_mask, structure=disk_strel(3))
+    logger.warning(
+        "find_edge_points_yolov done: edge_pixels=%s",
+        int(np.count_nonzero(edge_mask)),
+    )
     return edge_mask.astype(bool)
 
 
