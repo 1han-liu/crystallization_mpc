@@ -1,8 +1,11 @@
 import numpy as np
+import pytest
 
 from crystallization_mpc.apps.gsensor.detection.find_edge_points_yolov import (
     IMGSZ,
+    disk_strel,
     find_edge_points_yolov,
+    large_disk_binary_closing,
     letterbox,
     normalize_outputs,
     nms_xyxy_idx,
@@ -65,3 +68,24 @@ def test_find_edge_points_yolov_returns_empty_mask_without_detection():
     assert edge.shape == (24, 32)
     assert edge.dtype == np.bool_
     assert not np.any(edge)
+
+
+def test_large_disk_binary_closing_uses_opencv_morphology():
+    cv2 = pytest.importorskip("cv2")
+    mask = np.zeros((36, 42), dtype=bool)
+    mask[5:30, 6:36] = True
+    mask[14:18, 17:21] = False
+    mask[0, 0] = True
+
+    kernel = disk_strel(3).astype(np.uint8)
+    expected = cv2.morphologyEx(
+        mask.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        kernel,
+        borderType=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ).astype(bool)
+
+    actual = large_disk_binary_closing(mask, radius=3)
+
+    np.testing.assert_array_equal(actual, expected)

@@ -51,8 +51,8 @@ def DSCGR(
 ) -> dict[str, Any]:
     """Run the offline DSCGR image sequence test.
 
-    The pointer update intentionally matches the MATLAB script, so with
-    ``ptr_0=1`` it processes images 2, 4, 6, ...
+    ``ptr_0`` is used as the initialization image. The offline test then
+    processes every following image frame: 2, 3, 4, ... when ``ptr_0=1``.
     """
 
     folder = Path(folder_G)
@@ -143,7 +143,6 @@ def DSCGR(
         logger.warning("DSCGR frame done: ptr=%s ii=%s overlay=%s", ptr, ii, overlay_path)
         if print_fn is not None:
             print_fn("".join(log_parts))
-        ptr += 1
         ii += 1
 
     payload = {

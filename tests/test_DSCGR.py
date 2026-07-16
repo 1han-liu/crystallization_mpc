@@ -88,8 +88,8 @@ def test_DSCGR_writes_json_csv_and_overlay_images_without_mat(monkeypatch, tmp_p
         print_fn=log_lines.append,
     )
 
-    assert result["processed_ptrs"] == [2, 4]
-    assert seen_ptrs == [2, 2, 4, 4]
+    assert result["processed_ptrs"] == [2, 3, 4]
+    assert seen_ptrs == [2, 2, 3, 3, 4, 4]
     assert all(params_G.width == 100 for params_G in seen_params_G)
     assert all(not hasattr(params_G, "params_G.width") for params_G in seen_params_G)
     assert not list(output_dir.rglob("*.mat"))
@@ -101,12 +101,13 @@ def test_DSCGR_writes_json_csv_and_overlay_images_without_mat(monkeypatch, tmp_p
     assert json_path.exists()
     assert csv_path.exists()
     assert (output_dir / "overlays" / "IMG_002.jpg").exists()
+    assert (output_dir / "overlays" / "IMG_003.jpg").exists()
     assert (output_dir / "overlays" / "IMG_004.jpg").exists()
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["mode"] == "offline_dscgr"
-    assert payload["processed_ptrs"] == [2, 4]
-    assert len(payload["records"]) == 4
+    assert payload["processed_ptrs"] == [2, 3, 4]
+    assert len(payload["records"]) == 6
     assert payload["records"][0]["edge"] == "u"
     assert payload["records"][0]["G"] == 11.2
     assert payload["records"][1]["edge"] == "v"
@@ -114,16 +115,17 @@ def test_DSCGR_writes_json_csv_and_overlay_images_without_mat(monkeypatch, tmp_p
 
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 4
+    assert len(rows) == 6
     assert rows[0]["ptr"] == "2"
     assert rows[0]["edge"] == "u"
     assert log_lines == [
         "2: u | measured: 11.2, KF: 11.3; v | measured: 21.2, KF: 21.3; ",
-        "4: u | measured: 12.2, KF: 12.3; v | measured: 22.2, KF: 22.3; ",
+        "3: u | measured: 12.2, KF: 12.3; v | measured: 22.2, KF: 22.3; ",
+        "4: u | measured: 13.2, KF: 13.3; v | measured: 23.2, KF: 23.3; ",
     ]
 
 
-def test_DSCGR_stops_when_next_skipped_pointer_exceeds_image_count(monkeypatch, tmp_path):
+def test_DSCGR_stops_after_last_image(monkeypatch, tmp_path):
     image_folder = tmp_path / "images"
     image_folder.mkdir()
     for index in range(1, 4):
@@ -177,8 +179,8 @@ def test_DSCGR_stops_when_next_skipped_pointer_exceeds_image_count(monkeypatch, 
         print_fn=None,
     )
 
-    assert result["processed_ptrs"] == [2]
-    assert seen_ptrs == [2, 2]
+    assert result["processed_ptrs"] == [2, 3]
+    assert seen_ptrs == [2, 2, 3, 3]
 
 
 def test_gsensor_service_runs_DSCGR_from_ready_initialization(monkeypatch, tmp_path):

@@ -73,25 +73,99 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
 
     dist2o = np.inf
     line_cand = None
-    for candidate in lines:
+    len_min = _param(params_G, "len_min")
+    # Candidate diagnostics split the zero-growth case into three possibilities:
+    # Hough found no usable line, filtering rejected candidates, or projection gave zero.
+    logger.warning(
+        "update_line candidate scan start: image=%s line_count=%s len_min=%s "
+        "old_line_p1=%s old_line_p2=%s old_theta=%s old_rho=%s t=%s n=%s o=%s "
+        "is_opposite=%s",
+        path,
+        len(lines),
+        len_min,
+        _point3(line.point1).tolist(),
+        _point3(line.point2).tolist(),
+        getattr(line, "theta", None),
+        getattr(line, "rho", None),
+        _point3(t).tolist(),
+        _point3(n).tolist(),
+        _point3(o).tolist(),
+        is_opposite,
+    )
+    for candidate_index, candidate in enumerate(lines):
         candidate = reorient_line(candidate)
         candidate.point1 = _point3(candidate.point1)
         candidate.point2 = _point3(candidate.point2)
-        if np.linalg.norm(candidate.point1 - candidate.point2) < _param(params_G, "len_min"):
+        candidate_length = float(np.linalg.norm(candidate.point1 - candidate.point2))
+        logger.warning(
+            "update_line candidate: image=%s index=%s p1=%s p2=%s length=%s "
+            "theta=%s rho=%s",
+            path,
+            candidate_index,
+            candidate.point1.tolist(),
+            candidate.point2.tolist(),
+            candidate_length,
+            getattr(candidate, "theta", None),
+            getattr(candidate, "rho", None),
+        )
+        if candidate_length < len_min:
+            logger.warning(
+                "update_line candidate skipped by len_min: image=%s index=%s "
+                "length=%s len_min=%s",
+                path,
+                candidate_index,
+                candidate_length,
+                len_min,
+            )
             continue
+        # This is the current translated MATLAB selection score. Logging it tells
+        # us whether candidate choice is changing or staying constant.
         dist2o_new = np.dot(_point3(o) - _point3(line.point1), _point3(n)) * (
             float(is_opposite) - 0.5
         ) * 2
+        logger.warning(
+            "update_line candidate score: image=%s index=%s dist2o_new=%s "
+            "current_best=%s",
+            path,
+            candidate_index,
+            dist2o_new,
+            dist2o,
+        )
         if dist2o_new < dist2o:
             dist2o = dist2o_new
             line_cand = candidate
+            logger.warning(
+                "update_line candidate selected as best: image=%s index=%s "
+                "dist2o=%s",
+                path,
+                candidate_index,
+                dist2o,
+            )
 
     if line_cand is None:
+        logger.warning("update_line candidate scan done: image=%s selected=old_line", path)
         line = old_line
     else:
+        logger.warning(
+            "update_line candidate scan done: image=%s selected=new_line p1=%s p2=%s "
+            "theta=%s rho=%s",
+            path,
+            line_cand.point1.tolist(),
+            line_cand.point2.tolist(),
+            getattr(line_cand, "theta", None),
+            getattr(line_cand, "rho", None),
+        )
         line = line_cand
 
     dist = abs(np.dot(_point3(line.point1) - _point3(t), _point3(n)))
+    logger.warning(
+        "update_line distance projection: image=%s line_p1=%s t=%s n=%s dist=%s",
+        path,
+        _point3(line.point1).tolist(),
+        _point3(t).tolist(),
+        _point3(n).tolist(),
+        dist,
+    )
     logger.warning("update_line done: image=%s dist=%s", path, dist)
     return line, dist, I_orig
 

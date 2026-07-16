@@ -208,8 +208,8 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
         int(np.count_nonzero(I_kernel)),
     )
     edge_mask[I_kernel] = True
-    logger.warning("find_edge_points_yolov large closing start: radius=100")
-    edge_mask = ndimage.binary_closing(edge_mask, structure=disk_strel(100))
+    logger.warning("find_edge_points_yolov large closing start: radius=100 backend=opencv")
+    edge_mask = large_disk_binary_closing(edge_mask, radius=100)
     logger.warning(
         "find_edge_points_yolov large closing done: edge_pixels=%s",
         int(np.count_nonzero(edge_mask)),
@@ -370,6 +370,30 @@ def _sigmoid(value):
     return 1.0 / (1.0 + np.exp(-value))
 
 
+def large_disk_binary_closing(mask, radius: int):
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "opencv-python-headless is required for large disk binary closing."
+        ) from exc
+
+    mask = np.asarray(mask, dtype=bool)
+    radius = int(radius)
+    if radius <= 0:
+        return mask.copy()
+
+    kernel = disk_strel(radius).astype(np.uint8)
+    closed = cv2.morphologyEx(
+        mask.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        kernel,
+        borderType=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    return closed.astype(bool)
+
+
 def disk_strel(radius: int):
     y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
     return x * x + y * y <= radius * radius
@@ -454,6 +478,7 @@ __all__ = [
     "find_edge_points_yolov",
     "get_default_runner",
     "letterbox",
+    "large_disk_binary_closing",
     "normalize_outputs",
     "nms_xyxy_idx",
     "overlay_tint",
