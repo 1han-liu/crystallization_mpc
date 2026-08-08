@@ -7,6 +7,9 @@ const state = {
   drawerOpen: false,
   actionInFlight: false,
   operationStateSignature: "",
+  experiments: [],
+  currentRunId: null,
+  experimentActionInFlight: false,
 };
 
 const shell = document.querySelector(".shell");
@@ -24,6 +27,20 @@ const controllerForm = document.querySelector("#controller-form");
 const operationSections = document.querySelector("#operation-sections");
 const fieldTemplate = document.querySelector("#param-field-template");
 const operationItemTemplate = document.querySelector("#operation-item-template");
+const experimentStatus = document.querySelector("#experiment-status");
+const experimentRunId = document.querySelector("#experiment-run-id");
+const experimentCurrentLabel = document.querySelector("#experiment-current-label");
+const experimentCreatedAt = document.querySelector("#experiment-created-at");
+const experimentStartedAt = document.querySelector("#experiment-started-at");
+const experimentEndedAt = document.querySelector("#experiment-ended-at");
+const cameraSavePath = document.querySelector("#camera-save-path");
+const copyCameraPathButton = document.querySelector("#copy-camera-path");
+const newExperimentLabel = document.querySelector("#new-experiment-label");
+const newExperimentButton = document.querySelector("#new-experiment");
+const endExperimentButton = document.querySelector("#end-experiment");
+const experimentHistory = document.querySelector("#experiment-history");
+const selectExperimentButton = document.querySelector("#select-experiment");
+const experimentMessage = document.querySelector("#experiment-message");
 
 function setDrawerOpen(open) {
   state.drawerOpen = open;
@@ -169,6 +186,164 @@ async function loadParams() {
   renderForm(sharedForm, state.params.shared);
   renderForm(gsensorForm, state.params.gsensor);
   renderForm(controllerForm, state.params.controller);
+}
+
+function formatExperimentTime(value) {
+  if (!value) {
+    return "—";
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+function setExperimentMessage(message, { error = false } = {}) {
+  experimentMessage.textContent = message;
+  experimentMessage.classList.toggle("error", error);
+}
+
+function currentExperiment() {
+  return state.experiments.find((item) => item.run_id === state.currentRunId) || null;
+}
+
+function experimentOptionLabel(experiment) {
+  const label = experiment.label ? ` — ${experiment.label}` : "";
+  return `${experiment.run_id}${label} (${experiment.status})`;
+}
+
+function renderExperiments({ selectedRunId = null } = {}) {
+  const current = currentExperiment();
+  const hasCurrent = Boolean(current);
+  const isTerminal = current && ["completed", "failed"].includes(current.status);
+
+  experimentStatus.textContent = current?.status || "not selected";
+  experimentStatus.className = `status ${current?.status || "idle"}`;
+  experimentRunId.textContent = current?.run_id || "No experiment selected";
+  experimentCurrentLabel.textContent = current?.label || "—";
+  experimentCreatedAt.textContent = formatExperimentTime(current?.created_at);
+  experimentStartedAt.textContent = formatExperimentTime(current?.started_at);
+  experimentEndedAt.textContent = formatExperimentTime(current?.ended_at);
+  cameraSavePath.value = current?.camera_save_path || "";
+
+  copyCameraPathButton.disabled = !hasCurrent || state.experimentActionInFlight;
+  endExperimentButton.disabled = !hasCurrent || isTerminal || state.experimentActionInFlight;
+  newExperimentButton.disabled = state.experimentActionInFlight;
+  newExperimentLabel.disabled = state.experimentActionInFlight;
+
+  const previousSelection = selectedRunId || experimentHistory.value || state.currentRunId;
+  experimentHistory.innerHTML = "";
+  if (state.experiments.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No experiments available";
+    experimentHistory.appendChild(option);
+  } else {
+    state.experiments.forEach((experiment) => {
+      const option = document.createElement("option");
+      option.value = experiment.run_id;
+      option.textContent = experimentOptionLabel(experiment);
+      experimentHistory.appendChild(option);
+    });
+    const availableSelection = state.experiments.some(
+      (experiment) => experiment.run_id === previousSelection,
+    );
+    experimentHistory.value = availableSelection
+      ? previousSelection
+      : state.experiments[0].run_id;
+  }
+
+  experimentHistory.disabled = state.experiments.length === 0 || state.experimentActionInFlight;
+  selectExperimentButton.disabled = state.experiments.length === 0 || state.experimentActionInFlight;
+}
+
+async function loadExperiments(options = {}) {
+  const payload = await fetchJson("/api/experiments");
+  state.experiments = payload.experiments || [];
+  state.currentRunId = payload.current_run_id || null;
+  renderExperiments(options);
+}
+
+async function runExperimentAction(action, successMessage) {
+  state.experimentActionInFlight = true;
+  setExperimentMessage("");
+  renderExperiments();
+  try {
+    const result = await action();
+    await loadExperiments({ selectedRunId: result?.run_id || null });
+    setExperimentMessage(successMessage(result));
+    return result;
+  } catch (error) {
+    setExperimentMessage(error.message, { error: true });
+    return null;
+  } finally {
+    state.experimentActionInFlight = false;
+    renderExperiments();
+  }
+}
+
+async function createExperiment() {
+  const label = newExperimentLabel.value.trim();
+  const result = await runExperimentAction(
+    () => fetchJson("/api/experiments", {
+      method: "POST",
+      body: JSON.stringify({ label: label || null }),
+    }),
+    (experiment) => `Created ${experiment.run_id}. Point the camera software to the path shown above.`,
+  );
+  if (result) {
+    newExperimentLabel.value = "";
+  }
+  return result;
+}
+
+async function selectExperiment() {
+  const runId = experimentHistory.value;
+  if (!runId) {
+    return;
+  }
+  await runExperimentAction(
+    () => fetchJson(`/api/experiments/${encodeURIComponent(runId)}/select`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+    (experiment) => `Selected ${experiment.run_id}.`,
+  );
+}
+
+async function finishCurrentExperiment() {
+  const current = currentExperiment();
+  if (!current) {
+    return;
+  }
+  const confirmed = window.confirm(`End experiment ${current.run_id}? This action cannot be undone.`);
+  if (!confirmed) {
+    return;
+  }
+  await runExperimentAction(
+    () => fetchJson(`/api/experiments/${encodeURIComponent(current.run_id)}/finish`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+    (experiment) => `Ended ${experiment.run_id}.`,
+  );
+}
+
+async function copyCameraPath() {
+  const path = cameraSavePath.value;
+  if (!path) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(path);
+  } catch (error) {
+    cameraSavePath.select();
+    const copied = document.execCommand("copy");
+    cameraSavePath.setSelectionRange(0, 0);
+    if (!copied) {
+      setExperimentMessage("Could not copy the camera path. Select and copy it manually.", { error: true });
+      return;
+    }
+  }
+  setExperimentMessage("Camera save path copied.");
 }
 
 async function loadOperationMeta() {
@@ -361,6 +536,7 @@ async function startGrowthRateCommand() {
     publishResult.textContent = JSON.stringify(payload, null, 2);
     publishStatus.textContent = "success";
     publishStatus.className = "status success";
+    await loadExperiments({ selectedRunId: payload.experiment?.run_id || null });
   } catch (error) {
     publishResult.textContent = error.message;
     publishStatus.textContent = "error";
@@ -431,10 +607,38 @@ publishButton.addEventListener("click", async () => {
   await publishParams();
 });
 
+newExperimentButton.addEventListener("click", async () => {
+  await createExperiment();
+});
+
+newExperimentLabel.addEventListener("keydown", async (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    await createExperiment();
+  }
+});
+
+selectExperimentButton.addEventListener("click", async () => {
+  await selectExperiment();
+});
+
+endExperimentButton.addEventListener("click", async () => {
+  await finishCurrentExperiment();
+});
+
+copyCameraPathButton.addEventListener("click", async () => {
+  await copyCameraPath();
+});
+
 async function bootstrap() {
   await loadParams();
   await loadOperationMeta();
   await loadOperationState({ forceRender: true });
+  try {
+    await loadExperiments();
+  } catch (error) {
+    setExperimentMessage(error.message, { error: true });
+  }
 }
 
 bootstrap().catch((error) => {
@@ -459,6 +663,11 @@ window.addEventListener("focus", () => {
       publishResult.textContent = error.message;
       publishStatus.textContent = "error";
       publishStatus.className = "status error";
+    });
+  }
+  if (!state.experimentActionInFlight) {
+    loadExperiments().catch((error) => {
+      setExperimentMessage(error.message, { error: true });
     });
   }
 });

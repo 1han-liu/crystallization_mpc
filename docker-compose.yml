@@ -9,8 +9,17 @@ services:
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
+      - RABBIT_HEARTBEAT_SEC=0
       - PARAMS_FILE=/app/params_default.yaml
       - PARAM_META_FILE=/app/param_meta.yaml
+      - EXPERIMENT_ROOT=/data/experiments
+      - EXPERIMENT_HOST_ROOT_DISPLAY=${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+    volumes:
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
     depends_on:
       - rabbitmq
     restart: unless-stopped
@@ -25,6 +34,14 @@ services:
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
+      - EXPERIMENT_ROOT=/data/experiments
+      - GSENSOR_IMAGE_POLL_INTERVAL_S=${GSENSOR_IMAGE_POLL_INTERVAL_S:-1.0}
+    volumes:
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
     depends_on:
       - rabbitmq
     restart: unless-stopped

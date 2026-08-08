@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.params import (
     apply_derived_params,
     load_operation_meta,
@@ -18,10 +19,20 @@ from crystallization_mpc.apps.central.params import (
     load_params,
     save_params_document,
 )
+from crystallization_mpc.experiments import (
+    ExperimentNotFoundError,
+    ExperimentRegistryError,
+    InvalidExperimentIdentifierError,
+    InvalidExperimentStateError,
+)
 from crystallization_mpc.infra.rabbitmq.connection import connect
 from crystallization_mpc.infra.rabbitmq.publisher import publish
 from crystallization_mpc.infra.rabbitmq.topology import declare_exchange, declare_queue
 from crystallization_mpc.messaging.idgen import next_seq
+from crystallization_mpc.messaging.commands import (
+    EXPERIMENT_MODE_LIVE,
+    EXPERIMENT_SELECT_COMMAND,
+)
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for, route
 from crystallization_mpc.messaging.schema import build_envelope
 
@@ -33,6 +44,7 @@ DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
 DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
 DEFAULT_OPERATION_META_PATH = PROJECT_ROOT / "operation_meta.yaml"
+DEFAULT_EXPERIMENT_ROOT = PROJECT_ROOT / ".runtime" / "experiments"
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +66,10 @@ class OperationValueUpdate(BaseModel):
 
 class OperationActionUpdate(BaseModel):
     key: str
+
+
+class ExperimentCreateRequest(BaseModel):
+    label: str | None = Field(default=None, max_length=120)
 
 
 class CentralApp:
@@ -172,6 +188,42 @@ class CentralApp:
         self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
         return env
 
+    def build_experiment_select_command(
+        self,
+        run_id: str,
+        *,
+        image_directory: str = "images",
+        mode: str = EXPERIMENT_MODE_LIVE,
+        seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return build_envelope(
+            src=ROLE,
+            dst="gsensor",
+            msg_type="command",
+            name=EXPERIMENT_SELECT_COMMAND,
+            seq=next_seq() if seq is None else seq,
+            payload={
+                "run_id": run_id,
+                "image_directory": image_directory,
+                "mode": mode,
+            },
+        )
+
+    def publish_experiment_select_command(
+        self,
+        run_id: str,
+        *,
+        image_directory: str = "images",
+        mode: str = EXPERIMENT_MODE_LIVE,
+    ) -> Dict[str, Any]:
+        env = self.build_experiment_select_command(
+            run_id,
+            image_directory=image_directory,
+            mode=mode,
+        )
+        self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
+        return env
+
     def load_and_publish(
         self,
         params_path: Optional[str] = None,
@@ -190,6 +242,13 @@ class CentralService:
         self.params_path = Path(os.getenv("PARAMS_FILE", str(DEFAULT_RUNTIME_PARAMS_PATH)))
         self.param_meta_path = Path(os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH)))
         self.operation_meta_path = Path(os.getenv("OPERATION_META_FILE", str(DEFAULT_OPERATION_META_PATH)))
+        self.experiment_root = Path(
+            os.getenv("EXPERIMENT_ROOT", str(DEFAULT_EXPERIMENT_ROOT))
+        )
+        self.experiments = CentralExperimentManager(
+            self.experiment_root,
+            host_root_display=os.getenv("EXPERIMENT_HOST_ROOT_DISPLAY"),
+        )
         self.target: Literal["sigma", "G"] = os.getenv("CONTROL_TARGET", "sigma")  # type: ignore[assignment]
         if self.target not in TARGET_VALUES:
             self.target = "sigma"
@@ -303,7 +362,46 @@ class CentralService:
             "published": True,
         }
 
+    def create_experiment(self, *, label: str | None = None) -> Dict[str, Any]:
+        self._require_experiment_switch_allowed()
+        experiment = self.experiments.create(label=label)
+        command = self.publisher.publish_experiment_select_command(
+            experiment["run_id"],
+            image_directory=experiment["image_directory"],
+        )
+        return {**experiment, "selection_command": command}
+
+    def select_experiment(self, run_id: str) -> Dict[str, Any]:
+        self._require_experiment_switch_allowed(run_id)
+        experiment = self.experiments.select(run_id)
+        command = self.publisher.publish_experiment_select_command(
+            experiment["run_id"],
+            image_directory=experiment["image_directory"],
+        )
+        return {**experiment, "selection_command": command}
+
+    def _require_experiment_switch_allowed(self, run_id: str | None = None) -> None:
+        if not bool(self.operation_state.get("G_active", False)):
+            return
+        current_run_id = self.experiments.current_run_id()
+        if run_id is not None and run_id == current_run_id:
+            return
+        raise InvalidExperimentStateError(
+            "Stop growth-rate measurement before creating or switching experiments."
+        )
+
     def start_growth_rate(self) -> Dict[str, Any]:
+        run_id = self.experiments.current_run_id()
+        if run_id is None:
+            raise InvalidExperimentStateError(
+                "Create or select an experiment before starting growth-rate measurement."
+            )
+        params_snapshot = self.preview_publish_payload()
+        experiment = self.experiments.start(
+            run_id,
+            params_snapshot=params_snapshot,
+            parameter_version=int(params_snapshot["version"]),
+        )
         command = self.publisher.publish_growth_rate_command(True)
         self.operation_state["G_active"] = True
         return {
@@ -311,6 +409,7 @@ class CentralService:
             "key": "G_active",
             "value": True,
             "command": command,
+            "experiment": experiment,
         }
 
     def stop_growth_rate(self) -> Dict[str, Any]:
@@ -376,6 +475,46 @@ def update_params(payload: ParamsUpdate) -> Dict[str, Any]:
     }
 
 
+@web_app.post("/api/experiments", status_code=201)
+def create_experiment(payload: ExperimentCreateRequest) -> Dict[str, Any]:
+    try:
+        return service.create_experiment(label=payload.label)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.get("/api/experiments")
+def list_experiments() -> Dict[str, Any]:
+    try:
+        return service.experiments.list()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.get("/api/experiments/{run_id}")
+def get_experiment(run_id: str) -> Dict[str, Any]:
+    try:
+        return service.experiments.get(run_id)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/experiments/{run_id}/select")
+def select_experiment(run_id: str) -> Dict[str, Any]:
+    try:
+        return service.select_experiment(run_id)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/experiments/{run_id}/finish")
+def finish_experiment(run_id: str) -> Dict[str, Any]:
+    try:
+        return service.experiments.finish(run_id)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
 @web_app.get("/api/operation/state")
 def get_operation_state() -> Dict[str, Any]:
     preview = service.preview_publish_payload()
@@ -418,7 +557,7 @@ def start_growth_rate(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
     try:
         return service.start_growth_rate()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/operation/growth-rate/stop")
@@ -435,6 +574,18 @@ def publish_operation() -> Dict[str, Any]:
         return service.publish()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _experiment_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, ExperimentNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, InvalidExperimentIdentifierError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, InvalidExperimentStateError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, ExperimentRegistryError):
+        return HTTPException(status_code=500, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
 
 
 __all__ = ["CentralApp", "web_app"]

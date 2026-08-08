@@ -15,3 +15,17 @@ tests/.tmp_*/
 *.egg-info/
 build/
 dist/
+
+# Local deployment configuration (commit only the example templates)
+.env
+config/influxdb.env
+!.env.example
+!config/influxdb.env.example
+
+matlab_source_local/
+references_local/
+
+# Local Gsensor Hough/DSCGR comparison outputs
+/dscgr_runs/
+/dscgr_runs_new/
+/dscgr_runs_partial/

@@ -1,5 +1,11 @@
 .git/
+.env
+.env.*
+!.env.example
+config/influxdb.env
+!config/influxdb.env.example
 .venv/
+.runtime/
 .pytest_cache/
 .pytest-tmp*/
 **/.pytest_cache/
@@ -14,3 +20,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+matlab_source_local/
+references_local/
+dscgr_runs/
+dscgr_runs_new/
+dscgr_runs_partial/

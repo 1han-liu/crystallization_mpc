@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 import os
-import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -25,10 +22,19 @@ from crystallization_mpc.apps.central.params import (
 from crystallization_mpc.apps.gsensor.DSCGR import DSCGR
 from crystallization_mpc.apps.gsensor.detection.initialize_DSCGR import initialize_DSCGR
 from crystallization_mpc.apps.gsensor.initialization import (
-    IMAGE_EXTENSIONS,
     GsensorInitializationManager,
+    list_supported_images,
+)
+from crystallization_mpc.apps.gsensor.image_watcher import (
+    ImageProbe,
+    scan_new_images,
+)
+from crystallization_mpc.apps.gsensor.experiments import (
+    ExperimentNotSelectedError,
+    GsensorExperimentManager,
 )
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
+from crystallization_mpc.messaging.commands import EXPERIMENT_SELECT_COMMAND
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for
 from crystallization_mpc.messaging.schema import utc_ts
 
@@ -39,9 +45,13 @@ PROJECT_ROOT = UI_DIR.parents[4]
 DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
 DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
-DEFAULT_UPLOAD_ROOT = PROJECT_ROOT / ".runtime" / "gsensor_uploads"
 DEFAULT_DSCGR_OUTPUT_ROOT = PROJECT_ROOT / ".runtime" / "dscgr_runs"
+DEFAULT_EXPERIMENT_ROOT = PROJECT_ROOT / ".runtime" / "experiments"
 logger = logging.getLogger(__name__)
+
+
+class InitializationWhileRunningError(RuntimeError):
+    """Raised when initialization is requested during active measurement."""
 
 
 class GsensorParamsUpdate(BaseModel):
@@ -49,14 +59,8 @@ class GsensorParamsUpdate(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-class InitializationUploadedFile(BaseModel):
-    filename: str
-    content_base64: str
-
-
-class InitializationUploadFolderRequest(BaseModel):
+class InitializationStartRequest(BaseModel):
     image_choice: str = "first"
-    files: list[InitializationUploadedFile] = Field(default_factory=list)
 
 
 class InitializationSessionRequest(BaseModel):
@@ -97,8 +101,10 @@ class GsensorService:
         default_params_path: Optional[str | Path] = None,
         runtime_params_path: Optional[str | Path] = None,
         param_meta_path: Optional[str | Path] = None,
-        upload_root_path: Optional[str | Path] = None,
         dscgr_output_root_path: Optional[str | Path] = None,
+        experiment_root_path: Optional[str | Path] = None,
+        image_poll_interval_s: float | None = None,
+        image_probe: ImageProbe | None = None,
     ) -> None:
         self.url = url or os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")
         self.exchange = exchange or os.getenv("RABBIT_EXCHANGE", EXCHANGE)
@@ -115,14 +121,23 @@ class GsensorService:
             param_meta_path
             or os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH))
         )
-        self.upload_root_path = Path(
-            upload_root_path
-            or os.getenv("GSENSOR_UPLOAD_ROOT", str(DEFAULT_UPLOAD_ROOT))
-        )
         self.dscgr_output_root_path = Path(
             dscgr_output_root_path
             or os.getenv("GSENSOR_DSCGR_OUTPUT_ROOT", str(DEFAULT_DSCGR_OUTPUT_ROOT))
         )
+        self.experiment_root_path = Path(
+            experiment_root_path
+            or os.getenv("EXPERIMENT_ROOT", str(DEFAULT_EXPERIMENT_ROOT))
+        )
+        configured_poll_interval = (
+            image_poll_interval_s
+            if image_poll_interval_s is not None
+            else float(os.getenv("GSENSOR_IMAGE_POLL_INTERVAL_S", "1.0"))
+        )
+        if configured_poll_interval <= 0:
+            raise ValueError("GSENSOR_IMAGE_POLL_INTERVAL_S must be greater than zero.")
+        self.image_poll_interval_s = float(configured_poll_interval)
+        self.image_probe = image_probe
         self.params: Dict[str, Any] = {}
         self.active = False
         self.initialized = False
@@ -135,10 +150,31 @@ class GsensorService:
         self.measurement_step_count = 0
         self.last_dscgr_result: Dict[str, Any] | None = None
         self.initialization = GsensorInitializationManager()
+        self.experiments = GsensorExperimentManager(self.experiment_root_path)
+        self.current_experiment: Dict[str, Any] | None = None
+        self.experiment_selection_status = "not_selected"
+        self.experiment_selection_error: str | None = None
+        self.last_experiment_message: Dict[str, Any] | None = None
+        self.processed_image_files: set[str] = set()
+        self.last_detected_image: str | None = None
+        self.file_modified_at: str | None = None
+        self.detected_at: str | None = None
+        self.pending_image_count = 0
+        self.last_image_scan_at: str | None = None
+        self.image_scan_status = "stopped"
+        self.image_scan_error: str | None = None
         self._consumer_thread: threading.Thread | None = None
         self._measurement_thread: threading.Thread | None = None
         self._measurement_stop = threading.Event()
         self._lock = threading.RLock()
+        try:
+            self.current_experiment = self.experiments.current()
+            if self.current_experiment is not None:
+                self.experiment_selection_status = "selected"
+        except Exception as exc:
+            self.experiment_selection_status = "error"
+            self.experiment_selection_error = str(exc)
+            logger.exception("Could not restore Gsensor experiment selection.")
 
     def start(self) -> None:
         if self._consumer_thread and self._consumer_thread.is_alive():
@@ -180,27 +216,81 @@ class GsensorService:
                 self.last_command_message = msg
             name = msg.get("name")
             if name == "growth_rate.start":
-                self.start_growth_rate()
+                try:
+                    self.start_growth_rate()
+                except Exception as exc:
+                    with self._lock:
+                        self.active = False
+                        self.image_scan_status = "error"
+                        self.image_scan_error = str(exc)
+                    logger.warning("Rejected growth_rate.start command: %s", exc)
             elif name == "growth_rate.stop":
                 self.stop_growth_rate()
+            elif name == EXPERIMENT_SELECT_COMMAND:
+                try:
+                    if msg.get("src") != "central" or msg.get("dst") != ROLE:
+                        raise ValueError(
+                            "experiment.select must be sent from central to gsensor."
+                        )
+                    self.select_experiment(msg.get("payload", {}), message=msg)
+                except Exception as exc:
+                    with self._lock:
+                        self.experiment_selection_status = "rejected"
+                        self.experiment_selection_error = str(exc)
+                        self.last_experiment_message = msg
+                    logger.warning("Rejected experiment.select command: %s", exc)
 
-    def prepare_growth_rate_measurement(self) -> None:
+    def select_experiment(
+        self,
+        payload: Dict[str, Any],
+        *,
+        message: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         with self._lock:
-            self.initialized = True
-            self.initialization_status = "placeholder_ready"
-            self.initialized_at = utc_ts()
+            selection, changed = self.experiments.select(
+                payload,
+                running=self.active,
+            )
+            if changed:
+                self._reset_experiment_runtime_locked()
+            self.current_experiment = selection
+            self.experiment_selection_status = "selected"
+            self.experiment_selection_error = None
+            self.last_experiment_message = message
+            return dict(selection)
+
+    def _reset_experiment_runtime_locked(self) -> None:
+        self.initialized = False
+        self.initialization_status = "not_initialized"
+        self.initialized_at = None
+        self.initialization = GsensorInitializationManager()
+        self.last_measurement_step_at = None
+        self.measurement_step_count = 0
+        self.last_dscgr_result = None
+        self._measurement_stop.clear()
+        self._measurement_thread = None
+        self.processed_image_files.clear()
+        self.last_detected_image = None
+        self.file_modified_at = None
+        self.detected_at = None
+        self.pending_image_count = 0
+        self.last_image_scan_at = None
+        self.image_scan_status = "stopped"
+        self.image_scan_error = None
 
     def start_growth_rate(self) -> None:
         with self._lock:
             if self.active and self._measurement_thread and self._measurement_thread.is_alive():
                 return
 
-            self.prepare_growth_rate_measurement()
+            self.experiments.require_current()
             self._measurement_stop.clear()
             self.active = True
+            self.image_scan_status = "waiting_for_image"
+            self.image_scan_error = None
             self._measurement_thread = threading.Thread(
-                target=self._run_measurement_loop,
-                name="gsensor-measurement-worker",
+                target=self._run_image_polling_loop,
+                name="gsensor-image-poller",
                 daemon=True,
             )
             self._measurement_thread.start()
@@ -215,17 +305,54 @@ class GsensorService:
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=2)
 
-    def _run_measurement_loop(self) -> None:
+        with self._lock:
+            self.image_scan_status = "stopped"
+
+    def _run_image_polling_loop(self) -> None:
         try:
             while not self._measurement_stop.is_set():
-                with self._lock:
-                    self.measurement_step_count += 1
-                    self.last_measurement_step_at = utc_ts()
-                self._measurement_stop.wait(1)
+                self._scan_current_image_directory()
+                self._measurement_stop.wait(self.image_poll_interval_s)
         finally:
             with self._lock:
                 if self._measurement_stop.is_set():
                     self.active = False
+                    self.image_scan_status = "stopped"
+
+    def _scan_current_image_directory(self) -> None:
+        with self._lock:
+            selection = self.experiments.require_current()
+            processed_before = set(self.processed_image_files)
+
+        try:
+            result = scan_new_images(
+                selection["container_image_path"],
+                processed_before,
+                image_probe=self.image_probe,
+            )
+        except Exception as exc:
+            with self._lock:
+                self.last_image_scan_at = utc_ts()
+                self.image_scan_status = "error"
+                self.image_scan_error = str(exc)
+            logger.warning("Gsensor image scan failed: %s", exc)
+            return
+
+        with self._lock:
+            self.processed_image_files = set(result.processed_files)
+            self.pending_image_count = result.pending_image_count
+            self.last_image_scan_at = result.scanned_at
+            self.image_scan_error = result.last_error
+            self.image_scan_status = (
+                "running" if result.detections else "waiting_for_image"
+            )
+            if result.detections:
+                latest = result.detections[-1]
+                self.last_detected_image = latest.image_name
+                self.file_modified_at = latest.file_modified_at
+                self.detected_at = latest.detected_at
+                self.last_measurement_step_at = latest.detected_at
+                self.measurement_step_count += len(result.detections)
 
     def _measurement_running(self) -> bool:
         return self._measurement_thread is not None and self._measurement_thread.is_alive()
@@ -352,6 +479,26 @@ class GsensorService:
                 "last_measurement_step_at": self.last_measurement_step_at,
                 "measurement_step_count": self.measurement_step_count,
                 "last_dscgr_result": self.last_dscgr_result,
+                "experiment": self.current_experiment,
+                "current_run_id": (
+                    self.current_experiment.get("run_id")
+                    if self.current_experiment
+                    else None
+                ),
+                "experiment_selection_status": self.experiment_selection_status,
+                "experiment_selection_error": self.experiment_selection_error,
+                "last_experiment_message": self.last_experiment_message,
+                "image_scan": {
+                    "status": self.image_scan_status,
+                    "processed_count": len(self.processed_image_files),
+                    "last_detected_image": self.last_detected_image,
+                    "file_modified_at": self.file_modified_at,
+                    "detected_at": self.detected_at,
+                    "pending_image_count": self.pending_image_count,
+                    "last_scan_at": self.last_image_scan_at,
+                    "error": self.image_scan_error,
+                    "poll_interval_s": self.image_poll_interval_s,
+                },
             }
 
     def set_active(self, active: bool) -> Dict[str, Any]:
@@ -361,40 +508,64 @@ class GsensorService:
             self.stop_growth_rate()
         return self.status()
 
-    def start_uploaded_initialization(
+    def current_experiment_image_source(self) -> Dict[str, Any]:
+        selection = self.experiments.current()
+        if selection is None:
+            return {
+                "selected": False,
+                "run_id": None,
+                "image_directory": None,
+                "container_image_path": None,
+                "image_count": 0,
+                "first_image": None,
+                "latest_image": None,
+            }
+
+        images = list_supported_images(selection["container_image_path"])
+        return {
+            "selected": True,
+            "run_id": selection["run_id"],
+            "image_directory": selection["image_directory"],
+            "container_image_path": selection["container_image_path"],
+            "image_count": len(images),
+            "first_image": images[0].name if images else None,
+            "latest_image": images[-1].name if images else None,
+        }
+
+    def start_current_experiment_initialization(
         self,
-        files: list[InitializationUploadedFile],
         image_choice: str = "first",
     ) -> Dict[str, Any]:
-        folder = self._save_uploaded_initialization_folder(files)
-        return self.initialization.start_folder(str(folder), image_choice)
+        with self._lock:
+            if self.active:
+                raise InitializationWhileRunningError(
+                    "Stop growth-rate measurement before starting initialization."
+                )
+            selection = self.experiments.require_current()
+            payload = self.initialization.start_folder(
+                selection["container_image_path"],
+                image_choice,
+            )
+            self.initialized = False
+            self.initialization_status = str(payload.get("status") or "not_initialized")
+            self.initialized_at = None
+        return payload
 
-    def _save_uploaded_initialization_folder(
+    def select_initialization_3d_choice(
         self,
-        files: list[InitializationUploadedFile],
-    ) -> Path:
-        if not files:
-            raise ValueError("Select an image folder before loading.")
-
-        folder = self.upload_root_path / uuid4().hex
-        folder.mkdir(parents=True, exist_ok=False)
-        saved_count = 0
-        used_names: set[str] = set()
-        for index, uploaded_file in enumerate(files, start=1):
-            safe_name = _safe_upload_filename(uploaded_file.filename, index)
-            if Path(safe_name).suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            target_name = _dedupe_filename(safe_name, used_names)
-            try:
-                target = folder / target_name
-                target.write_bytes(_decode_uploaded_file(uploaded_file.content_base64))
-            except (binascii.Error, ValueError) as exc:
-                raise ValueError(f"Invalid uploaded image data: {uploaded_file.filename}") from exc
-            saved_count += 1
-
-        if saved_count == 0:
-            raise ValueError("The selected folder does not contain supported image files.")
-        return folder
+        session_id: str,
+        choice: int,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            selection = self.experiments.require_current()
+            payload = self.initialization.select_3d_choice(session_id, choice)
+            snapshot = {**payload, "run_id": selection["run_id"]}
+            self.experiments.save_initialization(snapshot)
+            self.initialized = True
+            self.initialization_status = str(payload.get("status") or "ready_for_3d")
+            if self.initialized_at is None:
+                self.initialized_at = utc_ts()
+        return payload
 
     def run_dscgr(self, session_id: str | None = None) -> Dict[str, Any]:
         payload = self.initialization.payload(session_id)
@@ -429,29 +600,6 @@ class GsensorService:
             result.get("output_dir"),
         )
         return result
-
-
-def _safe_upload_filename(filename: str, index: int) -> str:
-    name = Path(filename.replace("\\", "/")).name or f"image_{index:05d}.bin"
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
-
-
-def _dedupe_filename(filename: str, used_names: set[str]) -> str:
-    candidate = filename
-    path = Path(filename)
-    counter = 1
-    while candidate in used_names:
-        candidate = f"{path.stem}_{counter}{path.suffix}"
-        counter += 1
-    used_names.add(candidate)
-    return candidate
-
-
-def _decode_uploaded_file(content_base64: str) -> bytes:
-    content = content_base64.strip()
-    if "," in content and content.startswith("data:"):
-        content = content.split(",", 1)[1]
-    return base64.b64decode(content, validate=True)
 
 
 service = GsensorService()
@@ -503,6 +651,10 @@ def reset_params() -> Dict[str, Any]:
 
 
 def _raise_http_error(exc: Exception) -> None:
+    if isinstance(exc, ExperimentNotSelectedError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, InitializationWhileRunningError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, FileNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, ValueError):
@@ -510,10 +662,20 @@ def _raise_http_error(exc: Exception) -> None:
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@web_app.post("/api/initialization/upload-folder")
-def upload_initialization_folder(payload: InitializationUploadFolderRequest) -> Dict[str, Any]:
+@web_app.get("/api/initialization/source")
+def get_initialization_source() -> Dict[str, Any]:
     try:
-        return service.start_uploaded_initialization(payload.files, payload.image_choice)
+        return service.current_experiment_image_source()
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/start")
+def start_current_experiment_initialization(
+    payload: InitializationStartRequest,
+) -> Dict[str, Any]:
+    try:
+        return service.start_current_experiment_initialization(payload.image_choice)
     except Exception as exc:
         _raise_http_error(exc)
 
@@ -568,7 +730,7 @@ def choose_initialization_corner(payload: InitializationCornerRequest) -> Dict[s
 @web_app.post("/api/initialization/3d-choice")
 def choose_initialization_3d_choice(payload: Initialization3DChoiceRequest) -> Dict[str, Any]:
     try:
-        return service.initialization.select_3d_choice(payload.session_id, payload.choice)
+        return service.select_initialization_3d_choice(payload.session_id, payload.choice)
     except Exception as exc:
         _raise_http_error(exc)
 
@@ -608,7 +770,7 @@ __all__ = [
     "InitializationPointRequest",
     "InitializationResetRequest",
     "InitializationSessionRequest",
-    "InitializationUploadFolderRequest",
-    "InitializationUploadedFile",
+    "InitializationStartRequest",
+    "InitializationWhileRunningError",
     "web_app",
 ]

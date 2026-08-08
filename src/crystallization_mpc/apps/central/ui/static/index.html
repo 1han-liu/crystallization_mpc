@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260430-growth-command7">
+    <link rel="stylesheet" href="/static/styles.css?v=20260807-experiment-ui1">
   </head>
   <body>
     <div class="shell">
@@ -68,6 +68,73 @@
           </div>
         </section>
 
+        <section class="panel experiment-panel" aria-labelledby="experiment-heading">
+          <div class="panel-head experiment-panel-head">
+            <div>
+              <p class="eyebrow">Experiment Session</p>
+              <h3 id="experiment-heading">Current Experiment</h3>
+            </div>
+            <span id="experiment-status" class="status idle">not selected</span>
+          </div>
+
+          <div class="experiment-layout">
+            <div class="experiment-current">
+              <dl class="experiment-facts">
+                <div>
+                  <dt>Run ID</dt>
+                  <dd id="experiment-run-id" class="monospace">No experiment selected</dd>
+                </div>
+                <div>
+                  <dt>Label</dt>
+                  <dd id="experiment-current-label">—</dd>
+                </div>
+                <div>
+                  <dt>Created</dt>
+                  <dd id="experiment-created-at">—</dd>
+                </div>
+                <div>
+                  <dt>Started</dt>
+                  <dd id="experiment-started-at">—</dd>
+                </div>
+                <div>
+                  <dt>Ended</dt>
+                  <dd id="experiment-ended-at">—</dd>
+                </div>
+              </dl>
+
+              <label class="experiment-field" for="camera-save-path">
+                <span>Camera Save Path</span>
+                <div class="path-control">
+                  <input id="camera-save-path" class="monospace" type="text" readonly placeholder="Create or select an experiment">
+                  <button id="copy-camera-path" class="ghost" type="button" disabled>Copy Path</button>
+                </div>
+              </label>
+            </div>
+
+            <div class="experiment-controls">
+              <label class="experiment-field" for="new-experiment-label">
+                <span>New Experiment Label <small>(optional)</small></span>
+                <input id="new-experiment-label" type="text" maxlength="120" placeholder="e.g. glycine batch 1">
+              </label>
+
+              <div class="experiment-action-row">
+                <button id="new-experiment" class="primary" type="button">New Experiment</button>
+                <button id="end-experiment" class="ghost" type="button" disabled>End Experiment</button>
+              </div>
+
+              <label class="experiment-field" for="experiment-history">
+                <span>Existing Experiments</span>
+                <select id="experiment-history" disabled>
+                  <option value="">No experiments available</option>
+                </select>
+              </label>
+              <button id="select-experiment" class="ghost" type="button" disabled>Use Selected Experiment</button>
+            </div>
+          </div>
+
+          <p id="experiment-message" class="experiment-message" role="status" aria-live="polite"></p>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <h3>Operation Controls</h3>
@@ -115,6 +182,6 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260430-growth-command7"></script>
+    <script src="/static/app.js?v=20260807-experiment-ui1"></script>
   </body>
 </html>

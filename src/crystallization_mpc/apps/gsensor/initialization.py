@@ -49,14 +49,7 @@ class GsensorInitializationManager:
         folder_path = Path(folder).expanduser().resolve(strict=False)
         if not folder_path.is_dir():
             raise FileNotFoundError(f"Image folder not found: {folder_path}")
-        images = sorted(
-            [
-                path
-                for path in folder_path.iterdir()
-                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-            ],
-            key=lambda path: path.name,
-        )
+        images = list_supported_images(folder_path)
         if not images:
             raise ValueError(f"No supported images found in: {folder_path}")
         if image_choice not in {"first", "latest"}:
@@ -599,6 +592,22 @@ def point_list(point: Any) -> list[float]:
     return [float(array[0]), float(array[1]), float(array[2])]
 
 
+def list_supported_images(folder: str | Path) -> list[Path]:
+    """Return directly contained initialization images in deterministic name order."""
+
+    folder_path = Path(folder).expanduser().resolve(strict=False)
+    if not folder_path.is_dir():
+        raise FileNotFoundError(f"Image folder not found: {folder_path}")
+    return sorted(
+        [
+            path
+            for path in folder_path.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ],
+        key=lambda path: path.name,
+    )
+
+
 def read_image_size(path: Path) -> tuple[int | None, int | None]:
     try:
         with path.open("rb") as file:
@@ -664,4 +673,9 @@ def read_jpeg_size(path: Path) -> tuple[int | None, int | None]:
         return None, None
 
 
-__all__ = ["GsensorInitializationManager", "InitializationSession", "read_image_size"]
+__all__ = [
+    "GsensorInitializationManager",
+    "InitializationSession",
+    "list_supported_images",
+    "read_image_size",
+]

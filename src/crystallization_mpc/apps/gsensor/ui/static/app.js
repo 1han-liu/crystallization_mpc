@@ -11,9 +11,20 @@ const applyParamsButton = document.querySelector("#apply-params");
 const resetParamsButton = document.querySelector("#reset-params");
 const paramSaveStatus = document.querySelector("#param-save-status");
 
-const imageFolderPicker = document.querySelector("#image-folder-picker");
 const imageChoice = document.querySelector("#image-choice");
-const loadFolderButton = document.querySelector("#load-folder");
+const currentRunId = document.querySelector("#current-run-id");
+const currentImageDirectory = document.querySelector("#current-image-directory");
+const currentImageCount = document.querySelector("#current-image-count");
+const imageSourceStatus = document.querySelector("#image-source-status");
+const refreshImagesButton = document.querySelector("#refresh-images");
+const beginInitializationButton = document.querySelector("#begin-initialization");
+const imageScanStatus = document.querySelector("#image-scan-status");
+const scanProcessedCount = document.querySelector("#scan-processed-count");
+const scanPendingCount = document.querySelector("#scan-pending-count");
+const scanLastImage = document.querySelector("#scan-last-image");
+const scanFileModifiedAt = document.querySelector("#scan-file-modified-at");
+const scanDetectedAt = document.querySelector("#scan-detected-at");
+const scanLastError = document.querySelector("#scan-last-error");
 const undoInitButton = document.querySelector("#undo-init");
 const resetInitButton = document.querySelector("#reset-init");
 const initCanvas = document.querySelector("#init-canvas");
@@ -41,7 +52,6 @@ const initSaveStatus = document.querySelector("#init-save-status");
 const initContext = initCanvas.getContext("2d");
 const threeDContext = threeDCanvas.getContext("2d");
 const initImage = new Image();
-const supportedImageExtensions = new Set([".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]);
 const default3DView = { yaw: -0.65, pitch: 0.55 };
 
 const state = {
@@ -50,6 +60,10 @@ const state = {
   drawerOpen: false,
   actionInFlight: false,
   initialization: null,
+  experimentSource: null,
+  measurementActive: false,
+  sourceActionInFlight: false,
+  liveStatusInFlight: false,
   currentImageKey: null,
   imageReady: false,
   threeDView: {
@@ -114,46 +128,6 @@ async function fetchJson(url, options = {}) {
     throw new Error(payload.detail || "Request failed");
   }
   return payload;
-}
-
-function imageFilesFromPicker() {
-  return Array.from(imageFolderPicker.files || []).filter((file) => {
-    const lowerName = file.name.toLowerCase();
-    const dotIndex = lowerName.lastIndexOf(".");
-    const extension = dotIndex >= 0 ? lowerName.slice(dotIndex) : "";
-    return supportedImageExtensions.has(extension);
-  });
-}
-
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      const result = String(reader.result || "");
-      resolve(result.includes(",") ? result.split(",", 2)[1] : result);
-    });
-    reader.addEventListener("error", () => {
-      reject(reader.error || new Error(`Could not read ${file.name}`));
-    });
-    reader.readAsDataURL(file);
-  });
-}
-
-async function uploadSelectedImageFolder(files) {
-  const payloadFiles = [];
-  for (const file of files) {
-    payloadFiles.push({
-      filename: file.webkitRelativePath || file.name,
-      content_base64: await readFileAsBase64(file),
-    });
-  }
-  return fetchJson("/api/initialization/upload-folder", {
-    method: "POST",
-    body: JSON.stringify({
-      image_choice: imageChoice.value,
-      files: payloadFiles,
-    }),
-  });
 }
 
 function renderForm(params) {
@@ -234,6 +208,7 @@ function collectForm() {
 }
 
 function renderStatus(payload) {
+  state.measurementActive = Boolean(payload.active);
   statusText.textContent = payload.active ? "running" : "idle";
   statusText.className = payload.active ? "status running" : "status idle";
   initializedText.textContent = payload.initialized ? "initialized" : payload.initialization_status || "not initialized";
@@ -247,12 +222,84 @@ function renderStatus(payload) {
     last_measurement_step_at: payload.last_measurement_step_at || null,
     measurement_step_count: payload.measurement_step_count || 0,
     last_dscgr_result: payload.last_dscgr_result || null,
+    experiment: payload.experiment || null,
+    experiment_selection_status: payload.experiment_selection_status || null,
+    experiment_selection_error: payload.experiment_selection_error || null,
+    image_scan: payload.image_scan || null,
   }, null, 2);
+  renderImageScan(payload.image_scan || {});
+  renderExperimentSource(state.experimentSource);
   renderInitialization(payload.initialization || null);
+}
+
+function renderImageScan(scan) {
+  const scanStatus = scan.status || "stopped";
+  imageScanStatus.textContent = scanStatus;
+  imageScanStatus.className = scanStatus === "error" ? "status error" : (
+    ["running", "waiting_for_image"].includes(scanStatus) ? "status running" : "status idle"
+  );
+  scanProcessedCount.textContent = String(scan.processed_count || 0);
+  scanPendingCount.textContent = String(scan.pending_image_count || 0);
+  scanLastImage.textContent = scan.last_detected_image || "—";
+  scanFileModifiedAt.textContent = scan.file_modified_at || "—";
+  scanDetectedAt.textContent = scan.detected_at || "—";
+  scanLastError.textContent = scan.error || "";
+  scanLastError.hidden = !scan.error;
+}
+
+function renderExperimentSource(payload) {
+  state.experimentSource = payload;
+  const selected = Boolean(payload?.selected);
+  const imageCount = Number(payload?.image_count || 0);
+  currentRunId.textContent = selected ? payload.run_id : "No experiment selected";
+  currentImageDirectory.textContent = selected ? payload.container_image_path : "—";
+  currentImageCount.textContent = String(imageCount);
+
+  refreshImagesButton.disabled = state.sourceActionInFlight;
+  beginInitializationButton.disabled = (
+    state.sourceActionInFlight
+    || state.measurementActive
+    || !selected
+    || imageCount === 0
+  );
+  imageChoice.disabled = state.sourceActionInFlight || !selected || imageCount === 0;
+
+  if (!selected) {
+    imageSourceStatus.textContent = "Create or select an experiment in Central first.";
+  } else if (imageCount === 0) {
+    imageSourceStatus.textContent = "No supported images found. Refresh after the camera writes an image.";
+  } else {
+    imageSourceStatus.textContent = `${imageCount} images · first: ${payload.first_image} · latest: ${payload.latest_image}`;
+  }
 }
 
 async function loadStatus() {
   renderStatus(await fetchJson("/api/status"));
+}
+
+async function loadExperimentSource() {
+  const payload = await fetchJson("/api/initialization/source");
+  renderExperimentSource(payload);
+  return payload;
+}
+
+async function refreshOverview() {
+  await Promise.all([loadStatus(), loadExperimentSource()]);
+}
+
+async function refreshLiveStatus() {
+  if (state.liveStatusInFlight || document.hidden) {
+    return;
+  }
+  state.liveStatusInFlight = true;
+  try {
+    await loadStatus();
+  } catch (error) {
+    statusText.textContent = error.message;
+    statusText.className = "status error";
+  } finally {
+    state.liveStatusInFlight = false;
+  }
 }
 
 async function loadParams() {
@@ -300,7 +347,7 @@ function renderInitialization(payload) {
   initStepTitle.textContent = hasSession ? payload.status : "Not started";
   initStepPrompt.textContent = step?.prompt || (selected3DChoice
     ? `Selected 3D choice ${selected3DChoice}.`
-    : (hasSession ? "Waiting for the next initialization step." : "Load an image folder to begin."));
+    : (hasSession ? "Waiting for the next initialization step." : "Select an experiment and begin initialization."));
   initSaveStatus.textContent = hasSession
     ? `${payload.selected_image || ""}`
     : "idle";
@@ -1014,7 +1061,7 @@ async function runDscgr() {
 }
 
 refreshButton.addEventListener("click", async () => {
-  await loadStatus();
+  await refreshOverview();
 });
 
 toggleParametersButton.addEventListener("click", () => {
@@ -1054,20 +1101,35 @@ resetParamsButton.addEventListener("click", async () => {
   }
 });
 
-loadFolderButton.addEventListener("click", async () => {
-  const selectedFiles = imageFilesFromPicker();
-  if (selectedFiles.length === 0) {
-    initSaveStatus.textContent = "choose a local image folder";
-    return;
-  }
-
-  initSaveStatus.textContent = `uploading ${selectedFiles.length} images`;
+refreshImagesButton.addEventListener("click", async () => {
+  state.sourceActionInFlight = true;
+  renderExperimentSource(state.experimentSource);
   try {
-    const payload = await uploadSelectedImageFolder(selectedFiles);
+    await loadExperimentSource();
+  } catch (error) {
+    imageSourceStatus.textContent = error.message;
+  } finally {
+    state.sourceActionInFlight = false;
+    renderExperimentSource(state.experimentSource);
+  }
+});
+
+beginInitializationButton.addEventListener("click", async () => {
+  state.sourceActionInFlight = true;
+  renderExperimentSource(state.experimentSource);
+  initSaveStatus.textContent = `starting from ${imageChoice.value} image`;
+  try {
+    const payload = await fetchJson("/api/initialization/start", {
+      method: "POST",
+      body: JSON.stringify({ image_choice: imageChoice.value }),
+    });
     renderInitialization(payload);
-    await loadStatus();
+    await refreshOverview();
   } catch (error) {
     initSaveStatus.textContent = error.message;
+  } finally {
+    state.sourceActionInFlight = false;
+    renderExperimentSource(state.experimentSource);
   }
 });
 
@@ -1202,7 +1264,7 @@ window.addEventListener("resize", () => {
   drawSelected3DPreview();
 });
 
-Promise.all([loadParams(), loadStatus()]).catch((error) => {
+Promise.all([loadParams(), refreshOverview()]).catch((error) => {
   statusText.textContent = error.message;
   statusText.className = "status error";
   paramSaveStatus.textContent = error.message;
@@ -1212,7 +1274,7 @@ window.addEventListener("focus", () => {
   if (state.actionInFlight) {
     return;
   }
-  loadStatus().catch((error) => {
+  refreshOverview().catch((error) => {
     statusText.textContent = error.message;
     statusText.className = "status error";
   });
@@ -1220,9 +1282,11 @@ window.addEventListener("focus", () => {
 
 document.addEventListener("visibilitychange", () => {
   if (!state.actionInFlight && !document.hidden) {
-    loadStatus().catch((error) => {
+    refreshOverview().catch((error) => {
       statusText.textContent = error.message;
       statusText.className = "status error";
     });
   }
 });
+
+window.setInterval(refreshLiveStatus, 1000);

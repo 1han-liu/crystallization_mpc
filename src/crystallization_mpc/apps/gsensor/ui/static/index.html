@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260702-dscgr">
+    <link rel="stylesheet" href="/static/styles.css?v=20260808-image-poller1">
   </head>
   <body>
     <div class="shell">
@@ -61,19 +61,66 @@
             </div>
           </div>
 
-          <div class="folder-row">
-            <label class="folder-field">
-              <span>Local Folder</span>
-              <input id="image-folder-picker" type="file" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,image/*" multiple webkitdirectory directory>
-            </label>
-            <label class="folder-field compact">
+          <div class="experiment-source">
+            <div class="experiment-source-facts">
+              <div>
+                <span>Current Run</span>
+                <code id="current-run-id">No experiment selected</code>
+              </div>
+              <div>
+                <span>Mounted Image Directory</span>
+                <code id="current-image-directory">—</code>
+              </div>
+              <div>
+                <span>Supported Images</span>
+                <strong id="current-image-count">0</strong>
+              </div>
+            </div>
+            <div class="experiment-source-actions">
+              <label class="source-choice">
               <span>Image</span>
               <select id="image-choice">
                 <option value="first">First</option>
                 <option value="latest">Latest</option>
               </select>
-            </label>
-            <button id="load-folder" class="primary">Load</button>
+              </label>
+              <button id="refresh-images" class="ghost">Refresh Images</button>
+              <button id="begin-initialization" class="primary" disabled>Begin Initialization</button>
+            </div>
+            <p id="image-source-status" class="save-status muted">Waiting for experiment selection</p>
+          </div>
+
+          <div class="image-monitor">
+            <div class="image-monitor-head">
+              <div>
+                <p class="eyebrow">Live Image Monitor</p>
+                <h3>Directory Polling</h3>
+              </div>
+              <span id="image-scan-status" class="status idle">stopped</span>
+            </div>
+            <div class="image-monitor-facts">
+              <div>
+                <span>Processed</span>
+                <strong id="scan-processed-count">0</strong>
+              </div>
+              <div>
+                <span>Pending Retry</span>
+                <strong id="scan-pending-count">0</strong>
+              </div>
+              <div class="wide">
+                <span>Last Detected Image</span>
+                <code id="scan-last-image">—</code>
+              </div>
+              <div>
+                <span>File Modified At</span>
+                <code id="scan-file-modified-at">—</code>
+              </div>
+              <div>
+                <span>Detected At</span>
+                <code id="scan-detected-at">—</code>
+              </div>
+            </div>
+            <p id="scan-last-error" class="save-status muted" hidden></p>
           </div>
 
           <div class="init-layout">
@@ -109,7 +156,7 @@
               <div class="init-status">
                 <p class="eyebrow">Step</p>
                 <h3 id="init-step-title">Not started</h3>
-                <p id="init-step-prompt" class="muted">Load an image folder to begin.</p>
+                <p id="init-step-prompt" class="muted">Select an experiment and begin initialization.</p>
               </div>
 
               <div class="segmented" id="full-mode-controls">
@@ -171,6 +218,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260702-dscgr"></script>
+    <script src="/static/app.js?v=20260808-image-poller1"></script>
   </body>
 </html>
