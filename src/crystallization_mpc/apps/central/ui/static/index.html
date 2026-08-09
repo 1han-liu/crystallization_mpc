@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260807-experiment-ui1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260809-system-status1">
   </head>
   <body>
     <div class="shell">
@@ -25,9 +25,13 @@
                 <h3>YAML-backed Values</h3>
               </div>
               <div class="hero-actions">
-                <button id="reload-params" class="ghost">Reload</button>
-                <button id="save-params" class="primary">Save</button>
+                <button id="reset-params" class="ghost" type="button">Reset to Defaults</button>
+                <button id="save-params" class="primary" type="button">Save Parameters</button>
               </div>
+            </div>
+
+            <div id="parameter-status" class="parameter-status loading" role="status" aria-live="polite">
+              <span id="parameter-status-text">Loading parameters…</span>
             </div>
 
             <section class="drawer-section">
@@ -64,7 +68,6 @@
           <div class="hero-actions">
             <a class="ghost" href="http://localhost:3000" target="_blank" rel="noopener noreferrer">Grafana</a>
             <a class="ghost" href="http://localhost:8001" target="_blank" rel="noopener noreferrer">Gsensor UI</a>
-            <button id="publish-button" class="primary">Publish Parameters</button>
           </div>
         </section>
 
@@ -135,6 +138,51 @@
           <p id="experiment-message" class="experiment-message" role="status" aria-live="polite"></p>
         </section>
 
+        <section class="panel system-status-panel" aria-labelledby="system-status-heading">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Live Services</p>
+              <h3 id="system-status-heading">Experiment Data Flow</h3>
+            </div>
+            <span id="system-refresh-status" class="status idle">waiting</span>
+          </div>
+          <div class="system-status-layout">
+            <div class="service-status-grid">
+              <article class="service-card">
+                <div class="service-card-head">
+                  <h4>Gsensor</h4>
+                  <span id="gsensor-live-status" class="status idle">no status</span>
+                </div>
+                <dl class="service-facts">
+                  <div><dt>Frame</dt><dd id="gsensor-live-frame">—</dd></div>
+                  <div><dt>Image</dt><dd id="gsensor-live-image" class="monospace">—</dd></div>
+                  <div><dt>Messages</dt><dd id="gsensor-message-count">0</dd></div>
+                  <div><dt>Received</dt><dd id="gsensor-received-at">—</dd></div>
+                </dl>
+                <p id="gsensor-live-error" class="service-error" hidden></p>
+              </article>
+              <article class="service-card">
+                <div class="service-card-head">
+                  <h4>Controller</h4>
+                  <span id="controller-live-status" class="status idle">unavailable</span>
+                </div>
+                <dl class="service-facts">
+                  <div><dt>Run ID</dt><dd id="controller-run-id" class="monospace">—</dd></div>
+                  <div><dt>Last Frame</dt><dd id="controller-last-frame">—</dd></div>
+                  <div><dt>Valid Samples</dt><dd id="controller-valid-count">0</dd></div>
+                  <div><dt>Invalid Samples</dt><dd id="controller-invalid-count">0</dd></div>
+                </dl>
+                <p id="controller-live-error" class="service-error" hidden></p>
+              </article>
+            </div>
+            <figure class="central-overlay-preview">
+              <img id="central-overlay-image" alt="Latest Gsensor detection overlay" hidden>
+              <figcaption id="central-overlay-caption">The preview appears after the first measured frame.</figcaption>
+              <button id="central-refresh-overlay" class="ghost" type="button">Refresh Preview</button>
+            </figure>
+          </div>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <h3>Operation Controls</h3>
@@ -152,24 +200,30 @@
           </details>
           <details class="panel diagnostic-panel">
             <summary class="diagnostic-summary">
-              <span>Publish Result</span>
-              <span id="publish-status" class="status idle">idle</span>
+              <span>Experiment Command Result</span>
+              <span id="command-status" class="status idle">idle</span>
             </summary>
-            <pre id="publish-result" class="code-block"></pre>
+            <pre id="command-result" class="code-block"></pre>
           </details>
         </div>
       </main>
     </div>
 
     <template id="param-field-template">
-      <label class="field">
-        <span class="field-key"></span>
+      <div class="field">
+        <div class="field-heading">
+          <span class="field-key"></span>
+          <div class="field-actions">
+            <span class="field-modified" hidden>Modified</span>
+            <button class="field-reset ghost" type="button" hidden>Reset</button>
+          </div>
+        </div>
         <div class="field-badges"></div>
         <p class="field-description"></p>
         <p class="field-expression"></p>
         <p class="field-depends"></p>
         <textarea rows="1" class="field-input"></textarea>
-      </label>
+      </div>
     </template>
 
     <template id="operation-item-template">
@@ -182,6 +236,6 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260807-experiment-ui1"></script>
+    <script src="/static/app.js?v=20260809-system-status1"></script>
   </body>
 </html>

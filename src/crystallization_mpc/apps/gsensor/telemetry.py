@@ -1,175 +1,103 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Iterable, Mapping
+from datetime import datetime, timezone
+from typing import Any
 
-from crystallization_mpc.infra.influxdb.write import InfluxWriter, build_tagged_point
+from crystallization_mpc.infra.influxdb.write import InfluxWriter
 
-GSENSOR_PARAMS_MEASUREMENT = "gsensor_params"
+GSENSOR_MEASUREMENT = "gsensor_measurement"
 GSENSOR_SERVICE_TAG = "gsensor"
-
-PARAM_SOURCE_DEFAULT = "default"
-PARAM_SOURCE_CENTRAL = "central"
-PARAM_SOURCE_UI = "ui"
-PARAM_SOURCE_RUNTIME = "runtime"
-
-PARAM_EVENT_STARTUP_SNAPSHOT = "startup_snapshot"
-PARAM_EVENT_CENTRAL_UPDATE = "central_update"
-PARAM_EVENT_UI_APPLY = "ui_apply"
-PARAM_EVENT_UI_RESET = "ui_reset"
-PARAM_EVENT_MEASUREMENT_START_SNAPSHOT = "measurement_start_snapshot"
-
-PARAM_SCOPE_SHARED = "shared"
-PARAM_SCOPE_GSENSOR = "gsensor"
-PARAM_SCOPES = {PARAM_SCOPE_SHARED, PARAM_SCOPE_GSENSOR}
-
-
-def param_value_type(value: Any) -> str:
-    if isinstance(value, bool):
-        return "bool"
-    if isinstance(value, (int, float)):
-        return "float"
-    if isinstance(value, str):
-        return "string"
-    return "json"
-
-
-def param_value_field(value: Any) -> tuple[str, Any]:
-    value_type = param_value_type(value)
-    if value_type == "bool":
-        return "value_bool", value
-    if value_type == "float":
-        return "value_float", float(value)
-    if value_type == "string":
-        return "value_string", value
-    return "value_json", json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 @dataclass(frozen=True)
-class GsensorParamRecord:
-    param_key: str
-    value: Any
-    scope: str
-    source: str
-    event: str
-    version: int = 1
-    run_id: str = "default"
-    seq: int | None = None
-    changed: bool = True
+class GsensorMeasurementRecord:
+    run_id: str
+    frame_seq: int
+    image_name: str
+    captured_at: str
+    processed_at: str
+    dt_s: float
+    valid: bool
+    G_u: float | None
+    G_u_KF: float | None
+    G_v: float | None
+    G_v_KF: float | None
+    error: str | None = None
+    unit: str = "m/s"
+    processing_duration_ms: float | None = None
+    u_distance_px: float | None = None
+    u_distance_m: float | None = None
+    v_distance_px: float | None = None
+    v_distance_m: float | None = None
 
     def __post_init__(self) -> None:
-        if not self.param_key:
-            raise ValueError("param_key is required.")
-        if self.scope not in PARAM_SCOPES:
-            raise ValueError(f"scope must be one of {sorted(PARAM_SCOPES)}.")
-        if not self.source:
-            raise ValueError("source is required.")
-        if not self.event:
-            raise ValueError("event is required.")
         if not self.run_id:
             raise ValueError("run_id is required.")
+        if int(self.frame_seq) < 1:
+            raise ValueError("frame_seq must start at 1.")
+        if not self.image_name:
+            raise ValueError("image_name is required.")
+        if self.unit != "m/s":
+            raise ValueError("unit must be 'm/s'.")
 
     def tags(self) -> dict[str, str]:
         return {
             "service": GSENSOR_SERVICE_TAG,
             "run_id": self.run_id,
-            "source": self.source,
-            "event": self.event,
-            "scope": self.scope,
-            "param_key": self.param_key,
-            "value_type": param_value_type(self.value),
+            "status": "measured" if self.valid else "invalid",
+            "unit": self.unit,
         }
 
     def fields(self) -> dict[str, Any]:
-        field_name, field_value = param_value_field(self.value)
         fields: dict[str, Any] = {
-            field_name: field_value,
-            "version": int(self.version),
-            "changed": bool(self.changed),
+            "frame_seq": int(self.frame_seq),
+            "image_name": self.image_name,
+            "captured_at": self.captured_at,
+            "processed_at": self.processed_at,
+            "dt_s": float(self.dt_s),
+            "valid": bool(self.valid),
         }
-        if self.seq is not None:
-            fields["seq"] = int(self.seq)
+        optional_fields = {
+            "G_u": self.G_u,
+            "G_u_KF": self.G_u_KF,
+            "G_v": self.G_v,
+            "G_v_KF": self.G_v_KF,
+            "processing_duration_ms": self.processing_duration_ms,
+            "u_distance_px": self.u_distance_px,
+            "u_distance_m": self.u_distance_m,
+            "v_distance_px": self.v_distance_px,
+            "v_distance_m": self.v_distance_m,
+            "error": self.error,
+        }
+        fields.update(
+            {key: value for key, value in optional_fields.items() if value is not None}
+        )
         return fields
 
-
-def iter_gsensor_param_records(
-    shared_params: Mapping[str, Any],
-    gsensor_params: Mapping[str, Any],
-    *,
-    source: str,
-    event: str,
-    version: int = 1,
-    run_id: str = "default",
-    seq: int | None = None,
-    changed_keys: Iterable[str] | None = None,
-) -> Iterable[GsensorParamRecord]:
-    changed_key_set = set(changed_keys) if changed_keys is not None else None
-    for scope, params in (
-        (PARAM_SCOPE_SHARED, shared_params),
-        (PARAM_SCOPE_GSENSOR, gsensor_params),
-    ):
-        for key, value in params.items():
-            yield GsensorParamRecord(
-                param_key=str(key),
-                value=value,
-                scope=scope,
-                source=source,
-                event=event,
-                version=version,
-                run_id=run_id,
-                seq=seq,
-                changed=changed_key_set is None or str(key) in changed_key_set,
-            )
+    def timestamp(self) -> datetime:
+        value = self.processed_at.strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
 
-def build_gsensor_param_point(
-    record: GsensorParamRecord,
-    *,
-    timestamp: datetime | None = None,
-) -> Any:
-    return build_tagged_point(
+def write_gsensor_measurement(
+    writer: InfluxWriter,
+    record: GsensorMeasurementRecord,
+) -> None:
+    writer.write_tagged_fields(
         record.fields(),
         tags=record.tags(),
-        measurement=GSENSOR_PARAMS_MEASUREMENT,
-        timestamp=timestamp,
+        measurement=GSENSOR_MEASUREMENT,
+        timestamp=record.timestamp(),
     )
 
 
-def write_gsensor_param_records(
-    writer: InfluxWriter,
-    records: Iterable[GsensorParamRecord],
-    *,
-    timestamp: datetime | None = None,
-) -> None:
-    for record in records:
-        writer.write_tagged_fields(
-            record.fields(),
-            tags=record.tags(),
-            measurement=GSENSOR_PARAMS_MEASUREMENT,
-            timestamp=timestamp,
-        )
-
-
 __all__ = [
-    "GSENSOR_PARAMS_MEASUREMENT",
+    "GSENSOR_MEASUREMENT",
     "GSENSOR_SERVICE_TAG",
-    "GsensorParamRecord",
-    "PARAM_EVENT_CENTRAL_UPDATE",
-    "PARAM_EVENT_MEASUREMENT_START_SNAPSHOT",
-    "PARAM_EVENT_STARTUP_SNAPSHOT",
-    "PARAM_EVENT_UI_APPLY",
-    "PARAM_EVENT_UI_RESET",
-    "PARAM_SCOPE_GSENSOR",
-    "PARAM_SCOPE_SHARED",
-    "PARAM_SOURCE_CENTRAL",
-    "PARAM_SOURCE_DEFAULT",
-    "PARAM_SOURCE_RUNTIME",
-    "PARAM_SOURCE_UI",
-    "build_gsensor_param_point",
-    "iter_gsensor_param_records",
-    "param_value_field",
-    "param_value_type",
-    "write_gsensor_param_records",
+    "GsensorMeasurementRecord",
+    "write_gsensor_measurement",
 ]

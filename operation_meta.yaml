@@ -29,35 +29,8 @@ sections:
         default: "simulation"
   - title: "Actions"
     items:
-      - label: "Start controller"
-        key: "controller_active"
+      - label: "Experiment lifecycle"
+        key: "experiment_active"
         kind: "action_toggle"
-        labels: ["Start controller", "Stop controller"]
+        labels: ["Start experiment", "Stop experiment"]
         default: false
-      - label: "Refresh controller now"
-        key: "controller_refresh_request"
-        kind: "action_push"
-      - label: "Add seed"
-        key: "add_seed_request"
-        kind: "action_push"
-      - label: "Start adaptation"
-        key: "adaptive"
-        kind: "action_toggle"
-        labels: ["Start adaptation", "Stop adaptation"]
-        default: false
-      - label: "Start growth-rate measurement"
-        key: "G_active"
-        kind: "action_toggle"
-        labels: ["Start growth rate", "Stop growth rate"]
-        default: false
-      - label: "Refresh growth measurement now"
-        key: "G_refresh_request"
-        kind: "action_push"
-      - label: "Inline display on"
-        key: "inline_display"
-        kind: "action_toggle"
-        labels: ["Inline display on", "Inline display off"]
-        default: false
-      - label: "Pop up and save variables now"
-        key: "pop_up_and_save_variables_refresh_request"
-        kind: "action_push"

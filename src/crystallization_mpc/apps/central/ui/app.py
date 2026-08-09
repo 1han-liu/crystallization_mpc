@@ -2,39 +2,60 @@ from __future__ import annotations
 
 import logging
 import os
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.params import (
+    ParameterValidationError,
     apply_derived_params,
     load_operation_meta,
     load_param_meta,
     load_params,
     save_params_document,
+    validate_params_section,
 )
 from crystallization_mpc.experiments import (
     ExperimentNotFoundError,
     ExperimentRegistryError,
+    ExperimentStatus,
     InvalidExperimentIdentifierError,
     InvalidExperimentStateError,
 )
 from crystallization_mpc.infra.rabbitmq.connection import connect
+from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.infra.rabbitmq.publisher import publish
 from crystallization_mpc.infra.rabbitmq.topology import declare_exchange, declare_queue
 from crystallization_mpc.messaging.idgen import next_seq
 from crystallization_mpc.messaging.commands import (
     EXPERIMENT_MODE_LIVE,
     EXPERIMENT_SELECT_COMMAND,
+    EXPERIMENT_START_COMMAND,
+    EXPERIMENT_STOP_COMMAND,
+    GROWTH_RATE_COMPLETED_MESSAGE,
+    GROWTH_RATE_STATUS_MESSAGE,
+    PARAMS_UPDATE_MESSAGE,
+)
+from crystallization_mpc.messaging.contracts import (
+    ExperimentStartPayload,
+    ExperimentStopPayload,
+    GrowthRateStatus,
+    GrowthRateStatusPayload,
 )
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for, route
-from crystallization_mpc.messaging.schema import build_envelope
+from crystallization_mpc.messaging.schema import build_envelope, utc_ts
 
 ROLE = "central"
 TARGET_VALUES = ("sigma", "G")
@@ -45,6 +66,8 @@ DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
 DEFAULT_OPERATION_META_PATH = PROJECT_ROOT / "operation_meta.yaml"
 DEFAULT_EXPERIMENT_ROOT = PROJECT_ROOT / ".runtime" / "experiments"
+LATEST_OVERLAY_FILENAME = "gsensor_detection_latest.jpg"
+FINAL_OVERLAY_FILENAME = "gsensor_detection_final.jpg"
 logger = logging.getLogger(__name__)
 
 
@@ -62,10 +85,6 @@ class ParamsUpdate(BaseModel):
 class OperationValueUpdate(BaseModel):
     key: str
     value: Any
-
-
-class OperationActionUpdate(BaseModel):
-    key: str
 
 
 class ExperimentCreateRequest(BaseModel):
@@ -145,8 +164,9 @@ class CentralApp:
         gsensor: Dict[str, object],
         controller: Dict[str, object],
         version: int,
-    ) -> None:
+    ) -> Dict[str, Dict[str, Any]]:
         seq = next_seq()
+        messages: Dict[str, Dict[str, Any]] = {}
 
         if shared or gsensor:
             payload = {"version": version, "params": {**shared, **gsensor}}
@@ -154,11 +174,12 @@ class CentralApp:
                 src=ROLE,
                 dst="gsensor",
                 msg_type="params",
-                name="update",
+                name=PARAMS_UPDATE_MESSAGE,
                 seq=seq,
                 payload=payload,
             )
             self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
+            messages["gsensor"] = env
 
         if shared or controller:
             payload = {"version": version, "params": {**shared, **controller}}
@@ -166,27 +187,93 @@ class CentralApp:
                 src=ROLE,
                 dst="controller",
                 msg_type="params",
-                name="update",
+                name=PARAMS_UPDATE_MESSAGE,
                 seq=seq,
                 payload=payload,
             )
             self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
+            messages["controller"] = env
 
-    def build_growth_rate_command(self, active: bool, seq: Optional[int] = None) -> Dict[str, Any]:
-        command_name = "growth_rate.start" if active else "growth_rate.stop"
+        return messages
+
+    def build_experiment_start_command(
+        self,
+        experiment: Dict[str, Any],
+        *,
+        dst: str,
+        seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = ExperimentStartPayload(
+            run_id=str(experiment["run_id"]),
+            parameter_version=int(experiment["parameter_version"]),
+            started_at=str(experiment["started_at"]),
+            image_directory=str(experiment.get("image_directory", "images")),
+            mode=EXPERIMENT_MODE_LIVE,
+        )
         return build_envelope(
             src=ROLE,
-            dst="gsensor",
+            dst=dst,
             msg_type="command",
-            name=command_name,
+            name=EXPERIMENT_START_COMMAND,
             seq=next_seq() if seq is None else seq,
-            payload={"key": "G_active", "active": active},
+            payload=payload.to_dict(),
         )
 
-    def publish_growth_rate_command(self, active: bool) -> Dict[str, Any]:
-        env = self.build_growth_rate_command(active)
-        self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
-        return env
+    def publish_experiment_start_command(
+        self,
+        experiment: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        seq = next_seq()
+        messages: Dict[str, Dict[str, Any]] = {}
+        for dst in ("gsensor", "controller"):
+            env = self.build_experiment_start_command(experiment, dst=dst, seq=seq)
+            self._publish_with_reconnect(route(ROLE, dst), env, persistent=True)
+            messages[dst] = env
+        return messages
+
+    def build_experiment_stop_command(
+        self,
+        run_id: str,
+        *,
+        dst: str,
+        stopped_at: str,
+        reason: str = "central_stop",
+        seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = ExperimentStopPayload(
+            run_id=run_id,
+            stopped_at=stopped_at,
+            reason=reason,
+        )
+        return build_envelope(
+            src=ROLE,
+            dst=dst,
+            msg_type="command",
+            name=EXPERIMENT_STOP_COMMAND,
+            seq=next_seq() if seq is None else seq,
+            payload=payload.to_dict(),
+        )
+
+    def publish_experiment_stop_command(
+        self,
+        run_id: str,
+        *,
+        reason: str = "central_stop",
+    ) -> Dict[str, Dict[str, Any]]:
+        seq = next_seq()
+        stopped_at = utc_ts()
+        messages: Dict[str, Dict[str, Any]] = {}
+        for dst in ("gsensor", "controller"):
+            env = self.build_experiment_stop_command(
+                run_id,
+                dst=dst,
+                stopped_at=stopped_at,
+                reason=reason,
+                seq=seq,
+            )
+            self._publish_with_reconnect(route(ROLE, dst), env, persistent=True)
+            messages[dst] = env
+        return messages
 
     def build_experiment_select_command(
         self,
@@ -224,20 +311,8 @@ class CentralApp:
         self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
         return env
 
-    def load_and_publish(
-        self,
-        params_path: Optional[str] = None,
-        target: Optional[str] = None,
-    ) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int, Dict[str, object]]:
-        path = params_path or os.getenv("PARAMS_FILE", str(DEFAULT_PARAMS_PATH))
-        shared, gsensor, controller, version = load_params(path)
-        shared, controller, derived = apply_derived_params(shared, controller, target=target)
-        self.publish_params(shared, gsensor, controller, version)
-        return shared, gsensor, controller, version, derived
-
-
 class CentralService:
-    def __init__(self) -> None:
+    def __init__(self, publisher: CentralApp | None = None) -> None:
         self.default_params_path = Path(os.getenv("PARAMS_DEFAULT_FILE", str(DEFAULT_PARAMS_PATH)))
         self.params_path = Path(os.getenv("PARAMS_FILE", str(DEFAULT_RUNTIME_PARAMS_PATH)))
         self.param_meta_path = Path(os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH)))
@@ -252,8 +327,19 @@ class CentralService:
         self.target: Literal["sigma", "G"] = os.getenv("CONTROL_TARGET", "sigma")  # type: ignore[assignment]
         if self.target not in TARGET_VALUES:
             self.target = "sigma"
-        self.publisher = CentralApp()
+        self.publisher = publisher or CentralApp()
         self.operation_state = self._build_default_operation_state()
+        self.controller_status_url = os.getenv(
+            "CONTROLLER_STATUS_URL", "http://localhost:8002/api/status"
+        )
+        self.last_gsensor_status: Dict[str, Any] | None = None
+        self.last_gsensor_status_received_at: str | None = None
+        self.last_status_consumer_error: str | None = None
+        self.last_rejected_status_error: str | None = None
+        self.status_message_count = 0
+        self.status_rejection_count = 0
+        self._consumer_thread: threading.Thread | None = None
+        self._lock = threading.RLock()
 
     def _active_params_path(self) -> Path:
         if self.params_path.exists():
@@ -262,12 +348,198 @@ class CentralService:
 
     def start(self) -> None:
         self.publisher.connect()
+        if self._consumer_thread and self._consumer_thread.is_alive():
+            return
+        self._consumer_thread = threading.Thread(
+            target=self._consume_forever,
+            name="central-rabbitmq-consumer",
+            daemon=True,
+        )
+        self._consumer_thread.start()
 
     def stop(self) -> None:
         self.publisher.close()
 
+    def _consume_forever(self) -> None:
+        while True:
+            try:
+                start_consumer(
+                    url=self.publisher.url,
+                    exchange=self.publisher.exchange,
+                    queue_name=self.publisher.queue_name,
+                    binding_keys=bindings_for(ROLE),
+                    on_message=self.on_message,
+                )
+            except Exception as exc:
+                with self._lock:
+                    self.last_status_consumer_error = str(exc)
+                logger.exception("Central RabbitMQ consumer stopped; retrying.")
+                time.sleep(5)
+
+    def on_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            if message.get("src") != "gsensor" or message.get("dst") != ROLE:
+                raise ValueError("Central growth-rate status must come from Gsensor.")
+            if message.get("msg_type") != "status":
+                raise ValueError("Central only accepts Gsensor status messages here.")
+            name = message.get("name")
+            if name not in {
+                GROWTH_RATE_STATUS_MESSAGE,
+                GROWTH_RATE_COMPLETED_MESSAGE,
+            }:
+                raise ValueError(f"Unsupported Gsensor status message: {name!r}.")
+            payload = GrowthRateStatusPayload.from_mapping(message.get("payload", {}))
+            if (
+                name == GROWTH_RATE_COMPLETED_MESSAGE
+                and payload.status != GrowthRateStatus.COMPLETED
+            ):
+                raise ValueError("growth_rate.completed must use status='completed'.")
+            self._apply_gsensor_status(payload)
+        except Exception as exc:
+            with self._lock:
+                self.last_rejected_status_error = str(exc)
+                self.status_rejection_count += 1
+            logger.warning("Central rejected Gsensor status: %s", exc)
+            return {"accepted": False, "reason": str(exc)}
+
+        with self._lock:
+            self.last_gsensor_status = payload.to_dict()
+            self.last_gsensor_status_received_at = utc_ts()
+            self.last_status_consumer_error = None
+            self.status_message_count += 1
+        return {"accepted": True, "status": payload.status.value}
+
+    def _apply_gsensor_status(self, payload: GrowthRateStatusPayload) -> None:
+        run_id = self.experiments.current_run_id()
+        if run_id is None or payload.run_id != run_id:
+            raise ValueError("Gsensor status run_id does not match the current experiment.")
+
+        status = payload.status
+        if status == GrowthRateStatus.ERROR:
+            self.experiments.registry.mark_error(
+                run_id,
+                error=payload.error or "Gsensor reported an error.",
+            )
+            with self._lock:
+                self.operation_state["experiment_active"] = False
+            return
+
+        if status == GrowthRateStatus.COMPLETED:
+            manifest = self.experiments.registry.get(run_id)
+            if manifest.status != ExperimentStatus.STOPPING:
+                self.experiments.request_stop(run_id)
+            self.experiments.finish(run_id)
+            with self._lock:
+                self.operation_state["experiment_active"] = False
+            return
+
+        target_by_status = {
+            GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE: ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
+            GrowthRateStatus.INITIALIZING: ExperimentStatus.INITIALIZING,
+            GrowthRateStatus.BASELINE_READY: ExperimentStatus.INITIALIZING,
+            GrowthRateStatus.MEASURING: ExperimentStatus.MEASURING,
+            GrowthRateStatus.STOPPING: ExperimentStatus.STOPPING,
+            GrowthRateStatus.STOPPED: ExperimentStatus.STOPPING,
+        }
+        target = target_by_status.get(status)
+        if target is None:
+            return
+        self._advance_experiment_status(run_id, target)
+        with self._lock:
+            self.operation_state["experiment_active"] = target not in {
+                ExperimentStatus.STOPPING,
+            }
+
+    def _advance_experiment_status(
+        self,
+        run_id: str,
+        target: ExperimentStatus,
+    ) -> None:
+        ordered = [
+            ExperimentStatus.STARTING,
+            ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
+            ExperimentStatus.INITIALIZING,
+            ExperimentStatus.MEASURING,
+            ExperimentStatus.STOPPING,
+        ]
+        manifest = self.experiments.registry.get(run_id)
+        if manifest.status == target:
+            return
+        if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+            raise InvalidExperimentStateError(
+                f"Cannot apply Gsensor status to {manifest.status.value} experiment."
+            )
+        current_index = ordered.index(manifest.status)
+        target_index = ordered.index(target)
+        if target_index < current_index:
+            return
+        for next_status in ordered[current_index + 1 : target_index + 1]:
+            self.experiments.transition(run_id, next_status)
+
+    def controller_status(self) -> Dict[str, Any]:
+        try:
+            with urllib.request.urlopen(self.controller_status_url, timeout=1.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Controller status response must be an object.")
+            return {"available": True, **payload, "error": None}
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return {
+                "available": False,
+                "status": "unavailable",
+                "active": False,
+                "error": str(exc),
+            }
+
+    def system_status(self) -> Dict[str, Any]:
+        experiments = self.experiments.list()
+        current_run_id = experiments.get("current_run_id")
+        current = next(
+            (
+                item
+                for item in experiments.get("experiments", [])
+                if item.get("run_id") == current_run_id
+            ),
+            None,
+        )
+        with self._lock:
+            gsensor = {
+                "last_status": self.last_gsensor_status,
+                "received_at": self.last_gsensor_status_received_at,
+                "consumer_error": self.last_status_consumer_error,
+                "last_rejection_error": self.last_rejected_status_error,
+                "message_count": self.status_message_count,
+                "rejection_count": self.status_rejection_count,
+            }
+        return {
+            "current_experiment": current,
+            "experiments": experiments,
+            "gsensor": gsensor,
+            "controller": self.controller_status(),
+        }
+
+    def overlay_path(self, run_id: str, kind: str) -> Path:
+        if kind not in {"latest", "final"}:
+            raise ValueError("Overlay kind must be 'latest' or 'final'.")
+        self.experiments.registry.get(run_id)
+        run_directory = (self.experiment_root / run_id).resolve()
+        filename = LATEST_OVERLAY_FILENAME if kind == "latest" else FINAL_OVERLAY_FILENAME
+        path = (run_directory / filename).resolve()
+        try:
+            path.relative_to(run_directory)
+        except ValueError as exc:
+            raise InvalidExperimentIdentifierError("Overlay path escapes experiment.") from exc
+        if not path.is_file():
+            raise ExperimentNotFoundError(f"{kind.capitalize()} overlay is not available yet.")
+        return path
+
     def load_params(self) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
         return load_params(str(self._active_params_path()))
+
+    def load_default_params(
+        self,
+    ) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
+        return load_params(str(self.default_params_path))
 
     def load_param_meta(self) -> Dict[str, Dict[str, Any]]:
         return load_param_meta(str(self.param_meta_path))
@@ -297,43 +569,176 @@ class CentralService:
             "value": self.operation_state.get(key),
         }
 
-    def trigger_operation_action(self, key: str) -> Dict[str, Any]:
-        current = bool(self.operation_state.get(key, False))
-        if key == "G_active":
-            active = not current
-            self.publisher.publish_growth_rate_command(active)
-            self.operation_state[key] = active
-            return {
-                "triggered": True,
-                "key": key,
-                "value": active,
-                "placeholder": True,
-            }
-
-        if key in {"controller_active", "adaptive", "inline_display"}:
-            self.operation_state[key] = not current
-            return {
-                "triggered": True,
-                "key": key,
-                "value": self.operation_state[key],
-                "placeholder": True,
-            }
-        self.operation_state[key] = True
+    def params_payload(self) -> Dict[str, Any]:
+        shared, gsensor, controller, version = self.load_params()
+        default_shared, default_gsensor, default_controller, default_version = (
+            self.load_default_params()
+        )
         return {
-            "triggered": True,
-            "key": key,
-            "value": True,
-            "placeholder": True,
+            "version": version,
+            "shared": shared,
+            "gsensor": gsensor,
+            "controller": controller,
+            "defaults": {
+                "version": default_version,
+                "shared": default_shared,
+                "gsensor": default_gsensor,
+                "controller": default_controller,
+            },
+            "meta": self.load_param_meta(),
+            "source_file": str(self._active_params_path()),
+            "runtime_file": str(self.params_path),
+            "status": self.parameter_status(
+                shared=shared,
+                gsensor=gsensor,
+                controller=controller,
+                version=version,
+                defaults=(default_shared, default_gsensor, default_controller),
+            ),
         }
 
-    def save_params(self, payload: ParamsUpdate) -> None:
-        save_params_document(
-            str(self.params_path),
-            version=payload.version,
-            shared=payload.shared,
-            gsensor=payload.gsensor,
-            controller=payload.controller,
+    def parameter_status(
+        self,
+        *,
+        shared: Dict[str, object] | None = None,
+        gsensor: Dict[str, object] | None = None,
+        controller: Dict[str, object] | None = None,
+        version: int | None = None,
+        defaults: Tuple[
+            Dict[str, object],
+            Dict[str, object],
+            Dict[str, object],
+        ]
+        | None = None,
+    ) -> Dict[str, Any]:
+        if shared is None or gsensor is None or controller is None or version is None:
+            shared, gsensor, controller, version = self.load_params()
+        if defaults is None:
+            default_shared, default_gsensor, default_controller, _ = self.load_default_params()
+            defaults = (default_shared, default_gsensor, default_controller)
+
+        using_defaults = (shared, gsensor, controller) == defaults
+        saved_at = None
+        if self.params_path.is_file():
+            modified_at = datetime.fromtimestamp(
+                self.params_path.stat().st_mtime,
+                tz=timezone.utc,
+            )
+            saved_at = modified_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        applied_run_id = None
+        applied_at = None
+        current_run_id = self.experiments.current_run_id()
+        if current_run_id is not None:
+            try:
+                manifest = self.experiments.registry.get(current_run_id)
+            except ExperimentRegistryError:
+                manifest = None
+            if (
+                manifest is not None
+                and manifest.params_snapshot_file
+                and manifest.parameter_version == version
+            ):
+                applied_run_id = current_run_id
+                applied_at = manifest.started_at
+
+        if applied_run_id is not None:
+            kind = "applied"
+            message = f"Applied to {applied_run_id} · version {version}"
+        elif using_defaults:
+            kind = "using_defaults"
+            message = f"Using defaults · version {version}"
+        else:
+            kind = "draft_saved"
+            message = f"Draft saved · version {version}"
+
+        return {
+            "kind": kind,
+            "message": message,
+            "using_defaults": using_defaults,
+            "version": version,
+            "saved_at": saved_at,
+            "applied_run_id": applied_run_id,
+            "applied_at": applied_at,
+        }
+
+    def save_params(
+        self,
+        payload: ParamsUpdate,
+        *,
+        allow_changes: bool = True,
+        allow_locked: bool = False,
+    ) -> Dict[str, Any]:
+        if not allow_locked:
+            self._require_parameter_draft_editable()
+        current_shared, current_gsensor, current_controller, current_version = (
+            self.load_params()
         )
+        if int(payload.version) != current_version:
+            raise ParameterValidationError(
+                "The parameter draft changed on the server. Reload it before saving."
+            )
+        default_shared, default_gsensor, default_controller, _ = self.load_default_params()
+        meta = self.load_param_meta()
+        shared = validate_params_section(
+            "shared", payload.shared, default_shared, meta
+        )
+        gsensor = validate_params_section(
+            "gsensor", payload.gsensor, default_gsensor, meta
+        )
+        controller = validate_params_section(
+            "controller", payload.controller, default_controller, meta
+        )
+        changed = (shared, gsensor, controller) != (
+            current_shared,
+            current_gsensor,
+            current_controller,
+        )
+        if changed and not allow_changes:
+            raise InvalidExperimentStateError(
+                "This experiment has already started; its parameter snapshot is immutable."
+            )
+        if changed:
+            version = current_version + 1
+            save_params_document(
+                str(self.params_path),
+                version=version,
+                shared=shared,
+                gsensor=gsensor,
+                controller=controller,
+            )
+        result = self.params_payload()
+        result["saved"] = True
+        result["changed"] = changed
+        return result
+
+    def _require_parameter_draft_editable(self) -> None:
+        run_id = self.experiments.current_run_id()
+        if run_id is None:
+            return
+        manifest = self.experiments.registry.get(run_id)
+        if manifest.status not in {
+            ExperimentStatus.CREATED,
+            ExperimentStatus.COMPLETED,
+            ExperimentStatus.ERROR,
+        }:
+            raise InvalidExperimentStateError(
+                "Parameters are locked after an experiment starts. Create a new experiment "
+                "before preparing another parameter draft."
+            )
+
+    def reset_params_to_defaults(self) -> Dict[str, Any]:
+        shared, gsensor, controller, _default_version = self.load_default_params()
+        _current_shared, _current_gsensor, _current_controller, current_version = (
+            self.load_params()
+        )
+        payload = ParamsUpdate(
+            version=current_version,
+            shared=shared,
+            gsensor=gsensor,
+            controller=controller,
+        )
+        return self.save_params(payload)
 
     def preview_publish_payload(self) -> Dict[str, Any]:
         shared, gsensor, controller, version = self.load_params()
@@ -347,23 +752,9 @@ class CentralService:
             "derived": derived,
         }
 
-    def publish(self) -> Dict[str, Any]:
-        shared, gsensor, controller, version, derived = self.publisher.load_and_publish(
-            params_path=str(self._active_params_path()),
-            target=self.target,
-        )
-        return {
-            "version": version,
-            "target": self.target,
-            "shared": shared,
-            "gsensor": gsensor,
-            "controller": controller,
-            "derived": derived,
-            "published": True,
-        }
-
     def create_experiment(self, *, label: str | None = None) -> Dict[str, Any]:
         self._require_experiment_switch_allowed()
+        self.reset_params_to_defaults()
         experiment = self.experiments.create(label=label)
         command = self.publisher.publish_experiment_select_command(
             experiment["run_id"],
@@ -381,20 +772,31 @@ class CentralService:
         return {**experiment, "selection_command": command}
 
     def _require_experiment_switch_allowed(self, run_id: str | None = None) -> None:
-        if not bool(self.operation_state.get("G_active", False)):
+        if not bool(self.operation_state.get("experiment_active", False)):
             return
         current_run_id = self.experiments.current_run_id()
         if run_id is not None and run_id == current_run_id:
             return
         raise InvalidExperimentStateError(
-            "Stop growth-rate measurement before creating or switching experiments."
+            "Stop the current experiment before creating or switching experiments."
         )
 
-    def start_growth_rate(self) -> Dict[str, Any]:
+    def start_experiment(self, params: ParamsUpdate | None = None) -> Dict[str, Any]:
         run_id = self.experiments.current_run_id()
         if run_id is None:
             raise InvalidExperimentStateError(
-                "Create or select an experiment before starting growth-rate measurement."
+                "Create or select an experiment before starting it."
+            )
+        manifest = self.experiments.registry.get(run_id)
+        if manifest.status not in {ExperimentStatus.CREATED, ExperimentStatus.STARTING}:
+            raise InvalidExperimentStateError(
+                f"Cannot start experiment {run_id} from state {manifest.status.value}."
+            )
+        if params is not None:
+            self.save_params(
+                params,
+                allow_changes=manifest.status == ExperimentStatus.CREATED,
+                allow_locked=manifest.status == ExperimentStatus.STARTING,
             )
         params_snapshot = self.preview_publish_payload()
         experiment = self.experiments.start(
@@ -402,25 +804,61 @@ class CentralService:
             params_snapshot=params_snapshot,
             parameter_version=int(params_snapshot["version"]),
         )
-        command = self.publisher.publish_growth_rate_command(True)
-        self.operation_state["G_active"] = True
+        parameter_messages = self.publisher.publish_params(
+            params_snapshot["shared"],
+            params_snapshot["gsensor"],
+            params_snapshot["controller"],
+            int(params_snapshot["version"]),
+        )
+        commands = self.publisher.publish_experiment_start_command(experiment)
+        self.operation_state["experiment_active"] = True
         return {
             "triggered": True,
-            "key": "G_active",
+            "key": "experiment_active",
             "value": True,
-            "command": command,
+            "parameter_messages": parameter_messages,
+            "parameters": self.params_payload(),
+            "commands": commands,
             "experiment": experiment,
         }
 
-    def stop_growth_rate(self) -> Dict[str, Any]:
-        command = self.publisher.publish_growth_rate_command(False)
-        self.operation_state["G_active"] = False
+    def stop_experiment(self, *, reason: str = "central_stop") -> Dict[str, Any]:
+        run_id = self.experiments.current_run_id()
+        if run_id is None:
+            raise InvalidExperimentStateError(
+                "Create or select an experiment before stopping it."
+            )
+        commands = self.publisher.publish_experiment_stop_command(
+            run_id,
+            reason=reason,
+        )
+        experiment = self.experiments.request_stop(run_id)
+        self.operation_state["experiment_active"] = False
         return {
             "triggered": True,
-            "key": "G_active",
+            "key": "experiment_active",
             "value": False,
-            "command": command,
+            "commands": commands,
+            "experiment": experiment,
         }
+
+    def finish_experiment(self, run_id: str) -> Dict[str, Any]:
+        manifest = self.experiments.registry.get(run_id)
+        if manifest.status not in {
+            ExperimentStatus.CREATED,
+            ExperimentStatus.STOPPING,
+            ExperimentStatus.COMPLETED,
+            ExperimentStatus.ERROR,
+        }:
+            self.publisher.publish_experiment_stop_command(
+                run_id,
+                reason="central_end_experiment",
+            )
+            self.experiments.request_stop(run_id)
+        experiment = self.experiments.finish(run_id)
+        if run_id == self.experiments.current_run_id():
+            self.operation_state["experiment_active"] = False
+        return experiment
 
 
 service = CentralService()
@@ -455,24 +893,23 @@ def index() -> str:
 
 @web_app.get("/api/params")
 def get_params() -> Dict[str, Any]:
-    shared, gsensor, controller, version = service.load_params()
-    return {
-        "version": version,
-        "shared": shared,
-        "gsensor": gsensor,
-        "controller": controller,
-        "meta": service.load_param_meta(),
-        "source_file": str(service._active_params_path()),
-    }
+    return service.params_payload()
 
 
 @web_app.post("/api/params")
 def update_params(payload: ParamsUpdate) -> Dict[str, Any]:
-    service.save_params(payload)
-    return {
-        "saved": True,
-        "version": payload.version,
-    }
+    try:
+        return service.save_params(payload)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/params/reset")
+def reset_params() -> Dict[str, Any]:
+    try:
+        return service.reset_params_to_defaults()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/experiments", status_code=201)
@@ -499,6 +936,15 @@ def get_experiment(run_id: str) -> Dict[str, Any]:
         raise _experiment_http_exception(exc) from exc
 
 
+@web_app.get("/api/experiments/{run_id}/overlay/{kind}")
+def get_experiment_overlay(run_id: str, kind: str) -> FileResponse:
+    try:
+        path = service.overlay_path(run_id, kind)
+        return FileResponse(path, media_type="image/jpeg", filename=path.name)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
 @web_app.post("/api/experiments/{run_id}/select")
 def select_experiment(run_id: str) -> Dict[str, Any]:
     try:
@@ -510,7 +956,7 @@ def select_experiment(run_id: str) -> Dict[str, Any]:
 @web_app.post("/api/experiments/{run_id}/finish")
 def finish_experiment(run_id: str) -> Dict[str, Any]:
     try:
-        return service.experiments.finish(run_id)
+        return service.finish_experiment(run_id)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -523,6 +969,14 @@ def get_operation_state() -> Dict[str, Any]:
         "state": service.operation_state,
         "preview": preview,
     }
+
+
+@web_app.get("/api/system/status")
+def get_system_status() -> Dict[str, Any]:
+    try:
+        return service.system_status()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
 
 
 @web_app.get("/api/operation/meta")
@@ -547,33 +1001,20 @@ def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
     return service.update_operation_value(payload.key, payload.value)
 
 
-@web_app.post("/api/operation/action")
-def trigger_operation_action(payload: OperationActionUpdate) -> Dict[str, Any]:
-    return service.trigger_operation_action(payload.key)
-
-
-@web_app.post("/api/operation/growth-rate/start")
-def start_growth_rate(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
+@web_app.post("/api/operation/experiment/start")
+def start_experiment(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
     try:
-        return service.start_growth_rate()
+        return service.start_experiment(payload)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
 
-@web_app.post("/api/operation/growth-rate/stop")
-def stop_growth_rate() -> Dict[str, Any]:
+@web_app.post("/api/operation/experiment/stop")
+def stop_experiment() -> Dict[str, Any]:
     try:
-        return service.stop_growth_rate()
+        return service.stop_experiment()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@web_app.post("/api/operation/publish")
-def publish_operation() -> Dict[str, Any]:
-    try:
-        return service.publish()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _experiment_http_exception(exc) from exc
 
 
 def _experiment_http_exception(exc: Exception) -> HTTPException:
@@ -583,6 +1024,10 @@ def _experiment_http_exception(exc: Exception) -> HTTPException:
         return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, InvalidExperimentStateError):
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, ParameterValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, ExperimentRegistryError):
         return HTTPException(status_code=500, detail=str(exc))
     return HTTPException(status_code=500, detail=str(exc))

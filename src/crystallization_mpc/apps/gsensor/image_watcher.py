@@ -19,6 +19,9 @@ TimestampFactory = Callable[[], str]
 @dataclass(frozen=True)
 class DetectedImage:
     image_name: str
+    identity_key: str
+    modified_time_ns: int
+    file_size: int
     file_modified_at: str
     detected_at: str
 
@@ -39,10 +42,12 @@ def scan_new_images(
     image_probe: ImageProbe | None = None,
     timestamp_factory: TimestampFactory = utc_ts,
 ) -> ImageScanResult:
-    """Scan once, returning readable files not previously processed.
+    """Scan once, returning readable image revisions not previously processed.
 
-    Files are identified by their direct child filename only. This intentionally
-    does not detect overwrites of the same filename in the minimal first version.
+    A revision is identified by filename, nanosecond modification time, and file
+    size. A camera may therefore overwrite a fixed filename without losing the
+    new frame. Bare filenames remain accepted as legacy identifiers so an old
+    runtime state can be upgraded without replaying its existing files.
     """
 
     image_directory = Path(directory).expanduser().resolve(strict=False)
@@ -51,24 +56,45 @@ def scan_new_images(
 
     processed = set(processed_files)
     probe = image_probe or verify_image_readable
-    candidates: list[tuple[int, str, Path, float]] = []
+    candidates: list[tuple[int, str, Path, float, int, str]] = []
     stat_failures: list[str] = []
     for path in image_directory.iterdir():
         if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        if path.name in processed:
             continue
         try:
             stat = path.stat()
         except OSError as exc:
             stat_failures.append(f"{path.name}: {exc}")
             continue
-        candidates.append((stat.st_mtime_ns, path.name, path, stat.st_mtime))
+        identity_key = image_identity_key(
+            path.name,
+            modified_time_ns=stat.st_mtime_ns,
+            file_size=stat.st_size,
+        )
+        if path.name in processed or identity_key in processed:
+            continue
+        candidates.append(
+            (
+                stat.st_mtime_ns,
+                path.name,
+                path,
+                stat.st_mtime,
+                stat.st_size,
+                identity_key,
+            )
+        )
 
     candidates.sort(key=lambda item: (item[0], item[1]))
     detections: list[DetectedImage] = []
     read_failures: list[str] = []
-    for _mtime_ns, image_name, path, modified_seconds in candidates:
+    for (
+        modified_time_ns,
+        image_name,
+        path,
+        modified_seconds,
+        file_size,
+        identity_key,
+    ) in candidates:
         try:
             probe(path)
         except (OSError, UnidentifiedImageError, ValueError) as exc:
@@ -76,15 +102,20 @@ def scan_new_images(
             continue
         detection = DetectedImage(
             image_name=image_name,
+            identity_key=identity_key,
+            modified_time_ns=modified_time_ns,
+            file_size=file_size,
             file_modified_at=_utc_iso_from_timestamp(modified_seconds),
             detected_at=timestamp_factory(),
         )
         detections.append(detection)
-        processed.add(image_name)
+        processed.add(identity_key)
 
     errors = [*stat_failures, *read_failures]
     pending_count = len(stat_failures) + sum(
-        1 for _mtime_ns, image_name, _path, _modified in candidates if image_name not in processed
+        1
+        for _mtime_ns, _name, _path, _modified, _size, identity_key in candidates
+        if identity_key not in processed
     )
     return ImageScanResult(
         detections=tuple(detections),
@@ -102,6 +133,17 @@ def verify_image_readable(path: Path) -> None:
         image.verify()
 
 
+def image_identity_key(
+    image_name: str,
+    *,
+    modified_time_ns: int,
+    file_size: int,
+) -> str:
+    """Return the stable, JSON-safe identity of one image file revision."""
+
+    return f"v1:{int(modified_time_ns)}:{int(file_size)}:{image_name}"
+
+
 def _utc_iso_from_timestamp(timestamp: float) -> str:
     return (
         datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -113,6 +155,7 @@ def _utc_iso_from_timestamp(timestamp: float) -> str:
 __all__ = [
     "DetectedImage",
     "ImageScanResult",
+    "image_identity_key",
     "scan_new_images",
     "verify_image_readable",
 ]

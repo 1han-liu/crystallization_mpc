@@ -11,7 +11,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from uuid import uuid4
 
-from crystallization_mpc.experiments import ExperimentManifest, ExperimentRegistry
+from crystallization_mpc.experiments import (
+    ExperimentManifest,
+    ExperimentRegistry,
+    ExperimentStatus,
+)
 
 CENTRAL_STATE_FILENAME = ".central_experiment_state.json"
 WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
@@ -76,6 +80,18 @@ class CentralExperimentManager:
 
     def finish(self, run_id: str) -> dict[str, Any]:
         manifest = self.registry.finish(run_id)
+        return self.describe(manifest, current_run_id=self.current_run_id())
+
+    def transition(
+        self,
+        run_id: str,
+        status: ExperimentStatus | str,
+    ) -> dict[str, Any]:
+        manifest = self.registry.transition(run_id, status)
+        return self.describe(manifest, current_run_id=self.current_run_id())
+
+    def request_stop(self, run_id: str) -> dict[str, Any]:
+        manifest = self.registry.request_stop(run_id)
         return self.describe(manifest, current_run_id=self.current_run_id())
 
     def current_run_id(self) -> str | None:

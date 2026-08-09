@@ -14,8 +14,10 @@ from uuid import uuid4
 import yaml
 
 from crystallization_mpc.experiments.models import (
+    TERMINAL_EXPERIMENT_STATUSES,
     ExperimentManifest,
     ExperimentStatus,
+    require_experiment_transition,
 )
 
 MANIFEST_FILENAME = "experiment.json"
@@ -122,7 +124,7 @@ class ExperimentRegistry:
         now: datetime | None = None,
     ) -> ExperimentManifest:
         manifest = self.get(run_id)
-        if manifest.status == ExperimentStatus.RUNNING:
+        if manifest.status == ExperimentStatus.STARTING:
             self._write_yaml_snapshot_once(
                 self._resolve_existing_run_dir(run_id) / PARAMS_SNAPSHOT_FILENAME,
                 params_snapshot,
@@ -139,7 +141,7 @@ class ExperimentRegistry:
         )
         resolved_version = _parameter_version(params_snapshot, parameter_version)
         updated = manifest.updated(
-            status=ExperimentStatus.RUNNING,
+            status=ExperimentStatus.STARTING,
             started_at=_utc_iso(now),
             parameter_version=resolved_version,
             params_snapshot_file=PARAMS_SNAPSHOT_FILENAME,
@@ -147,6 +149,34 @@ class ExperimentRegistry:
         )
         self._write_manifest(updated)
         return updated
+
+    def transition(
+        self,
+        run_id: str,
+        status: ExperimentStatus | str,
+    ) -> ExperimentManifest:
+        manifest = self.get(run_id)
+        target = status if isinstance(status, ExperimentStatus) else ExperimentStatus(status)
+        if target == manifest.status:
+            return manifest
+        try:
+            require_experiment_transition(manifest.status, target)
+        except ValueError as exc:
+            raise InvalidExperimentStateError(str(exc)) from exc
+
+        updated = manifest.updated(status=target, error=None)
+        self._write_manifest(updated)
+        return updated
+
+    def request_stop(self, run_id: str) -> ExperimentManifest:
+        manifest = self.get(run_id)
+        if manifest.status in TERMINAL_EXPERIMENT_STATUSES:
+            return manifest
+        if manifest.status == ExperimentStatus.CREATED:
+            raise InvalidExperimentStateError(
+                f"Cannot stop experiment {run_id} before it has started."
+            )
+        return self.transition(run_id, ExperimentStatus.STOPPING)
 
     def finish(
         self,
@@ -157,10 +187,15 @@ class ExperimentRegistry:
         manifest = self.get(run_id)
         if manifest.status == ExperimentStatus.COMPLETED:
             return manifest
-        if manifest.status == ExperimentStatus.FAILED:
+        if manifest.status == ExperimentStatus.ERROR:
             raise InvalidExperimentStateError(
-                f"Cannot complete failed experiment {run_id}."
+                f"Cannot complete experiment {run_id} after an error."
             )
+
+        try:
+            require_experiment_transition(manifest.status, ExperimentStatus.COMPLETED)
+        except ValueError as exc:
+            raise InvalidExperimentStateError(str(exc)) from exc
 
         updated = manifest.updated(
             status=ExperimentStatus.COMPLETED,
@@ -169,7 +204,7 @@ class ExperimentRegistry:
         self._write_manifest(updated)
         return updated
 
-    def mark_failed(
+    def mark_error(
         self,
         run_id: str,
         *,
@@ -186,7 +221,7 @@ class ExperimentRegistry:
             raise ValueError("Experiment failure error is required.")
 
         updated = manifest.updated(
-            status=ExperimentStatus.FAILED,
+            status=ExperimentStatus.ERROR,
             ended_at=_utc_iso(now),
             error=message,
         )
@@ -199,7 +234,7 @@ class ExperimentRegistry:
         initialization: Mapping[str, Any],
     ) -> ExperimentManifest:
         manifest = self.get(run_id)
-        if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.FAILED}:
+        if manifest.status in TERMINAL_EXPERIMENT_STATUSES:
             raise InvalidExperimentStateError(
                 f"Cannot save initialization for experiment {run_id} "
                 f"in state {manifest.status.value}."

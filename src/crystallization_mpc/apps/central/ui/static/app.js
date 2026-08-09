@@ -10,16 +10,22 @@ const state = {
   experiments: [],
   currentRunId: null,
   experimentActionInFlight: false,
+  parameterActionInFlight: false,
+  parameterError: null,
+  parameterUnsavedCount: 0,
+  latestOverlayKey: null,
+  lastOverlayRefreshAt: 0,
 };
 
 const shell = document.querySelector(".shell");
 const toggleParametersButton = document.querySelector("#toggle-parameters");
-const publishButton = document.querySelector("#publish-button");
-const publishStatus = document.querySelector("#publish-status");
-const publishResult = document.querySelector("#publish-result");
+const commandStatus = document.querySelector("#command-status");
+const commandResult = document.querySelector("#command-result");
 const derivedPreview = document.querySelector("#derived-preview");
-const reloadParamsButton = document.querySelector("#reload-params");
+const resetParamsButton = document.querySelector("#reset-params");
 const saveParamsButton = document.querySelector("#save-params");
+const parameterStatus = document.querySelector("#parameter-status");
+const parameterStatusText = document.querySelector("#parameter-status-text");
 const refreshPreviewButton = document.querySelector("#refresh-preview");
 const sharedForm = document.querySelector("#shared-form");
 const gsensorForm = document.querySelector("#gsensor-form");
@@ -41,6 +47,22 @@ const endExperimentButton = document.querySelector("#end-experiment");
 const experimentHistory = document.querySelector("#experiment-history");
 const selectExperimentButton = document.querySelector("#select-experiment");
 const experimentMessage = document.querySelector("#experiment-message");
+const systemRefreshStatus = document.querySelector("#system-refresh-status");
+const gsensorLiveStatus = document.querySelector("#gsensor-live-status");
+const gsensorLiveFrame = document.querySelector("#gsensor-live-frame");
+const gsensorLiveImage = document.querySelector("#gsensor-live-image");
+const gsensorMessageCount = document.querySelector("#gsensor-message-count");
+const gsensorReceivedAt = document.querySelector("#gsensor-received-at");
+const gsensorLiveError = document.querySelector("#gsensor-live-error");
+const controllerLiveStatus = document.querySelector("#controller-live-status");
+const controllerRunId = document.querySelector("#controller-run-id");
+const controllerLastFrame = document.querySelector("#controller-last-frame");
+const controllerValidCount = document.querySelector("#controller-valid-count");
+const controllerInvalidCount = document.querySelector("#controller-invalid-count");
+const controllerLiveError = document.querySelector("#controller-live-error");
+const centralOverlayImage = document.querySelector("#central-overlay-image");
+const centralOverlayCaption = document.querySelector("#central-overlay-caption");
+const centralRefreshOverlay = document.querySelector("#central-refresh-overlay");
 
 function setDrawerOpen(open) {
   state.drawerOpen = open;
@@ -66,7 +88,19 @@ function formatFieldValue(value) {
   return JSON.stringify(value);
 }
 
-function renderForm(form, params) {
+function valuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function formatParameterTime(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString();
+}
+
+function renderForm(form, params, sectionName) {
   form.innerHTML = "";
   const entries = Object.entries(params)
     .map(([key, value], index) => ({ key, value, index, meta: state.paramMeta[key] || {} }))
@@ -113,6 +147,9 @@ function renderForm(form, params) {
       const expression = field.querySelector(".field-expression");
       const depends = field.querySelector(".field-depends");
       const input = field.querySelector(".field-input");
+      const modifiedBadge = field.querySelector(".field-modified");
+      const resetButton = field.querySelector(".field-reset");
+      const defaultValue = state.params?.defaults?.[sectionName]?.[key];
 
       label.textContent = meta.label || key;
       description.textContent = meta.description || "";
@@ -142,7 +179,23 @@ function renderForm(form, params) {
       badges.classList.toggle("is-empty", badgeItems.length === 0);
 
       input.dataset.key = key;
+      input.dataset.section = sectionName;
+      input.setAttribute("aria-label", meta.label || key);
       input.value = formatFieldValue(value);
+      input.addEventListener("input", () => {
+        state.parameterError = null;
+        updateParameterDraftState();
+      });
+      resetButton.addEventListener("click", () => {
+        input.value = formatFieldValue(defaultValue);
+        state.parameterError = null;
+        updateParameterDraftState();
+        input.focus();
+      });
+      const modified = !valuesEqual(value, defaultValue);
+      field.classList.toggle("modified", modified);
+      modifiedBadge.hidden = !modified;
+      resetButton.hidden = !modified;
       wrapper.appendChild(field);
     });
 
@@ -183,9 +236,94 @@ async function fetchJson(url, options = {}) {
 async function loadParams() {
   state.params = await fetchJson("/api/params");
   state.paramMeta = state.params.meta || {};
-  renderForm(sharedForm, state.params.shared);
-  renderForm(gsensorForm, state.params.gsensor);
-  renderForm(controllerForm, state.params.controller);
+  state.parameterError = null;
+  renderParameterForms();
+}
+
+function renderParameterForms() {
+  renderForm(sharedForm, state.params.shared, "shared");
+  renderForm(gsensorForm, state.params.gsensor, "gsensor");
+  renderForm(controllerForm, state.params.controller, "controller");
+  updateParameterDraftState();
+}
+
+function collectParameterDraft() {
+  return {
+    shared: collectForm(sharedForm),
+    gsensor: collectForm(gsensorForm),
+    controller: collectForm(controllerForm),
+  };
+}
+
+function parameterPayloadFromDraft() {
+  return {
+    version: state.params?.version || 1,
+    ...collectParameterDraft(),
+  };
+}
+
+function parametersLocked() {
+  const status = currentExperiment()?.status;
+  return Boolean(status && !["created", "completed", "error"].includes(status));
+}
+
+function updateParameterDraftState() {
+  if (!state.params) {
+    return;
+  }
+  let unsavedCount = 0;
+  let modifiedCount = 0;
+  const locked = parametersLocked();
+  document.querySelectorAll(".field-input").forEach((input) => {
+    const section = input.dataset.section;
+    const key = input.dataset.key;
+    const value = parseFieldValue(input.value);
+    const savedValue = state.params?.[section]?.[key];
+    const defaultValue = state.params?.defaults?.[section]?.[key];
+    input.disabled = state.parameterActionInFlight || locked;
+    if (!valuesEqual(value, savedValue)) {
+      unsavedCount += 1;
+    }
+    const modified = !valuesEqual(value, defaultValue);
+    if (modified) {
+      modifiedCount += 1;
+    }
+    const field = input.closest(".field");
+    field.classList.toggle("modified", modified);
+    field.querySelector(".field-modified").hidden = !modified;
+    const fieldReset = field.querySelector(".field-reset");
+    fieldReset.hidden = !modified;
+    fieldReset.disabled = state.parameterActionInFlight || locked;
+  });
+
+  saveParamsButton.disabled = state.parameterActionInFlight || locked || unsavedCount === 0;
+  resetParamsButton.disabled = state.parameterActionInFlight || locked || modifiedCount === 0;
+  state.parameterUnsavedCount = unsavedCount;
+  renderParameterStatus(unsavedCount);
+}
+
+function renderParameterStatus(unsavedCount = 0) {
+  let kind = state.params?.status?.kind || "loading";
+  let message = state.params?.status?.message || "Loading parameters…";
+
+  if (state.parameterActionInFlight) {
+    kind = "saving";
+    message = "Saving…";
+  } else if (state.parameterError) {
+    kind = "error";
+    message = `Save/validation failed: ${state.parameterError}`;
+  } else if (unsavedCount > 0) {
+    kind = "unsaved";
+    message = `${unsavedCount} unsaved change${unsavedCount === 1 ? "" : "s"}`;
+  } else if (kind === "draft_saved") {
+    const savedTime = formatParameterTime(state.params?.status?.saved_at);
+    if (savedTime) {
+      message = `Draft saved at ${savedTime} · version ${state.params.version}`;
+    }
+  }
+
+  parameterStatus.className = `parameter-status ${kind}`;
+  parameterStatusText.textContent = message;
 }
 
 function formatExperimentTime(value) {
@@ -213,7 +351,7 @@ function experimentOptionLabel(experiment) {
 function renderExperiments({ selectedRunId = null } = {}) {
   const current = currentExperiment();
   const hasCurrent = Boolean(current);
-  const isTerminal = current && ["completed", "failed"].includes(current.status);
+  const isTerminal = current && ["completed", "error"].includes(current.status);
 
   experimentStatus.textContent = current?.status || "not selected";
   experimentStatus.className = `status ${current?.status || "idle"}`;
@@ -260,6 +398,89 @@ async function loadExperiments(options = {}) {
   state.experiments = payload.experiments || [];
   state.currentRunId = payload.current_run_id || null;
   renderExperiments(options);
+  updateParameterDraftState();
+  if (state.operationMeta.length > 0) {
+    renderOperationSections();
+  }
+}
+
+function updateCentralOverlay(runId, frameSeq, { final = false, force = false } = {}) {
+  if (!runId || !frameSeq) {
+    return;
+  }
+  const kind = final ? "final" : "latest";
+  const key = `${runId}:${kind}:${frameSeq}`;
+  const now = Date.now();
+  if (!force && (key === state.latestOverlayKey || now - state.lastOverlayRefreshAt < 3000)) {
+    return;
+  }
+  centralOverlayImage.src = `/api/experiments/${encodeURIComponent(runId)}/overlay/${kind}?frame_seq=${encodeURIComponent(frameSeq)}&_=${now}`;
+  centralOverlayImage.hidden = false;
+  centralOverlayCaption.textContent = `${final ? "Final" : "Latest"} overlay · frame ${frameSeq}`;
+  state.latestOverlayKey = key;
+  state.lastOverlayRefreshAt = now;
+}
+
+function renderSystemStatus(payload) {
+  const gsensor = payload.gsensor || {};
+  const gsensorStatus = gsensor.last_status || {};
+  const controller = payload.controller || {};
+  const current = payload.current_experiment || null;
+
+  systemRefreshStatus.textContent = "online";
+  systemRefreshStatus.className = "status running";
+  gsensorLiveStatus.textContent = gsensorStatus.status || "no status";
+  gsensorLiveStatus.className = gsensorStatus.status === "error"
+    ? "status error"
+    : (gsensorStatus.status ? "status running" : "status idle");
+  gsensorLiveFrame.textContent = gsensorStatus.frame_seq ?? "—";
+  gsensorLiveImage.textContent = gsensorStatus.image_name || "—";
+  gsensorMessageCount.textContent = String(gsensor.message_count || 0);
+  gsensorReceivedAt.textContent = formatExperimentTime(gsensor.received_at);
+  gsensorLiveError.textContent = gsensorStatus.error || gsensor.consumer_error || "";
+  gsensorLiveError.hidden = !gsensorLiveError.textContent;
+
+  controllerLiveStatus.textContent = controller.status || "unavailable";
+  controllerLiveStatus.className = controller.available
+    ? (controller.status === "error" ? "status error" : "status running")
+    : "status error";
+  controllerRunId.textContent = controller.current_run_id || "—";
+  controllerLastFrame.textContent = controller.last_frame_seq ?? "—";
+  controllerValidCount.textContent = String(controller.sample_counts?.valid || 0);
+  controllerInvalidCount.textContent = String(controller.sample_counts?.invalid || 0);
+  controllerLiveError.textContent = controller.error || "";
+  controllerLiveError.hidden = !controllerLiveError.textContent;
+
+  const frameSeq = Number(gsensorStatus.frame_seq || 0);
+  if (current?.run_id && frameSeq > 0) {
+    updateCentralOverlay(current.run_id, frameSeq, {
+      final: current.status === "completed",
+    });
+  }
+}
+
+async function loadSystemStatus({ forceOverlay = false } = {}) {
+  const payload = await fetchJson("/api/system/status");
+  const experiments = payload.experiments || {};
+  state.experiments = experiments.experiments || [];
+  state.currentRunId = experiments.current_run_id || null;
+  renderExperiments();
+  updateParameterDraftState();
+  if (state.operationMeta.length > 0) {
+    renderOperationSections();
+  }
+  renderSystemStatus(payload);
+  if (forceOverlay) {
+    const status = payload.gsensor?.last_status || {};
+    const frameSeq = Number(status.frame_seq || 0);
+    if (payload.current_experiment?.run_id && frameSeq > 0) {
+      updateCentralOverlay(payload.current_experiment.run_id, frameSeq, {
+        final: payload.current_experiment.status === "completed",
+        force: true,
+      });
+    }
+  }
+  return payload;
 }
 
 async function runExperimentAction(action, successMessage) {
@@ -281,6 +502,14 @@ async function runExperimentAction(action, successMessage) {
 }
 
 async function createExperiment() {
+  if (state.parameterUnsavedCount > 0) {
+    const confirmed = window.confirm(
+      "Creating a new experiment resets the parameter draft to defaults. Discard unsaved changes?",
+    );
+    if (!confirmed) {
+      return null;
+    }
+  }
   const label = newExperimentLabel.value.trim();
   const result = await runExperimentAction(
     () => fetchJson("/api/experiments", {
@@ -291,6 +520,8 @@ async function createExperiment() {
   );
   if (result) {
     newExperimentLabel.value = "";
+    await loadParams();
+    await loadOperationState();
   }
   return result;
 }
@@ -356,8 +587,8 @@ function renderOperationControl(item) {
   control.className = "operation-control";
   const currentValue = state.operationState[item.key];
 
-  if (item.key === "G_active") {
-    return renderGrowthRateControl();
+  if (item.key === "experiment_active") {
+    return renderExperimentLifecycleControl();
   }
 
   if (item.kind === "list") {
@@ -384,55 +615,25 @@ function renderOperationControl(item) {
     return control;
   }
 
-  const button = document.createElement("button");
-  button.className = item.kind === "action_push" ? "ghost" : "primary";
-  button.disabled = state.actionInFlight;
-
-  if (item.kind === "action_toggle") {
-    const labels = item.labels || [item.label, item.label];
-    button.textContent = currentValue ? labels[1] : labels[0];
-    button.addEventListener("click", async () => {
-      try {
-        state.actionInFlight = true;
-        button.disabled = true;
-        await triggerOperationAction(item.key);
-      } finally {
-        state.actionInFlight = false;
-        await loadOperationState({ forceRender: true });
-      }
-    });
-    control.appendChild(button);
-    return control;
-  }
-
-  button.textContent = item.label;
-  button.addEventListener("click", async () => {
-    try {
-      state.actionInFlight = true;
-      button.disabled = true;
-      await triggerOperationAction(item.key);
-    } finally {
-      state.actionInFlight = false;
-      await loadOperationState({ forceRender: true });
-    }
-  });
-  control.appendChild(button);
   return control;
 }
 
-function renderGrowthRateControl() {
+function renderExperimentLifecycleControl() {
   const control = document.createElement("div");
   control.className = "operation-control operation-control-actions";
+  const current = currentExperiment();
+  const canStart = current?.status === "created";
+  const canStop = current && !["created", "completed", "error"].includes(current.status);
 
   const startButton = document.createElement("button");
   startButton.className = "primary";
-  startButton.textContent = "Start growth rate";
-  startButton.disabled = state.actionInFlight;
+  startButton.textContent = "Start experiment";
+  startButton.disabled = state.actionInFlight || !canStart;
   startButton.addEventListener("click", async () => {
     try {
       state.actionInFlight = true;
       startButton.disabled = true;
-      await startGrowthRateCommand();
+      await startExperimentCommand();
     } finally {
       state.actionInFlight = false;
       await loadOperationState({ forceRender: true });
@@ -441,13 +642,13 @@ function renderGrowthRateControl() {
 
   const stopButton = document.createElement("button");
   stopButton.className = "ghost";
-  stopButton.textContent = "Stop growth rate";
-  stopButton.disabled = state.actionInFlight;
+  stopButton.textContent = "Stop experiment";
+  stopButton.disabled = state.actionInFlight || !canStop;
   stopButton.addEventListener("click", async () => {
     try {
       state.actionInFlight = true;
       stopButton.disabled = true;
-      await stopGrowthRateCommand();
+      await stopExperimentCommand();
     } finally {
       state.actionInFlight = false;
       await loadOperationState({ forceRender: true });
@@ -497,18 +698,46 @@ async function loadOperationState({ forceRender = false } = {}) {
 }
 
 async function saveParams() {
-  const payload = {
-    version: state.params?.version || 1,
-    shared: collectForm(sharedForm),
-    gsensor: collectForm(gsensorForm),
-    controller: collectForm(controllerForm),
-  };
-  await fetchJson("/api/params", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  state.params = payload;
-  await loadOperationState();
+  state.parameterActionInFlight = true;
+  state.parameterError = null;
+  updateParameterDraftState();
+  try {
+    state.params = await fetchJson("/api/params", {
+      method: "POST",
+      body: JSON.stringify(parameterPayloadFromDraft()),
+    });
+    renderParameterForms();
+    await loadOperationState();
+    return state.params;
+  } catch (error) {
+    state.parameterError = error.message;
+    updateParameterDraftState();
+    return null;
+  } finally {
+    state.parameterActionInFlight = false;
+    updateParameterDraftState();
+  }
+}
+
+async function resetParamsToDefaults() {
+  state.parameterActionInFlight = true;
+  state.parameterError = null;
+  updateParameterDraftState();
+  try {
+    state.params = await fetchJson("/api/params/reset", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    renderParameterForms();
+    await loadOperationState();
+  } catch (error) {
+    state.parameterError = error.message;
+    updateParameterDraftState();
+    return null;
+  } finally {
+    state.parameterActionInFlight = false;
+    updateParameterDraftState();
+  }
 }
 
 async function updateOperationValue(key, value) {
@@ -518,70 +747,52 @@ async function updateOperationValue(key, value) {
   });
 }
 
-async function triggerOperationAction(key) {
-  await fetchJson("/api/operation/action", {
-    method: "POST",
-    body: JSON.stringify({ key }),
-  });
-}
-
-async function startGrowthRateCommand() {
-  publishStatus.textContent = "starting growth rate";
-  publishStatus.className = "status idle";
+async function startExperimentCommand() {
+  commandStatus.textContent = "saving parameters";
+  commandStatus.className = "status idle";
+  state.parameterActionInFlight = true;
+  state.parameterError = null;
+  updateParameterDraftState();
   try {
-    const payload = await fetchJson("/api/operation/growth-rate/start", {
+    const payload = await fetchJson("/api/operation/experiment/start", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(parameterPayloadFromDraft()),
     });
-    publishResult.textContent = JSON.stringify(payload, null, 2);
-    publishStatus.textContent = "success";
-    publishStatus.className = "status success";
+    state.params = payload.parameters;
+    renderParameterForms();
+    commandResult.textContent = JSON.stringify(payload, null, 2);
+    commandStatus.textContent = "started";
+    commandStatus.className = "status success";
     await loadExperiments({ selectedRunId: payload.experiment?.run_id || null });
   } catch (error) {
-    publishResult.textContent = error.message;
-    publishStatus.textContent = "error";
-    publishStatus.className = "status error";
-    throw error;
+    state.parameterError = error.message;
+    commandResult.textContent = error.message;
+    commandStatus.textContent = "error";
+    commandStatus.className = "status error";
+    return null;
+  } finally {
+    state.parameterActionInFlight = false;
+    updateParameterDraftState();
   }
 }
 
-async function stopGrowthRateCommand() {
-  publishStatus.textContent = "stopping growth rate";
-  publishStatus.className = "status idle";
+async function stopExperimentCommand() {
+  commandStatus.textContent = "stopping experiment";
+  commandStatus.className = "status idle";
   try {
-    const payload = await fetchJson("/api/operation/growth-rate/stop", {
+    const payload = await fetchJson("/api/operation/experiment/stop", {
       method: "POST",
       body: JSON.stringify({}),
     });
-    publishResult.textContent = JSON.stringify(payload, null, 2);
-    publishStatus.textContent = "success";
-    publishStatus.className = "status success";
+    commandResult.textContent = JSON.stringify(payload, null, 2);
+    commandStatus.textContent = "stopped";
+    commandStatus.className = "status success";
+    await loadExperiments({ selectedRunId: payload.experiment?.run_id || null });
   } catch (error) {
-    publishResult.textContent = error.message;
-    publishStatus.textContent = "error";
-    publishStatus.className = "status error";
-    throw error;
-  }
-}
-
-async function publishParams({ raiseOnError = false } = {}) {
-  publishStatus.textContent = "sending";
-  publishStatus.className = "status idle";
-  try {
-    const payload = await fetchJson("/api/operation/publish", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    publishResult.textContent = JSON.stringify(payload, null, 2);
-    publishStatus.textContent = "success";
-    publishStatus.className = "status success";
-  } catch (error) {
-    publishResult.textContent = error.message;
-    publishStatus.textContent = "error";
-    publishStatus.className = "status error";
-    if (raiseOnError) {
-      throw error;
-    }
+    commandResult.textContent = error.message;
+    commandStatus.textContent = "error";
+    commandStatus.className = "status error";
+    return null;
   }
 }
 
@@ -589,8 +800,8 @@ toggleParametersButton.addEventListener("click", () => {
   setDrawerOpen(!state.drawerOpen);
 });
 
-reloadParamsButton.addEventListener("click", async () => {
-  await loadParams();
+resetParamsButton.addEventListener("click", async () => {
+  await resetParamsToDefaults();
 });
 
 saveParamsButton.addEventListener("click", async () => {
@@ -601,10 +812,6 @@ refreshPreviewButton.addEventListener("click", async (event) => {
   event.preventDefault();
   event.stopPropagation();
   await loadOperationState();
-});
-
-publishButton.addEventListener("click", async () => {
-  await publishParams();
 });
 
 newExperimentButton.addEventListener("click", async () => {
@@ -630,29 +837,43 @@ copyCameraPathButton.addEventListener("click", async () => {
   await copyCameraPath();
 });
 
+centralRefreshOverlay.addEventListener("click", () => {
+  loadSystemStatus({ forceOverlay: true }).catch((error) => {
+    systemRefreshStatus.textContent = error.message;
+    systemRefreshStatus.className = "status error";
+  });
+});
+
+centralOverlayImage.addEventListener("error", () => {
+  centralOverlayImage.hidden = true;
+  centralOverlayCaption.textContent = "Overlay is not available yet.";
+});
+
 async function bootstrap() {
   await loadParams();
   await loadOperationMeta();
   await loadOperationState({ forceRender: true });
   try {
-    await loadExperiments();
+    await loadSystemStatus();
   } catch (error) {
     setExperimentMessage(error.message, { error: true });
   }
 }
 
 bootstrap().catch((error) => {
-  publishResult.textContent = error.message;
-  publishStatus.textContent = "error";
-  publishStatus.className = "status error";
+  commandResult.textContent = error.message;
+  commandStatus.textContent = "error";
+  commandStatus.className = "status error";
 });
 
 setInterval(() => {
   if (!state.actionInFlight && !document.hidden) {
-    loadOperationState().catch((error) => {
-      publishResult.textContent = error.message;
-      publishStatus.textContent = "error";
-      publishStatus.className = "status error";
+    Promise.all([loadOperationState(), loadSystemStatus()]).catch((error) => {
+      commandResult.textContent = error.message;
+      commandStatus.textContent = "error";
+      commandStatus.className = "status error";
+      systemRefreshStatus.textContent = "offline";
+      systemRefreshStatus.className = "status error";
     });
   }
 }, 2000);
@@ -660,13 +881,13 @@ setInterval(() => {
 window.addEventListener("focus", () => {
   if (!state.actionInFlight) {
     loadOperationState({ forceRender: true }).catch((error) => {
-      publishResult.textContent = error.message;
-      publishStatus.textContent = "error";
-      publishStatus.className = "status error";
+      commandResult.textContent = error.message;
+      commandStatus.textContent = "error";
+      commandStatus.className = "status error";
     });
   }
   if (!state.experimentActionInFlight) {
-    loadExperiments().catch((error) => {
+    loadSystemStatus().catch((error) => {
       setExperimentMessage(error.message, { error: true });
     });
   }

@@ -179,8 +179,7 @@ button:disabled {
   min-width: 0;
 }
 
-.experiment-source-facts span,
-.source-choice span {
+.experiment-source-facts span {
   font-size: 0.85rem;
   color: var(--muted);
 }
@@ -210,28 +209,12 @@ button:disabled {
   align-items: end;
 }
 
-.source-choice {
-  display: grid;
-  gap: 6px;
-  min-width: 140px;
-}
-
-.source-choice select {
-  width: 100%;
-  min-height: 40px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: #ffffff;
-  color: var(--ink);
-  padding: 8px 10px;
-  font: inherit;
-}
-
 .experiment-source .save-status {
   margin: 0;
 }
 
-.image-monitor {
+.image-monitor,
+.baseline-monitor {
   display: grid;
   gap: 12px;
   padding: 12px;
@@ -253,25 +236,30 @@ button:disabled {
   font-weight: 600;
 }
 
-.image-monitor-facts {
+.image-monitor-facts,
+.baseline-monitor-facts {
   display: grid;
   grid-template-columns: minmax(100px, 0.35fr) minmax(100px, 0.35fr) minmax(220px, 1fr) minmax(200px, 0.8fr) minmax(200px, 0.8fr);
   gap: 10px;
 }
 
-.image-monitor-facts > div {
+.image-monitor-facts > div,
+.baseline-monitor-facts > div {
   display: grid;
   gap: 6px;
   min-width: 0;
 }
 
-.image-monitor-facts span {
+.image-monitor-facts span,
+.baseline-monitor-facts span {
   font-size: 0.85rem;
   color: var(--muted);
 }
 
 .image-monitor-facts code,
-.image-monitor-facts strong {
+.image-monitor-facts strong,
+.baseline-monitor-facts code,
+.baseline-monitor-facts strong {
   min-height: 40px;
   padding: 10px;
   overflow-wrap: anywhere;
@@ -717,9 +705,90 @@ button:disabled {
   .grid,
   .experiment-source-facts,
   .image-monitor-facts,
+  .baseline-monitor-facts,
   .init-layout {
     display: grid;
     grid-template-columns: 1fr;
     align-items: start;
+  }
+}
+
+.online-measurement-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.measurement-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.measurement-facts > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+.measurement-facts .wide {
+  grid-column: span 3;
+}
+
+.measurement-facts span,
+.overlay-preview figcaption {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.measurement-facts strong,
+.measurement-facts code {
+  overflow-wrap: anywhere;
+}
+
+.measurement-summary .save-status.error {
+  color: #8a1c1c;
+}
+
+.overlay-preview {
+  margin: 0;
+  min-height: 220px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.overlay-preview img {
+  display: block;
+  width: 100%;
+  max-height: 460px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+.overlay-preview img[hidden] {
+  display: none;
+}
+
+@media (max-width: 1000px) {
+  .online-measurement-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .measurement-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .measurement-facts .wide {
+    grid-column: span 1;
   }
 }

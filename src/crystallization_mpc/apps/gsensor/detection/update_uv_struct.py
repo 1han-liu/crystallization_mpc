@@ -7,7 +7,16 @@ from typing import Any
 from crystallization_mpc.apps.gsensor.detection.update_line import update_line
 
 
-def update_uv_struct(uv_struct, image_file, ii: int, params_G, kernel):
+def update_uv_struct(
+    uv_struct,
+    image_file,
+    ii: int,
+    params_G,
+    kernel,
+    *,
+    debug_dir=None,
+    debug_label: str | None = None,
+):
     uv_struct.line, uv_struct.dist, I_orig = update_line(
         image_file,
         params_G,
@@ -18,6 +27,8 @@ def update_uv_struct(uv_struct, image_file, ii: int, params_G, kernel):
         uv_struct.o,
         uv_struct.is_opposite,
         kernel,
+        debug_dir=debug_dir,
+        debug_label=debug_label,
     )
     _set_matlab_indexed_value(uv_struct, "dist_array", ii, uv_struct.dist)
     return uv_struct, I_orig

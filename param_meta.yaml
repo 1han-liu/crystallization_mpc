@@ -144,6 +144,42 @@ params:
       visible: true
       order: 180
 
+  params_G.hough_threshold:
+    section: "Growth line detection"
+    label: "OpenCV Hough threshold"
+    description: "Accumulator vote threshold used by OpenCV probabilistic Hough line detection."
+    unit: "votes"
+    kind: "basic"
+    derived: false
+    publish_to: [gsensor]
+    ui:
+      visible: true
+      order: 181
+
+  params_G.hough_min_line_length:
+    section: "Growth line detection"
+    label: "OpenCV min line length"
+    description: "Minimum line segment length passed to OpenCV probabilistic Hough line detection."
+    unit: "px"
+    kind: "basic"
+    derived: false
+    publish_to: [gsensor]
+    ui:
+      visible: true
+      order: 182
+
+  params_G.hough_max_line_gap:
+    section: "Growth line detection"
+    label: "OpenCV max line gap"
+    description: "Maximum gap between line segment points passed to OpenCV probabilistic Hough line detection."
+    unit: "px"
+    kind: "basic"
+    derived: false
+    publish_to: [gsensor]
+    ui:
+      visible: true
+      order: 183
+
   sigma_set:
     section: "Target"
     label: "Target of relative supersaturation: sigma_set"

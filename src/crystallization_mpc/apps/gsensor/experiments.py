@@ -14,6 +14,7 @@ from crystallization_mpc.experiments import ExperimentRegistry
 from crystallization_mpc.messaging.commands import EXPERIMENT_MODE_LIVE
 
 GSENSOR_STATE_FILENAME = ".gsensor_experiment_state.json"
+GSENSOR_PROCESSING_STATE_FILENAME = "gsensor_processing_state.json"
 IMAGE_DIRECTORY_NAME = "images"
 
 
@@ -113,6 +114,49 @@ class GsensorExperimentManager:
         )
         return manifest.to_dict()
 
+    def load_initialization(self, run_id: str) -> dict[str, Any]:
+        manifest = self.registry.get(run_id)
+        filename = manifest.gsensor_initialization_file
+        if not filename:
+            raise FileNotFoundError(
+                f"Gsensor initialization is not available for {run_id}."
+            )
+        path = self.registry.image_dir(run_id).parent / filename
+        return _read_json_object(path, "Gsensor initialization")
+
+    def load_processing_state(self, run_id: str) -> dict[str, Any] | None:
+        path = self.processing_state_path(run_id)
+        if not path.is_file():
+            return None
+        document = _read_json_object(path, "Gsensor processing state")
+        if int(document.get("schema_version", 0)) != 1:
+            raise InvalidExperimentSelectionError(
+                f"Unsupported Gsensor processing-state schema: {path}"
+            )
+        if str(document.get("run_id") or "") != run_id:
+            raise InvalidExperimentSelectionError(
+                "Gsensor processing-state run_id does not match its experiment."
+            )
+        return document
+
+    def save_processing_state(
+        self,
+        run_id: str,
+        state: Mapping[str, Any],
+    ) -> Path:
+        current = self.registry.get(run_id)
+        document = dict(state)
+        if int(document.get("schema_version", 0)) != 1:
+            raise ValueError("Gsensor processing state schema_version must be 1.")
+        if str(document.get("run_id") or "") != current.run_id:
+            raise ValueError("Gsensor processing state run_id does not match experiment.")
+        path = self.processing_state_path(run_id)
+        _atomic_write_json(path, document)
+        return path
+
+    def processing_state_path(self, run_id: str) -> Path:
+        return self.registry.image_dir(run_id).parent / GSENSOR_PROCESSING_STATE_FILENAME
+
     def _validated_selection(
         self,
         *,
@@ -182,8 +226,42 @@ def _utc_iso() -> str:
     )
 
 
+def _read_json_object(path: Path, description: str) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InvalidExperimentSelectionError(
+            f"Could not read {description}: {path}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise InvalidExperimentSelectionError(
+            f"{description} must be a JSON object: {path}"
+        )
+    return document
+
+
+def _atomic_write_json(path: Path, document: Mapping[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(
+                dict(document),
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 __all__ = [
     "GSENSOR_STATE_FILENAME",
+    "GSENSOR_PROCESSING_STATE_FILENAME",
     "ExperimentNotSelectedError",
     "ExperimentSwitchWhileRunningError",
     "GsensorExperimentManager",

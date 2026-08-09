@@ -10,7 +10,6 @@ from typing import Any
 import numpy as np
 
 from crystallization_mpc.apps.gsensor.detection.calc_masked_image import calc_masked_image
-from crystallization_mpc.apps.gsensor.detection.calc_theta_range import calc_theta_range
 from crystallization_mpc.apps.gsensor.detection.find_edge_points_yolov import (
     find_edge_points_yolov,
 )
@@ -19,9 +18,23 @@ from crystallization_mpc.apps.gsensor.utils.reorient_line import reorient_line
 logger = logging.getLogger(__name__)
 
 
-def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
+def update_line(
+    image_file,
+    params_G,
+    line,
+    t,
+    e,
+    n,
+    o,
+    is_opposite,
+    kernel,
+    *,
+    debug_dir: str | Path | None = None,
+    debug_label: str | None = None,
+):
     old_line = line
     path = _image_file_path(image_file)
+    debug_label = debug_label or path.stem
     logger.warning("update_line start: image=%s", path)
     I_orig = imread(path)
     logger.warning(
@@ -31,6 +44,14 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
         getattr(I_orig, "dtype", None),
     )
     I = I_orig
+    _save_debug_image(
+        debug_dir,
+        debug_label,
+        "01_original_old_line",
+        I_orig,
+        lines=[old_line],
+        line_fill=(255, 215, 0),
+    )
 
     logger.warning("update_line YOLO edge detection start: image=%s", path)
     I = find_edge_points_yolov(I, kernel)
@@ -39,6 +60,7 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
         path,
         int(np.count_nonzero(I)),
     )
+    _save_debug_image(debug_dir, debug_label, "02_edges", I)
     logger.warning("update_line mask start: image=%s", path)
     I, _ = calc_masked_image(
         I,
@@ -53,23 +75,25 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
         path,
         int(np.count_nonzero(I)),
     )
-
-    logger.warning("update_line hough start: image=%s", path)
-    Hs, thetas, rhos = hough(I, theta=calc_theta_range(line.theta, _param(params_G, "delta_theta")))
-    logger.warning(
-        "update_line hough done: image=%s H_shape=%s theta_count=%s rho_count=%s",
-        path,
-        Hs.shape,
-        len(thetas),
-        len(rhos),
+    _save_debug_image(
+        debug_dir,
+        debug_label,
+        "03_masked_edges",
+        I,
+        lines=[old_line],
+        line_fill=(255, 215, 0),
     )
-    rho_min = line.rho - _param(params_G, "width") / _param(params_G, "width_divider")
-    rho_max = line.rho + _param(params_G, "width") / _param(params_G, "width_divider")
-    Hs[(rhos < rho_min) | (rhos > rho_max), :] = 0
-    peaks = houghpeaks(Hs, _param(params_G, "num_peak"), nhood_size=(9, 1))
-    logger.warning("update_line hough peaks done: image=%s peak_count=%s", path, len(peaks))
-    lines = houghlines(I, thetas, rhos, peaks, fill_gap=5, min_length=7)
-    logger.warning("update_line hough lines done: image=%s line_count=%s", path, len(lines))
+
+    logger.warning("update_line OpenCV hough start: image=%s", path)
+    lines = houghlines_opencv(
+        I,
+        line,
+        params_G,
+        debug_dir=debug_dir,
+        debug_label=debug_label,
+        debug_base_image=I_orig,
+    )
+    logger.warning("update_line OpenCV hough done: image=%s line_count=%s", path, len(lines))
 
     dist2o = np.inf
     line_cand = None
@@ -118,9 +142,10 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
                 len_min,
             )
             continue
-        # This is the current translated MATLAB selection score. Logging it tells
-        # us whether candidate choice is changing or staying constant.
-        dist2o_new = np.dot(_point3(o) - _point3(line.point1), _point3(n)) * (
+        # The MATLAB source uses ``line.point1`` here, which gives every
+        # candidate the same score.  Scoring the candidate itself preserves the
+        # intended inward/outward boundary choice.
+        dist2o_new = np.dot(_point3(o) - candidate.point1, _point3(n)) * (
             float(is_opposite) - 0.5
         ) * 2
         logger.warning(
@@ -157,6 +182,24 @@ def update_line(image_file, params_G, line, t, e, n, o, is_opposite, kernel):
         )
         line = line_cand
 
+    # The fallback line keeps tracking geometry continuous, but callers still
+    # need to know that this frame did not contain a valid Hough measurement.
+    line.detection_valid = line_cand is not None
+
+    _save_debug_image(
+        debug_dir,
+        debug_label,
+        "06_selected_line",
+        I_orig,
+        lines=[line],
+        line_fill=(0, 255, 255) if line_cand is not None else (255, 215, 0),
+        title=(
+            "selected=new_line"
+            if line_cand is not None
+            else "selected=old_line; no valid Hough candidate"
+        ),
+    )
+
     dist = abs(np.dot(_point3(line.point1) - _point3(t), _point3(n)))
     logger.warning(
         "update_line distance projection: image=%s line_p1=%s t=%s n=%s dist=%s",
@@ -180,90 +223,420 @@ def imread(path: str | Path):
         return np.asarray(image)
 
 
-def hough(I, theta):
-    I = np.asarray(I, dtype=bool)
-    theta = np.asarray(theta, dtype=float).reshape(-1)
-    height, width = I.shape[:2]
-    diag = int(np.ceil(np.hypot(height, width)))
-    rhos = np.arange(-diag, diag + 1, dtype=float)
-    H = np.zeros((rhos.size, theta.size), dtype=float)
-    y, x = np.nonzero(I)
-    x = x.astype(float) + 1.0
-    y = y.astype(float) + 1.0
-    for theta_idx, theta_value in enumerate(theta):
-        theta_rad = np.deg2rad(theta_value)
-        rho_values = x * np.cos(theta_rad) + y * np.sin(theta_rad)
-        rho_idx = np.rint(rho_values).astype(int) + diag
-        valid = (rho_idx >= 0) & (rho_idx < rhos.size)
-        np.add.at(H[:, theta_idx], rho_idx[valid], 1)
-    return H, theta, rhos
+def houghlines_opencv(
+    I,
+    line,
+    params_G,
+    *,
+    cv2_module=None,
+    debug_dir: str | Path | None = None,
+    debug_label: str | None = None,
+    debug_base_image: Any = None,
+):
+    """Detect growth-line candidates with OpenCV's probabilistic Hough transform."""
 
-
-def houghpeaks(H, num_peak, nhood_size=(9, 1)):
-    H_work = np.asarray(H, dtype=float).copy()
-    peaks = []
-    num_peak = int(num_peak)
-    row_radius = int(nhood_size[0]) // 2
-    col_radius = int(nhood_size[1]) // 2
-    for _ in range(num_peak):
-        if H_work.size == 0 or np.max(H_work) <= 0:
-            break
-        row, col = np.unravel_index(np.argmax(H_work), H_work.shape)
-        peaks.append((row, col))
-        row_min = max(0, row - row_radius)
-        row_max = min(H_work.shape[0], row + row_radius + 1)
-        col_min = max(0, col - col_radius)
-        col_max = min(H_work.shape[1], col + col_radius + 1)
-        H_work[row_min:row_max, col_min:col_max] = 0
-    return peaks
-
-
-def houghlines(I, thetas, rhos, peaks, fill_gap=5, min_length=7):
-    I = np.asarray(I, dtype=bool)
-    y0, x0 = np.nonzero(I)
-    if x0.size == 0:
+    image = _opencv_hough_image(I)
+    edge_pixels = int(np.count_nonzero(image))
+    if not np.any(image):
+        logger.warning("OpenCV hough skipped: edge_pixels=0")
         return []
-    coords = np.column_stack([x0.astype(float) + 1.0, y0.astype(float) + 1.0])
-    lines = []
-    for rho_idx, theta_idx in peaks:
-        theta_value = float(thetas[theta_idx])
-        rho_value = float(rhos[rho_idx])
-        theta_rad = np.deg2rad(theta_value)
-        normal = np.array([np.cos(theta_rad), np.sin(theta_rad)])
-        direction = np.array([-np.sin(theta_rad), np.cos(theta_rad)])
-        distance = np.abs(coords @ normal - rho_value)
-        selected = coords[distance <= 0.5]
-        if selected.size == 0:
+
+    cv2 = cv2_module or _import_cv2()
+    threshold = int(_param(params_G, "hough_threshold", 10))
+    rho_resolution = float(_param(params_G, "hough_rho_resolution", 1.0))
+    theta_resolution_deg = float(_param(params_G, "hough_theta_resolution_deg", 1.0))
+    min_line_length = float(_param(params_G, "hough_min_line_length", 7.0))
+    max_line_gap = float(_param(params_G, "hough_max_line_gap", 5.0))
+    width = float(_param(params_G, "width"))
+    preferred_rho_half_width = width / float(_param(params_G, "width_divider"))
+    recovery_rho_half_width = width
+    rho_min = line.rho - preferred_rho_half_width
+    rho_max = line.rho + preferred_rho_half_width
+    recovery_rho_min = line.rho - recovery_rho_half_width
+    recovery_rho_max = line.rho + recovery_rho_half_width
+    delta_theta = float(_param(params_G, "delta_theta"))
+    len_min = float(_param(params_G, "len_min"))
+    max_candidates = int(_param(params_G, "hough_max_candidates", _param(params_G, "num_peak", 0)))
+
+    logger.warning(
+        "OpenCV hough params: edge_pixels=%s threshold=%s rho_resolution=%s "
+        "theta_resolution_deg=%s min_line_length=%s max_line_gap=%s "
+        "theta_center=%s delta_theta=%s rho_center=%s rho_min=%s rho_max=%s "
+        "recovery_rho_min=%s recovery_rho_max=%s len_min=%s max_candidates=%s",
+        edge_pixels,
+        threshold,
+        rho_resolution,
+        theta_resolution_deg,
+        min_line_length,
+        max_line_gap,
+        getattr(line, "theta", None),
+        delta_theta,
+        getattr(line, "rho", None),
+        rho_min,
+        rho_max,
+        recovery_rho_min,
+        recovery_rho_max,
+        len_min,
+        max_candidates,
+    )
+
+    raw_lines = cv2.HoughLinesP(
+        image,
+        rho=rho_resolution,
+        theta=np.deg2rad(theta_resolution_deg),
+        threshold=threshold,
+        minLineLength=min_line_length,
+        maxLineGap=max_line_gap,
+    )
+    if raw_lines is None:
+        _save_debug_image(
+            debug_dir,
+            debug_label,
+            "04_raw_lines",
+            debug_base_image if debug_base_image is not None else I,
+            title="raw_line_count=0",
+        )
+        _save_debug_image(
+            debug_dir,
+            debug_label,
+            "05_accepted_lines",
+            debug_base_image if debug_base_image is not None else I,
+            title="accepted_line_count=0",
+        )
+        logger.warning(
+            "OpenCV hough diagnostics: edge_pixels=%s raw_line_count=0 "
+            "theta_pass_count=0 rho_pass_count=0 final_line_count=0",
+            edge_pixels,
+        )
+        return []
+
+    raw_segments = np.asarray(raw_lines, dtype=float).reshape(-1, 4)
+    _save_debug_image(
+        debug_dir,
+        debug_label,
+        "04_raw_lines",
+        debug_base_image if debug_base_image is not None else I,
+        segments=raw_segments,
+        line_fill=(255, 0, 0),
+        title=f"raw_line_count={raw_segments.shape[0]}",
+    )
+
+    raw_line_count = 0
+    theta_pass_count = 0
+    rho_pass_count = 0
+    preferred_candidates = []
+    recovery_candidates = []
+    for segment in raw_segments:
+        raw_line_count += 1
+        candidate = _line_from_opencv_segment(segment, reference_theta=float(line.theta))
+        if candidate is None:
             continue
-        projection = selected @ direction
-        order = np.argsort(projection)
-        selected = selected[order]
-        projection = projection[order]
-        for group in _projection_groups(selected, projection, fill_gap):
-            if group.shape[0] < 2:
-                continue
-            point1 = group[0]
-            point2 = group[-1]
-            if np.linalg.norm(point1 - point2) < min_length:
-                continue
-            lines.append(
-                SimpleNamespace(
-                    point1=np.asarray(point1, dtype=float),
-                    point2=np.asarray(point2, dtype=float),
-                    theta=theta_value,
-                    rho=rho_value,
+        theta_error = _theta_distance_deg(candidate.theta, line.theta)
+        rho_error = abs(float(candidate.rho) - float(line.rho))
+        reject_reason = "accepted"
+        if theta_error > delta_theta:
+            reject_reason = "theta"
+            if raw_line_count <= 20:
+                logger.warning(
+                    "OpenCV hough raw: index=%s p1=%s p2=%s theta=%s rho=%s "
+                    "theta_error=%s rho_error=%s reject=%s",
+                    raw_line_count - 1,
+                    np.asarray(candidate.point1, dtype=float).tolist(),
+                    np.asarray(candidate.point2, dtype=float).tolist(),
+                    getattr(candidate, "theta", None),
+                    getattr(candidate, "rho", None),
+                    theta_error,
+                    rho_error,
+                    reject_reason,
                 )
+            continue
+        theta_pass_count += 1
+        length = float(np.linalg.norm(candidate.point1 - candidate.point2))
+        if length < len_min:
+            reject_reason = "length"
+            if raw_line_count <= 20:
+                logger.warning(
+                    "OpenCV hough raw: index=%s p1=%s p2=%s theta=%s rho=%s "
+                    "theta_error=%s rho_error=%s reject=%s length=%s len_min=%s",
+                    raw_line_count - 1,
+                    np.asarray(candidate.point1, dtype=float).tolist(),
+                    np.asarray(candidate.point2, dtype=float).tolist(),
+                    getattr(candidate, "theta", None),
+                    getattr(candidate, "rho", None),
+                    theta_error,
+                    rho_error,
+                    reject_reason,
+                    length,
+                    len_min,
+                )
+            continue
+        if candidate.rho < recovery_rho_min or candidate.rho > recovery_rho_max:
+            reject_reason = "rho"
+            if raw_line_count <= 20:
+                logger.warning(
+                    "OpenCV hough raw: index=%s p1=%s p2=%s theta=%s rho=%s "
+                    "theta_error=%s rho_error=%s reject=%s",
+                    raw_line_count - 1,
+                    np.asarray(candidate.point1, dtype=float).tolist(),
+                    np.asarray(candidate.point2, dtype=float).tolist(),
+                    getattr(candidate, "theta", None),
+                    getattr(candidate, "rho", None),
+                    theta_error,
+                    rho_error,
+                    reject_reason,
+                )
+            continue
+        candidate = _extend_candidate_to_reference_span(candidate, line)
+        if rho_min <= candidate.rho <= rho_max:
+            rho_pass_count += 1
+            preferred_candidates.append((length, theta_error, rho_error, candidate))
+            search_band = "preferred"
+        else:
+            recovery_candidates.append((length, theta_error, rho_error, candidate))
+            search_band = "recovery"
+        if raw_line_count <= 20:
+            logger.warning(
+                "OpenCV hough raw: index=%s p1=%s p2=%s theta=%s rho=%s "
+                "theta_error=%s rho_error=%s reject=%s search_band=%s length=%s",
+                raw_line_count - 1,
+                np.asarray(candidate.point1, dtype=float).tolist(),
+                np.asarray(candidate.point2, dtype=float).tolist(),
+                getattr(candidate, "theta", None),
+                getattr(candidate, "rho", None),
+                theta_error,
+                rho_error,
+                reject_reason,
+                search_band,
+                length,
             )
+
+    recovery_used = not preferred_candidates and bool(recovery_candidates)
+    candidates = preferred_candidates if preferred_candidates else recovery_candidates
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    lines = [candidate for *_metrics, candidate in candidates]
+    if max_candidates > 0:
+        lines = lines[:max_candidates]
+    _save_debug_image(
+        debug_dir,
+        debug_label,
+        "05_accepted_lines",
+        debug_base_image if debug_base_image is not None else I,
+        lines=lines,
+        line_fill=(0, 255, 0),
+        title=(
+            f"accepted_line_count={len(lines)}; "
+            f"search_band={'recovery' if recovery_used else 'preferred'}"
+        ),
+    )
+    logger.warning(
+        "OpenCV hough diagnostics: edge_pixels=%s raw_line_count=%s "
+        "theta_pass_count=%s rho_pass_count=%s recovery_candidate_count=%s "
+        "recovery_used=%s final_line_count=%s",
+        edge_pixels,
+        raw_line_count,
+        theta_pass_count,
+        rho_pass_count,
+        len(recovery_candidates),
+        recovery_used,
+        len(lines),
+    )
+    for index, candidate in enumerate(lines[:10]):
+        logger.warning(
+            "OpenCV hough accepted: index=%s p1=%s p2=%s theta=%s rho=%s length=%s",
+            index,
+            np.asarray(candidate.point1, dtype=float).tolist(),
+            np.asarray(candidate.point2, dtype=float).tolist(),
+            getattr(candidate, "theta", None),
+            getattr(candidate, "rho", None),
+            float(np.linalg.norm(candidate.point1 - candidate.point2)),
+        )
     return lines
 
 
-def _projection_groups(points: np.ndarray, projection: np.ndarray, fill_gap: float):
-    start = 0
-    for idx in range(1, projection.size):
-        if projection[idx] - projection[idx - 1] > fill_gap:
-            yield points[start:idx]
-            start = idx
-    yield points[start:]
+def _import_cv2():
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError(
+            "opencv-python-headless is required for update_line Hough support."
+        ) from exc
+    return cv2
+
+
+def _opencv_hough_image(I) -> np.ndarray:
+    image = np.asarray(I)
+    if image.ndim == 3:
+        image = np.any(image != 0, axis=2)
+    else:
+        image = image != 0
+    return image.astype(np.uint8) * 255
+
+
+def _line_from_opencv_segment(segment, *, reference_theta: float | None = None):
+    x1, y1, x2, y2 = np.asarray(segment, dtype=float).reshape(4)
+    point1 = np.array([x1, y1], dtype=float)
+    point2 = np.array([x2, y2], dtype=float)
+    theta_rho = _theta_rho_from_points(point1, point2)
+    if theta_rho is None:
+        return None
+    theta, rho = theta_rho
+    if reference_theta is not None:
+        theta, rho = _orient_theta_rho_to_reference(theta, rho, reference_theta)
+    return SimpleNamespace(point1=point1, point2=point2, theta=theta, rho=rho)
+
+
+def _theta_rho_from_points(point1: np.ndarray, point2: np.ndarray):
+    direction = np.asarray(point2, dtype=float)[:2] - np.asarray(point1, dtype=float)[:2]
+    length = float(np.linalg.norm(direction))
+    if length <= 0:
+        return None
+    normal = np.array([direction[1], -direction[0]], dtype=float) / length
+    theta = float(np.degrees(np.arctan2(normal[1], normal[0])))
+    rho = float(np.dot(normal, np.asarray(point1, dtype=float)[:2]))
+    return _normalize_theta_rho(theta, rho)
+
+
+def _normalize_theta_rho(theta: float, rho: float) -> tuple[float, float]:
+    while theta >= 90.0:
+        theta -= 180.0
+        rho = -rho
+    while theta < -90.0:
+        theta += 180.0
+        rho = -rho
+    return theta, rho
+
+
+def _theta_distance_deg(theta: float, reference: float) -> float:
+    return abs((float(theta) - float(reference) + 90.0) % 180.0 - 90.0)
+
+
+def _orient_theta_rho_to_reference(
+    theta: float,
+    rho: float,
+    reference_theta: float,
+) -> tuple[float, float]:
+    """Choose the equivalent normal direction used by the tracked line."""
+
+    normal = np.array(
+        [np.cos(np.deg2rad(theta)), np.sin(np.deg2rad(theta))],
+        dtype=float,
+    )
+    reference_normal = np.array(
+        [np.cos(np.deg2rad(reference_theta)), np.sin(np.deg2rad(reference_theta))],
+        dtype=float,
+    )
+    if float(np.dot(normal, reference_normal)) < 0.0:
+        theta += 180.0
+        rho = -rho
+    return float(theta), float(rho)
+
+
+def _extend_candidate_to_reference_span(candidate: Any, reference_line: Any):
+    """Draw the detected infinite line across the initialized edge span.
+
+    ``HoughLinesP`` often returns only a short visible fragment near a corner.
+    The fragment determines theta/rho, while projecting the previous endpoints
+    onto that line keeps the final u/v overlay continuous and comparable from
+    frame to frame.
+    """
+
+    normal = np.array(
+        [
+            np.cos(np.deg2rad(float(candidate.theta))),
+            np.sin(np.deg2rad(float(candidate.theta))),
+        ],
+        dtype=float,
+    )
+
+    def project(point: Any) -> np.ndarray:
+        point_2d = np.asarray(point, dtype=float).reshape(-1)[:2]
+        correction = float(candidate.rho) - float(np.dot(normal, point_2d))
+        return point_2d + correction * normal
+
+    candidate.point1 = project(reference_line.point1)
+    candidate.point2 = project(reference_line.point2)
+    return candidate
+
+
+def _save_debug_image(
+    debug_dir: str | Path | None,
+    label: str | None,
+    stage: str,
+    image: Any,
+    *,
+    lines: list[Any] | None = None,
+    segments: np.ndarray | None = None,
+    line_fill: tuple[int, int, int] = (255, 0, 0),
+    title: str | None = None,
+) -> None:
+    if debug_dir is None:
+        return
+
+    try:
+        from PIL import ImageDraw
+    except ImportError:
+        logger.warning("update_line debug image skipped: Pillow is not available")
+        return
+
+    output_dir = Path(debug_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_label = _safe_debug_label(label or "frame")
+    output_path = output_dir / f"{safe_label}_{stage}.png"
+    canvas = _debug_rgb_image(image)
+    draw = ImageDraw.Draw(canvas)
+
+    if title:
+        draw.rectangle([0, 0, min(canvas.width, 900), 24], fill=(0, 0, 0))
+        draw.text((6, 5), title, fill=(255, 255, 255))
+
+    for segment in [] if segments is None else np.asarray(segments, dtype=float).reshape(-1, 4):
+        x1, y1, x2, y2 = segment
+        draw.line([(float(x1), float(y1)), (float(x2), float(y2))], fill=line_fill, width=2)
+
+    for candidate in lines or []:
+        try:
+            draw.line(
+                [_xy(candidate.point1), _xy(candidate.point2)],
+                fill=line_fill,
+                width=3,
+            )
+        except Exception:
+            logger.exception("update_line debug image skipped invalid line")
+
+    canvas.save(output_path)
+    logger.warning("update_line debug image saved: %s", output_path)
+
+
+def _debug_rgb_image(image: Any):
+    from PIL import Image
+
+    array = np.asarray(image)
+    if array.dtype == bool:
+        array = array.astype(np.uint8) * 255
+    elif np.issubdtype(array.dtype, np.floating):
+        scale = 255.0 if array.size and np.nanmax(array) <= 1.0 else 1.0
+        array = np.clip(array * scale, 0, 255).astype(np.uint8)
+    elif array.dtype != np.uint8:
+        array = np.clip(array, 0, 255).astype(np.uint8)
+
+    if array.ndim == 2:
+        return Image.fromarray(array).convert("RGB")
+    if array.ndim == 3 and array.shape[2] == 1:
+        return Image.fromarray(array[:, :, 0]).convert("RGB")
+    if array.ndim == 3 and array.shape[2] >= 3:
+        return Image.fromarray(array[:, :, :3]).convert("RGB")
+    raise ValueError(f"Unsupported debug image shape: {array.shape}")
+
+
+def _safe_debug_label(label: str) -> str:
+    return "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in label)
+
+
+def _xy(point: Any) -> tuple[float, float]:
+    array = np.asarray(point, dtype=float).reshape(-1)
+    if array.size < 2:
+        raise ValueError("Line points must contain at least x and y.")
+    return float(array[0]), float(array[1])
 
 
 def _image_file_path(image_file) -> Path:
@@ -274,10 +647,18 @@ def _image_file_path(image_file) -> Path:
     return Path(image_file.folder) / image_file.name
 
 
-def _param(params, key: str):
+_MISSING = object()
+
+
+def _param(params, key: str, default: Any = _MISSING):
     if isinstance(params, dict):
-        return params[key]
-    return getattr(params, key)
+        if key in params:
+            return params[key]
+    elif hasattr(params, key):
+        return getattr(params, key)
+    if default is _MISSING:
+        raise KeyError(key)
+    return default
 
 
 def _point3(point: Any) -> np.ndarray:
@@ -288,9 +669,7 @@ def _point3(point: Any) -> np.ndarray:
 
 
 __all__ = [
-    "hough",
-    "houghlines",
-    "houghpeaks",
+    "houghlines_opencv",
     "imread",
     "update_line",
 ]

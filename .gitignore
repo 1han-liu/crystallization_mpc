@@ -26,6 +26,7 @@ matlab_source_local/
 references_local/
 
 # Local Gsensor Hough/DSCGR comparison outputs
-/dscgr_runs/
-/dscgr_runs_new/
-/dscgr_runs_partial/
+/dscgr_runs*/
+
+# Local verification suite; release commits contain runtime code only
+/tests/

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260808-image-poller1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260809-online-measurement1">
   </head>
   <body>
     <div class="shell">
@@ -77,15 +77,7 @@
               </div>
             </div>
             <div class="experiment-source-actions">
-              <label class="source-choice">
-              <span>Image</span>
-              <select id="image-choice">
-                <option value="first">First</option>
-                <option value="latest">Latest</option>
-              </select>
-              </label>
               <button id="refresh-images" class="ghost">Refresh Images</button>
-              <button id="begin-initialization" class="primary" disabled>Begin Initialization</button>
             </div>
             <p id="image-source-status" class="save-status muted">Waiting for experiment selection</p>
           </div>
@@ -121,6 +113,23 @@
               </div>
             </div>
             <p id="scan-last-error" class="save-status muted" hidden></p>
+          </div>
+
+          <div class="baseline-monitor">
+            <div class="image-monitor-head">
+              <div>
+                <p class="eyebrow">Measurement Baseline</p>
+                <h3>Frame 0</h3>
+              </div>
+              <span id="baseline-status" class="status idle">not ready</span>
+            </div>
+            <div class="baseline-monitor-facts">
+              <div><span>Frame</span><strong id="baseline-frame-seq">—</strong></div>
+              <div class="wide"><span>Image</span><code id="baseline-image">—</code></div>
+              <div><span>u Distance</span><strong id="baseline-u-distance">—</strong></div>
+              <div><span>v Distance</span><strong id="baseline-v-distance">—</strong></div>
+              <div><span>Established At</span><code id="baseline-established-at">—</code></div>
+            </div>
           </div>
 
           <div class="init-layout">
@@ -191,6 +200,40 @@
           <p id="init-save-status" class="save-status muted">idle</p>
         </section>
 
+        <section class="panel online-measurement-panel" aria-labelledby="online-measurement-heading">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Online Growth Rate</p>
+              <h2 id="online-measurement-heading">Latest Processed Frame</h2>
+            </div>
+            <div class="actions">
+              <span id="measurement-validity" class="status idle">no sample</span>
+              <button id="refresh-overlay" class="ghost" type="button">Refresh Preview</button>
+            </div>
+          </div>
+          <div class="online-measurement-layout">
+            <div class="measurement-summary">
+              <div class="measurement-facts">
+                <div><span>Frame</span><strong id="measurement-frame">—</strong></div>
+                <div class="wide"><span>Image</span><code id="measurement-image">—</code></div>
+                <div><span>G_u</span><strong id="measurement-g-u">—</strong></div>
+                <div><span>G_u_KF</span><strong id="measurement-g-u-kf">—</strong></div>
+                <div><span>G_v</span><strong id="measurement-g-v">—</strong></div>
+                <div><span>G_v_KF</span><strong id="measurement-g-v-kf">—</strong></div>
+                <div><span>Valid Frames</span><strong id="measurement-valid-count">0</strong></div>
+                <div><span>Invalid Frames</span><strong id="measurement-invalid-count">0</strong></div>
+                <div><span>Controller Publishes</span><strong id="measurement-publish-count">0</strong></div>
+                <div><span>InfluxDB Writes</span><strong id="measurement-influx-count">0</strong></div>
+              </div>
+              <p id="measurement-error" class="save-status muted">Waiting for the first post-baseline image.</p>
+            </div>
+            <figure class="overlay-preview">
+              <img id="measurement-overlay" alt="Latest Gsensor Hough detection overlay" hidden>
+              <figcaption id="measurement-overlay-caption">Preview updates at most once every three seconds.</figcaption>
+            </figure>
+          </div>
+        </section>
+
         <section class="grid diagnostics-grid">
           <details class="panel diagnostic-panel">
             <summary class="diagnostic-summary">
@@ -218,6 +261,6 @@
       </label>
     </template>
 
-    <script src="/static/app.js?v=20260808-image-poller1"></script>
+    <script src="/static/app.js?v=20260809-online-measurement1"></script>
   </body>
 </html>

@@ -1,5 +1,8 @@
+x-mpc-image: &mpc-image crystallization-mpc-app:local
+
 services:
   central:
+    image: *mpc-image
     build:
       context: .
       dockerfile: services/mpc/Dockerfile
@@ -9,8 +12,11 @@ services:
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
+      - RABBIT_QUEUE=central.in
       - RABBIT_HEARTBEAT_SEC=0
-      - PARAMS_FILE=/app/params_default.yaml
+      - CONTROLLER_STATUS_URL=http://controller:8002/api/status
+      - PARAMS_DEFAULT_FILE=/app/params_default.yaml
+      - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
       - PARAM_META_FILE=/app/param_meta.yaml
       - EXPERIMENT_ROOT=/data/experiments
       - EXPERIMENT_HOST_ROOT_DISPLAY=${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
@@ -22,20 +28,56 @@ services:
           create_host_path: true
     depends_on:
       - rabbitmq
+      - controller
     restart: unless-stopped
 
   gsensor:
-    build:
-      context: .
-      dockerfile: services/mpc/Dockerfile
+    # Central builds the shared application image once; Gsensor runs the same
+    # image with a different command instead of triggering a duplicate build.
+    image: *mpc-image
     command: ["uvicorn", "crystallization_mpc.apps.gsensor.app:web_app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"
+    env_file:
+      - config/influxdb.env
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
       - EXPERIMENT_ROOT=/data/experiments
       - GSENSOR_IMAGE_POLL_INTERVAL_S=${GSENSOR_IMAGE_POLL_INTERVAL_S:-1.0}
+      - GSENSOR_HOUGH_DEBUG_ENABLED=${GSENSOR_HOUGH_DEBUG_ENABLED:-false}
+      - GSENSOR_STATUS_PUBLISH_ENABLED=true
+      - GSENSOR_SAMPLE_PUBLISH_ENABLED=true
+      - GSENSOR_INFLUX_ENABLED=true
+      - INFLUX_URL=http://influxdb:8086
+    volumes:
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
+    depends_on:
+      - rabbitmq
+      - influxdb
+    restart: unless-stopped
+
+  controller:
+    image: *mpc-image
+    command: ["uvicorn", "crystallization_mpc.apps.controller.app:web_app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    environment:
+      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
+      - RABBIT_EXCHANGE=idp.bus
+      - RABBIT_QUEUE=controller.in
+      - EXPERIMENT_ROOT=/data/experiments
+      - CONTROLLER_ADAPTER=${CONTROLLER_ADAPTER:-}
+      - CONTROLLER_OPCUA_ENABLED=${CONTROLLER_OPCUA_ENABLED:-false}
+      - CONTROLLER_OPCUA_ENDPOINT=${CONTROLLER_OPCUA_ENDPOINT:-}
+      - CONTROLLER_INFLUX_ENABLED=${CONTROLLER_INFLUX_ENABLED:-false}
+      - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
+      - CONTROLLER_INFLUX_ORG=${CONTROLLER_INFLUX_ORG:-lab}
+      - CONTROLLER_INFLUX_BUCKET=${CONTROLLER_INFLUX_BUCKET:-process}
     volumes:
       - type: bind
         source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
@@ -45,6 +87,12 @@ services:
     depends_on:
       - rabbitmq
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/api/status', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   rabbitmq:
     image: rabbitmq:3-management

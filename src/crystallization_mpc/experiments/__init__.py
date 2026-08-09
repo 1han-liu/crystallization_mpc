@@ -1,8 +1,11 @@
 """Experiment-session models and filesystem persistence."""
 
 from crystallization_mpc.experiments.models import (
+    EXPERIMENT_STATUS_TRANSITIONS,
+    TERMINAL_EXPERIMENT_STATUSES,
     ExperimentManifest,
     ExperimentStatus,
+    require_experiment_transition,
 )
 from crystallization_mpc.experiments.registry import (
     ExperimentNotFoundError,
@@ -14,6 +17,8 @@ from crystallization_mpc.experiments.registry import (
 )
 
 __all__ = [
+    "EXPERIMENT_STATUS_TRANSITIONS",
+    "TERMINAL_EXPERIMENT_STATUSES",
     "ExperimentManifest",
     "ExperimentNotFoundError",
     "ExperimentRegistry",
@@ -22,4 +27,5 @@ __all__ = [
     "ExperimentStatus",
     "InvalidExperimentIdentifierError",
     "InvalidExperimentStateError",
+    "require_experiment_transition",
 ]

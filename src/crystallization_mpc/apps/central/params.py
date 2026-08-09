@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 ROLE = "central"
 TARGET_SWITCH_KEYS = (
@@ -16,6 +18,28 @@ TARGET_SWITCH_KEYS = (
     ("steps", "steps_sigma", "steps_G"),
     ("seed_time", "seed_time_sigma", "seed_time_G"),
 )
+
+POSITIVE_PARAM_KEYS = {
+    "dt",
+    "dt_G",
+    "resolution",
+    "params_G.width",
+    "params_G.ratio",
+    "params_G.delta_theta",
+    "params_G.width_divider",
+    "params_G.num_peak",
+    "params_G.len_min",
+    "params_G.hough_threshold",
+    "params_G.hough_min_line_length",
+}
+NONNEGATIVE_PARAM_KEYS = {
+    "q2",
+    "params_G.hough_max_line_gap",
+}
+
+
+class ParameterValidationError(ValueError):
+    """Raised when a Central parameter draft cannot be saved or applied."""
 
 
 def _require_yaml():
@@ -88,6 +112,8 @@ def save_params_document(
     gsensor: Dict[str, object],
     controller: Dict[str, object],
 ) -> None:
+    if isinstance(version, bool) or int(version) < 1:
+        raise ParameterValidationError("Parameter version must be a positive integer.")
     yaml = _require_yaml()
     data = {
         "version": version,
@@ -97,8 +123,16 @@ def save_params_document(
             "controller": _dict_to_list(controller),
         },
     }
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=False)
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False, allow_unicode=False)
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def load_params(path: str) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
@@ -109,6 +143,127 @@ def load_params(path: str) -> Tuple[Dict[str, object], Dict[str, object], Dict[s
     gsensor = _list_to_dict(params.get("gsensor"))
     controller = _list_to_dict(params.get("controller"))
     return shared, gsensor, controller, version
+
+
+def validate_params_section(
+    section_name: str,
+    submitted: Dict[str, object],
+    defaults: Dict[str, object],
+    meta: Dict[str, Dict[str, Any]],
+) -> Dict[str, object]:
+    """Validate one complete UI section and return normalized JSON-safe values."""
+
+    unknown = sorted(set(submitted) - set(defaults))
+    if unknown:
+        raise ParameterValidationError(
+            f"Unknown {section_name} parameter(s): {', '.join(unknown)}."
+        )
+
+    required = {
+        key
+        for key in defaults
+        if not bool(meta.get(key, {}).get("derived", False))
+        and (meta.get(key, {}).get("ui", {}) or {}).get("visible", True) is not False
+    }
+    missing = sorted(required - set(submitted))
+    if missing:
+        raise ParameterValidationError(
+            f"Missing {section_name} parameter(s): {', '.join(missing)}."
+        )
+
+    normalized = dict(defaults)
+    for key, value in submitted.items():
+        normalized[key] = _normalize_parameter_value(
+            key,
+            value,
+            defaults[key],
+            meta.get(key, {}),
+        )
+    return normalized
+
+
+def _normalize_parameter_value(
+    key: str,
+    value: object,
+    expected: object,
+    meta: Dict[str, Any],
+) -> object:
+    if expected is None:
+        if value is None or isinstance(value, (str, int, float, bool, list, dict)):
+            return value
+        raise ParameterValidationError(f"Parameter {key} contains an unsupported value.")
+
+    if isinstance(expected, bool):
+        if not isinstance(value, bool):
+            raise ParameterValidationError(f"Parameter {key} must be a boolean.")
+        return value
+
+    if isinstance(expected, int) and not isinstance(expected, bool):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ParameterValidationError(f"Parameter {key} must be an integer.")
+        number = float(value)
+        if not math.isfinite(number) or not number.is_integer():
+            raise ParameterValidationError(f"Parameter {key} must be a finite integer.")
+        normalized: object = int(number)
+        _validate_numeric_range(key, float(normalized), meta)
+        return normalized
+
+    if isinstance(expected, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ParameterValidationError(f"Parameter {key} must be a number.")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ParameterValidationError(f"Parameter {key} must be finite.")
+        _validate_numeric_range(key, number, meta)
+        return number
+
+    if isinstance(expected, str):
+        if not isinstance(value, str):
+            raise ParameterValidationError(f"Parameter {key} must be text.")
+        return value
+
+    if isinstance(expected, list):
+        if not isinstance(value, list):
+            raise ParameterValidationError(f"Parameter {key} must be a list.")
+        if len(value) != len(expected):
+            raise ParameterValidationError(
+                f"Parameter {key} must contain {len(expected)} item(s)."
+            )
+        return [
+            _normalize_parameter_value(f"{key}[{index}]", item, expected[index], {})
+            for index, item in enumerate(value)
+        ]
+
+    if isinstance(expected, dict):
+        if not isinstance(value, dict):
+            raise ParameterValidationError(f"Parameter {key} must be an object.")
+        return value
+
+    if not isinstance(value, type(expected)):
+        raise ParameterValidationError(
+            f"Parameter {key} must have type {type(expected).__name__}."
+        )
+    return value
+
+
+def _validate_numeric_range(key: str, value: float, meta: Dict[str, Any]) -> None:
+    base_key = key.split("[", 1)[0]
+    if base_key in POSITIVE_PARAM_KEYS and value <= 0:
+        raise ParameterValidationError(f"Parameter {base_key} must be greater than zero.")
+    if base_key in NONNEGATIVE_PARAM_KEYS and value < 0:
+        raise ParameterValidationError(f"Parameter {base_key} cannot be negative.")
+    if base_key == "r_diag" and value <= 0:
+        raise ParameterValidationError("Parameter r_diag values must be greater than zero.")
+
+    minimum = meta.get("min")
+    maximum = meta.get("max")
+    if minimum is not None and value < float(minimum):
+        raise ParameterValidationError(f"Parameter {base_key} must be at least {minimum}.")
+    if maximum is not None and value > float(maximum):
+        raise ParameterValidationError(f"Parameter {base_key} must be at most {maximum}.")
+
+    if base_key == "params_G.delta_theta" and value > 180:
+        raise ParameterValidationError("Parameter params_G.delta_theta cannot exceed 180.")
 
 
 def _as_float(value: object) -> Optional[float]:

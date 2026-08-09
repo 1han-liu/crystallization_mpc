@@ -9,9 +9,65 @@ from typing import Any, Mapping
 
 class ExperimentStatus(str, Enum):
     CREATED = "created"
-    RUNNING = "running"
+    STARTING = "starting"
+    WAITING_FOR_INITIAL_IMAGE = "waiting_for_initial_image"
+    INITIALIZING = "initializing"
+    MEASURING = "measuring"
+    STOPPING = "stopping"
     COMPLETED = "completed"
-    FAILED = "failed"
+    ERROR = "error"
+
+
+TERMINAL_EXPERIMENT_STATUSES = {
+    ExperimentStatus.COMPLETED,
+    ExperimentStatus.ERROR,
+}
+
+EXPERIMENT_STATUS_TRANSITIONS = {
+    ExperimentStatus.CREATED: {
+        ExperimentStatus.STARTING,
+        ExperimentStatus.COMPLETED,
+        ExperimentStatus.ERROR,
+    },
+    ExperimentStatus.STARTING: {
+        ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
+        ExperimentStatus.STOPPING,
+        ExperimentStatus.ERROR,
+    },
+    ExperimentStatus.WAITING_FOR_INITIAL_IMAGE: {
+        ExperimentStatus.INITIALIZING,
+        ExperimentStatus.STOPPING,
+        ExperimentStatus.ERROR,
+    },
+    ExperimentStatus.INITIALIZING: {
+        ExperimentStatus.MEASURING,
+        ExperimentStatus.STOPPING,
+        ExperimentStatus.ERROR,
+    },
+    ExperimentStatus.MEASURING: {
+        ExperimentStatus.STOPPING,
+        ExperimentStatus.ERROR,
+    },
+    ExperimentStatus.STOPPING: {
+        ExperimentStatus.COMPLETED,
+        ExperimentStatus.ERROR,
+    },
+    ExperimentStatus.COMPLETED: set(),
+    ExperimentStatus.ERROR: set(),
+}
+
+
+def require_experiment_transition(
+    current: ExperimentStatus,
+    target: ExperimentStatus,
+) -> None:
+    if target == current:
+        return
+    allowed = EXPERIMENT_STATUS_TRANSITIONS[current]
+    if target not in allowed:
+        raise ValueError(
+            f"Cannot transition experiment from {current.value} to {target.value}."
+        )
 
 
 @dataclass(frozen=True)
@@ -64,11 +120,19 @@ class ExperimentManifest:
         if image_directory != "images":
             raise ValueError("Experiment image_directory must be 'images'.")
 
+        status_value = str(data.get("status", ExperimentStatus.CREATED.value))
+        # Phase 1 used "running" for every active experiment. Preserve existing
+        # manifests by mapping that persisted value to the closest Phase 2 state.
+        if status_value == "running":
+            status_value = ExperimentStatus.MEASURING.value
+        elif status_value == "failed":
+            status_value = ExperimentStatus.ERROR.value
+
         return cls(
             schema_version=schema_version,
             run_id=run_id,
             label=_optional_string(data.get("label")),
-            status=ExperimentStatus(str(data.get("status", ExperimentStatus.CREATED.value))),
+            status=ExperimentStatus(status_value),
             created_at=created_at,
             started_at=_optional_string(data.get("started_at")),
             ended_at=_optional_string(data.get("ended_at")),
@@ -95,4 +159,10 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
-__all__ = ["ExperimentManifest", "ExperimentStatus"]
+__all__ = [
+    "EXPERIMENT_STATUS_TRANSITIONS",
+    "TERMINAL_EXPERIMENT_STATUSES",
+    "ExperimentManifest",
+    "ExperimentStatus",
+    "require_experiment_transition",
+]

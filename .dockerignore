@@ -12,6 +12,11 @@ config/influxdb.env
 **/.pytest-tmp*/
 **/pytest-cache-files-*/
 tests/.tmp_*/
+tests/
+docs/
+scripts/
+.agents/
+.vscode/
 __pycache__/
 **/__pycache__/
 *.py[cod]

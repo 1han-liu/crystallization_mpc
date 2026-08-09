@@ -11,13 +11,11 @@ const applyParamsButton = document.querySelector("#apply-params");
 const resetParamsButton = document.querySelector("#reset-params");
 const paramSaveStatus = document.querySelector("#param-save-status");
 
-const imageChoice = document.querySelector("#image-choice");
 const currentRunId = document.querySelector("#current-run-id");
 const currentImageDirectory = document.querySelector("#current-image-directory");
 const currentImageCount = document.querySelector("#current-image-count");
 const imageSourceStatus = document.querySelector("#image-source-status");
 const refreshImagesButton = document.querySelector("#refresh-images");
-const beginInitializationButton = document.querySelector("#begin-initialization");
 const imageScanStatus = document.querySelector("#image-scan-status");
 const scanProcessedCount = document.querySelector("#scan-processed-count");
 const scanPendingCount = document.querySelector("#scan-pending-count");
@@ -25,6 +23,12 @@ const scanLastImage = document.querySelector("#scan-last-image");
 const scanFileModifiedAt = document.querySelector("#scan-file-modified-at");
 const scanDetectedAt = document.querySelector("#scan-detected-at");
 const scanLastError = document.querySelector("#scan-last-error");
+const baselineStatus = document.querySelector("#baseline-status");
+const baselineFrameSeq = document.querySelector("#baseline-frame-seq");
+const baselineImage = document.querySelector("#baseline-image");
+const baselineUDistance = document.querySelector("#baseline-u-distance");
+const baselineVDistance = document.querySelector("#baseline-v-distance");
+const baselineEstablishedAt = document.querySelector("#baseline-established-at");
 const undoInitButton = document.querySelector("#undo-init");
 const resetInitButton = document.querySelector("#reset-init");
 const initCanvas = document.querySelector("#init-canvas");
@@ -48,6 +52,21 @@ const runDscgrButton = document.querySelector("#run-dscgr");
 const dscgrStatus = document.querySelector("#dscgr-status");
 const pointList = document.querySelector("#point-list");
 const initSaveStatus = document.querySelector("#init-save-status");
+const measurementValidity = document.querySelector("#measurement-validity");
+const measurementFrame = document.querySelector("#measurement-frame");
+const measurementImage = document.querySelector("#measurement-image");
+const measurementGU = document.querySelector("#measurement-g-u");
+const measurementGUKf = document.querySelector("#measurement-g-u-kf");
+const measurementGV = document.querySelector("#measurement-g-v");
+const measurementGVKf = document.querySelector("#measurement-g-v-kf");
+const measurementValidCount = document.querySelector("#measurement-valid-count");
+const measurementInvalidCount = document.querySelector("#measurement-invalid-count");
+const measurementPublishCount = document.querySelector("#measurement-publish-count");
+const measurementInfluxCount = document.querySelector("#measurement-influx-count");
+const measurementError = document.querySelector("#measurement-error");
+const measurementOverlay = document.querySelector("#measurement-overlay");
+const measurementOverlayCaption = document.querySelector("#measurement-overlay-caption");
+const refreshOverlayButton = document.querySelector("#refresh-overlay");
 
 const initContext = initCanvas.getContext("2d");
 const threeDContext = threeDCanvas.getContext("2d");
@@ -62,6 +81,7 @@ const state = {
   initialization: null,
   experimentSource: null,
   measurementActive: false,
+  experimentLifecycleStatus: "not_started",
   sourceActionInFlight: false,
   liveStatusInFlight: false,
   currentImageKey: null,
@@ -82,6 +102,8 @@ const state = {
   },
   cornerRequestInFlight: false,
   dscgrInFlight: false,
+  latestOverlayFrame: null,
+  lastOverlayRefreshAt: 0,
 };
 
 function setDrawerOpen(open) {
@@ -209,8 +231,17 @@ function collectForm() {
 
 function renderStatus(payload) {
   state.measurementActive = Boolean(payload.active);
-  statusText.textContent = payload.active ? "running" : "idle";
-  statusText.className = payload.active ? "status running" : "status idle";
+  state.experimentLifecycleStatus = payload.experiment_lifecycle_status || "not_started";
+  statusText.textContent = state.experimentLifecycleStatus;
+  const lifecycleRunning = [
+    "waiting_for_initial_image",
+    "initializing",
+    "baseline_ready",
+    "measuring",
+  ].includes(state.experimentLifecycleStatus);
+  statusText.className = state.experimentLifecycleStatus === "error"
+    ? "status error"
+    : (lifecycleRunning ? "status running" : "status idle");
   initializedText.textContent = payload.initialized ? "initialized" : payload.initialization_status || "not initialized";
   initializedText.className = payload.initialized ? "status running" : "status idle";
   paramsBlock.textContent = JSON.stringify(payload.params || {}, null, 2);
@@ -228,8 +259,80 @@ function renderStatus(payload) {
     image_scan: payload.image_scan || null,
   }, null, 2);
   renderImageScan(payload.image_scan || {});
+  renderBaseline(payload.baseline || null);
+  renderOnlineMeasurement(payload);
   renderExperimentSource(state.experimentSource);
   renderInitialization(payload.initialization || null);
+}
+
+function formatGrowthRate(value, unit = "m/s") {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toExponential(6)} ${unit}` : "—";
+}
+
+function refreshMeasurementOverlay(frameSeq, { force = false, final = false } = {}) {
+  if (!frameSeq) {
+    return;
+  }
+  const now = Date.now();
+  if (!force && (frameSeq === state.latestOverlayFrame || now - state.lastOverlayRefreshAt < 3000)) {
+    return;
+  }
+  const kind = final ? "final" : "latest";
+  measurementOverlay.src = `/api/measurement/overlay/${kind}?frame_seq=${encodeURIComponent(frameSeq)}&_=${now}`;
+  measurementOverlay.hidden = false;
+  measurementOverlayCaption.textContent = final
+    ? `Final overlay · frame ${frameSeq}`
+    : `Latest overlay · frame ${frameSeq}`;
+  state.latestOverlayFrame = frameSeq;
+  state.lastOverlayRefreshAt = now;
+}
+
+function renderOnlineMeasurement(payload) {
+  const processing = payload.growth_rate_processing || {};
+  const result = processing.latest_result || null;
+  const publishing = payload.sample_publishing || {};
+  const influx = payload.influx_persistence || {};
+  const valid = Boolean(result?.valid);
+  const hasResult = Boolean(result);
+
+  measurementValidity.textContent = hasResult ? (valid ? "valid" : "invalid") : "no sample";
+  measurementValidity.className = hasResult
+    ? (valid ? "status running" : "status error")
+    : "status idle";
+  measurementFrame.textContent = hasResult ? String(result.frame_seq) : "—";
+  measurementImage.textContent = result?.image_name || "—";
+  measurementGU.textContent = formatGrowthRate(result?.u?.G, result?.unit);
+  measurementGUKf.textContent = formatGrowthRate(result?.u?.G_KF, result?.unit);
+  measurementGV.textContent = formatGrowthRate(result?.v?.G, result?.unit);
+  measurementGVKf.textContent = formatGrowthRate(result?.v?.G_KF, result?.unit);
+  measurementValidCount.textContent = String(processing.valid_frame_count || 0);
+  measurementInvalidCount.textContent = String(processing.invalid_frame_count || 0);
+  measurementPublishCount.textContent = String(publishing.success_count || 0);
+  measurementInfluxCount.textContent = String(influx.success_count || 0);
+
+  const errors = [result?.error, publishing.last_error, influx.last_error].filter(Boolean);
+  measurementError.textContent = errors.length
+    ? errors.join(" · ")
+    : (hasResult ? `Processed at ${result.processed_at}` : "Waiting for the first post-baseline image.");
+  measurementError.classList.toggle("error", errors.length > 0);
+
+  const final = ["stopped", "completed"].includes(payload.experiment_lifecycle_status)
+    && Boolean(processing.final_overlay_path);
+  if (hasResult) {
+    refreshMeasurementOverlay(result.frame_seq, { final });
+  }
+}
+
+function renderBaseline(baseline) {
+  const ready = Boolean(baseline && baseline.frame_seq === 0);
+  baselineStatus.textContent = ready ? "ready" : "not ready";
+  baselineStatus.className = ready ? "status running" : "status idle";
+  baselineFrameSeq.textContent = ready ? String(baseline.frame_seq) : "—";
+  baselineImage.textContent = ready ? baseline.image_name : "—";
+  baselineUDistance.textContent = ready ? `${baseline.u?.distance_px ?? 0} px` : "—";
+  baselineVDistance.textContent = ready ? `${baseline.v?.distance_px ?? 0} px` : "—";
+  baselineEstablishedAt.textContent = ready ? baseline.established_at : "—";
 }
 
 function renderImageScan(scan) {
@@ -256,20 +359,19 @@ function renderExperimentSource(payload) {
   currentImageCount.textContent = String(imageCount);
 
   refreshImagesButton.disabled = state.sourceActionInFlight;
-  beginInitializationButton.disabled = (
-    state.sourceActionInFlight
-    || state.measurementActive
-    || !selected
-    || imageCount === 0
-  );
-  imageChoice.disabled = state.sourceActionInFlight || !selected || imageCount === 0;
 
   if (!selected) {
     imageSourceStatus.textContent = "Create or select an experiment in Central first.";
+  } else if (state.experimentLifecycleStatus === "waiting_for_initial_image") {
+    imageSourceStatus.textContent = "Waiting for the first readable camera image. Initialization will open automatically.";
+  } else if (state.experimentLifecycleStatus === "initializing") {
+    imageSourceStatus.textContent = "The first image is selected as frame 0. Complete the marking steps below.";
+  } else if (["baseline_ready", "measuring"].includes(state.experimentLifecycleStatus)) {
+    imageSourceStatus.textContent = "Frame 0 is ready. The directory is being scanned for later images.";
   } else if (imageCount === 0) {
-    imageSourceStatus.textContent = "No supported images found. Refresh after the camera writes an image.";
+    imageSourceStatus.textContent = "Start the experiment in Central; Gsensor will wait for the first camera image.";
   } else {
-    imageSourceStatus.textContent = `${imageCount} images · first: ${payload.first_image} · latest: ${payload.latest_image}`;
+    imageSourceStatus.textContent = `${imageCount} images available. Start the experiment in Central to choose the baseline automatically.`;
   }
 }
 
@@ -344,20 +446,21 @@ function renderInitialization(payload) {
   const hasSession = Boolean(payload?.session_id);
   const step = payload?.current_step || null;
   const selected3DChoice = payload?.selected_3d_choice;
+  const initializationEditable = state.experimentLifecycleStatus === "initializing";
   initStepTitle.textContent = hasSession ? payload.status : "Not started";
   initStepPrompt.textContent = step?.prompt || (selected3DChoice
     ? `Selected 3D choice ${selected3DChoice}.`
-    : (hasSession ? "Waiting for the next initialization step." : "Select an experiment and begin initialization."));
+    : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when the first image arrives."));
   initSaveStatus.textContent = hasSession
     ? `${payload.selected_image || ""}`
     : "idle";
 
-  undoInitButton.disabled = !payload?.can_undo;
-  resetInitButton.disabled = !hasSession;
+  undoInitButton.disabled = !initializationEditable || !payload?.can_undo;
+  resetInitButton.disabled = !initializationEditable || !hasSession;
   runDscgrButton.disabled = payload?.status !== "ready_for_3d" || state.dscgrInFlight;
 
   fullModeControls.querySelectorAll("button").forEach((button) => {
-    button.disabled = !hasSession || step?.key !== "is_full";
+    button.disabled = !initializationEditable || !hasSession || step?.key !== "is_full";
     const selected = String(payload?.is_full) === button.dataset.fullMode;
     button.classList.toggle("selected", selected);
   });
@@ -382,7 +485,8 @@ function renderCandidateControls(payload) {
     button.className = "ghost";
     button.dataset.choice = String(candidate.choice);
     button.textContent = candidate.label || `Choice ${candidate.choice}`;
-    button.disabled = !["ready_for_3d_choice", "ready_for_3d"].includes(payload?.status);
+    button.disabled = state.experimentLifecycleStatus !== "initializing"
+      || !["ready_for_3d_choice", "ready_for_3d"].includes(payload?.status);
     button.classList.toggle("selected", payload?.selected_3d_choice === candidate.choice);
     candidateControls.appendChild(button);
   });
@@ -415,7 +519,9 @@ function activeCornerReference(payload) {
 }
 
 function renderCornerControls(payload) {
-  const enabled = canCompareCorner(payload) && !state.cornerRequestInFlight;
+  const enabled = state.experimentLifecycleStatus === "initializing"
+    && canCompareCorner(payload)
+    && !state.cornerRequestInFlight;
   const activeCorner = activeCornerReference(payload);
   cornerControls.querySelectorAll("button").forEach((button) => {
     button.disabled = !enabled;
@@ -1114,25 +1220,6 @@ refreshImagesButton.addEventListener("click", async () => {
   }
 });
 
-beginInitializationButton.addEventListener("click", async () => {
-  state.sourceActionInFlight = true;
-  renderExperimentSource(state.experimentSource);
-  initSaveStatus.textContent = `starting from ${imageChoice.value} image`;
-  try {
-    const payload = await fetchJson("/api/initialization/start", {
-      method: "POST",
-      body: JSON.stringify({ image_choice: imageChoice.value }),
-    });
-    renderInitialization(payload);
-    await refreshOverview();
-  } catch (error) {
-    initSaveStatus.textContent = error.message;
-  } finally {
-    state.sourceActionInFlight = false;
-    renderExperimentSource(state.experimentSource);
-  }
-});
-
 fullModeControls.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-full-mode]");
   if (!button || !state.initialization?.session_id) {
@@ -1231,6 +1318,21 @@ threeDCanvas.addEventListener("pointercancel", () => {
 reset3DViewButton.addEventListener("click", reset3DView);
 
 clear3DSnapshotsButton.addEventListener("click", clear3DSnapshots);
+
+refreshOverlayButton.addEventListener("click", () => {
+  const frameSeq = Number(measurementFrame.textContent);
+  if (Number.isFinite(frameSeq) && frameSeq > 0) {
+    refreshMeasurementOverlay(frameSeq, {
+      force: true,
+      final: ["stopped", "completed"].includes(state.experimentLifecycleStatus),
+    });
+  }
+});
+
+measurementOverlay.addEventListener("error", () => {
+  measurementOverlay.hidden = true;
+  measurementOverlayCaption.textContent = "Overlay is not available yet.";
+});
 
 undoInitButton.addEventListener("click", async () => {
   if (!state.initialization?.session_id) {

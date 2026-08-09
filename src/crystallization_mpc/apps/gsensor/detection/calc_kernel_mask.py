@@ -6,7 +6,7 @@ import numpy as np
 def calc_kernel_mask(I, kernel):
     I = np.asarray(I)
     size_I = I.shape
-    x, y = np.meshgrid(np.arange(1, size_I[1] + 1), np.arange(1, size_I[0] + 1))
+    x, y = np.meshgrid(np.arange(size_I[1]), np.arange(size_I[0]))
     kernel_mask = np.ones(I.shape, dtype=bool)
     num_corners = len(kernel.k_c_cell)
     for ii in range(num_corners):

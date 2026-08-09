@@ -19,6 +19,8 @@ docker compose up --build
 
 Services exposed by `docker-compose.yml`:
 - Central UI: `http://localhost:8000`
+- Gsensor UI: `http://localhost:8001`
+- Controller status API: `http://localhost:8002/api/status`
 - RabbitMQ: `localhost:5673`
 - RabbitMQ management UI: `http://localhost:15673`
 - InfluxDB: `http://localhost:8087`
@@ -59,4 +61,9 @@ python -m pip install -e .
 ## Notes
 - Keep generated Python bytecode files out of commits and release packages.
 - `.dockerignore` excludes local environments and caches from Docker build context.
-- The current Docker setup starts the central UI plus infrastructure services. Controller and gsensor do not currently have standalone runtime entrypoints in this repository.
+- Central, Gsensor, and Controller run as separate services from one shared application image.
+- The Controller currently uses a safe no-op adapter: it validates parameters, experiment lifecycle commands, and growth-rate samples without producing control output or connecting to OPC UA. Set `CONTROLLER_ADAPTER=module:Class` only after a translated adapter is available.
+- Central, Gsensor, and Controller share the configured `EXPERIMENT_HOST_ROOT` bind mount. Gsensor writes `gsensor_processing_state.json` inside the active experiment, while Controller writes `.controller_runtime_state.json` at the shared root so container restarts preserve the active run.
+- Image revisions are identified by filename, nanosecond modification time, and file size. A camera may therefore overwrite a fixed filename and still produce a new measurement frame.
+- `GSENSOR_HOUGH_DEBUG_ENABLED` defaults to `false`; normal experiments keep only the latest/final detection overlays and restart state. Enable it only for local Hough diagnosis.
+- A translated Controller adapter should implement `export_state()` and `restore_state()` before restart recovery is accepted for real control. An adapter without recovery support fails closed instead of resuming with lost internal state.

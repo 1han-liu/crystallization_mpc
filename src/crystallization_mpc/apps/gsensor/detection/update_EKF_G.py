@@ -13,19 +13,21 @@ def update_EKF_G(uv_struct, dt_G, resolution, ii: int):
     measurement_G = np.zeros((3,), dtype=float)
     dist_array = getattr(uv_struct, "dist_array")
     index = _matlab_index(ii)
+    baseline_dist = float(getattr(uv_struct, "baseline_dist", 0.0))
 
-    measurement_G[0] = _array_value(dist_array, index) * resolution
-    try:
-        measurement_G[1] = (
-            _array_value(dist_array, index) - _array_value(dist_array, index - 1)
-        ) / dt_G * resolution
+    current_dist = _array_value(dist_array, index)
+    previous_dist = baseline_dist if index == 0 else _array_value(dist_array, index - 1)
+    measurement_G[0] = current_dist * resolution
+    measurement_G[1] = (current_dist - previous_dist) / dt_G * resolution
+    if index >= 1:
+        two_frames_back = (
+            baseline_dist if index == 1 else _array_value(dist_array, index - 2)
+        )
         measurement_G[2] = (
-            _array_value(dist_array, index)
-            + _array_value(dist_array, index - 2)
-            - 2 * _array_value(dist_array, index - 1)
+            current_dist
+            + two_frames_back
+            - 2 * previous_dist
         ) / (dt_G**2) * resolution
-    except Exception:
-        pass
 
     _set_matlab_indexed_value(uv_struct, "distance_array", ii, measurement_G[0])
     _set_matlab_indexed_value(uv_struct, "G_array", ii, measurement_G[1])

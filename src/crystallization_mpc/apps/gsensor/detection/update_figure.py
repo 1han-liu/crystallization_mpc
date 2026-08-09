@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,15 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
-def update_figure(u_struct, v_struct, I, file, output_dir: str | Path | None = None):
+def update_figure(
+    u_struct,
+    v_struct,
+    I,
+    file,
+    output_dir: str | Path | None = None,
+    *,
+    output_path: str | Path | None = None,
+):
     image = _to_rgb_image(I)
     draw = ImageDraw.Draw(image)
 
@@ -29,11 +38,32 @@ def update_figure(u_struct, v_struct, I, file, output_dir: str | Path | None = N
         width=2,
     )
 
-    image_dir = Path("..") / "gsensor_data" / "images" if output_dir is None else Path(output_dir)
-    image_dir.mkdir(parents=True, exist_ok=True)
-    image_path = image_dir / _output_name(file)
-    image.save(image_path)
+    if output_path is not None and output_dir is not None:
+        raise ValueError("Use output_dir or output_path, not both.")
+    if output_path is None:
+        image_dir = (
+            Path("..") / "gsensor_data" / "images"
+            if output_dir is None
+            else Path(output_dir)
+        )
+        image_path = image_dir / _output_name(file)
+    else:
+        image_path = Path(output_path)
+    _save_image_atomic(image, image_path)
     return image_path
+
+
+def _save_image_atomic(image: Image.Image, image_path: Path) -> None:
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = image_path.with_name(
+        f".{image_path.stem}.{os.getpid()}.tmp{image_path.suffix}"
+    )
+    try:
+        image.save(temporary)
+        os.replace(temporary, image_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _to_rgb_image(I: Any) -> Image.Image:

@@ -15,7 +15,7 @@ def calc_masked_image(I, t, e, n, width, ratio):
     rp = e + (e - t) * ratio
     lp = t - (e - t) * ratio
     size_I = I.shape
-    x, y = np.meshgrid(np.arange(1, size_I[1] + 1), np.arange(1, size_I[0] + 1))
+    x, y = np.meshgrid(np.arange(size_I[1]), np.arange(size_I[0]))
     mask1 = ((up[0] - x) * n[0] + (up[1] - y) * n[1]) * (
         (dp[0] - x) * n[0] + (dp[1] - y) * n[1]
     ) < 0

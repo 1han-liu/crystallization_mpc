@@ -32,6 +32,12 @@ params:
     default: 10
   - key: params_G.len_min
     default: 50
+  - key: params_G.hough_threshold
+    default: 10
+  - key: params_G.hough_min_line_length
+    default: 7
+  - key: params_G.hough_max_line_gap
+    default: 5
   controller:
   - key: sigma_set
     default: 0.035

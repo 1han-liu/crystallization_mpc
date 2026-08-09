@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import mimetypes
 import struct
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,10 +57,26 @@ class GsensorInitializationManager:
             raise ValueError("image_choice must be first or latest.")
 
         selected_image = images[-1] if image_choice == "latest" else images[0]
+        return self.start_image(selected_image, available_images=images)
+
+    def start_image(
+        self,
+        image_path: str | Path,
+        *,
+        available_images: list[Path] | None = None,
+    ) -> dict[str, Any]:
+        """Start a session from the exact readable image chosen by the watcher."""
+
+        selected_image = Path(image_path).expanduser().resolve(strict=False)
+        if not selected_image.is_file():
+            raise FileNotFoundError(f"Initialization image not found: {selected_image}")
+        if selected_image.suffix.lower() not in IMAGE_EXTENSIONS:
+            raise ValueError(f"Unsupported initialization image: {selected_image.name}")
+        images = available_images or list_supported_images(selected_image.parent)
         image_width, image_height = read_image_size(selected_image)
         session = InitializationSession(
             session_id=uuid4().hex,
-            image_folder=str(folder_path),
+            image_folder=str(selected_image.parent),
             images=[str(path) for path in images],
             selected_image=str(selected_image),
             image_width=image_width,
@@ -105,6 +122,61 @@ class GsensorInitializationManager:
             "recovered_3d": session.recovered_3d,
             "can_undo": bool(session.point_history or session.corner is not None),
         }
+
+    def restore(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Restore an auditable Web-initialization snapshot after a restart."""
+
+        if not isinstance(payload, dict):
+            raise ValueError("Initialization recovery payload must be an object.")
+        session_id = str(payload.get("session_id") or "").strip()
+        selected_image = str(payload.get("selected_image") or "").strip()
+        image_folder = str(payload.get("image_folder") or "").strip()
+        if not session_id or not selected_image or not image_folder:
+            raise ValueError("Initialization recovery payload is incomplete.")
+
+        raw_points = payload.get("points")
+        if not isinstance(raw_points, dict):
+            raise ValueError("Initialization recovery points must be an object.")
+        points = {
+            str(key): point_list(value)
+            for key, value in raw_points.items()
+        }
+        images = payload.get("images")
+        if not isinstance(images, list):
+            images = [selected_image]
+
+        is_full = payload.get("is_full")
+        if is_full is not None and not isinstance(is_full, bool):
+            raise ValueError("Initialization recovery full/non-full mode is invalid.")
+        selected_choice = payload.get("selected_3d_choice")
+        recovered_3d = payload.get("recovered_3d")
+        if selected_choice is not None and not isinstance(recovered_3d, dict):
+            raise ValueError("Selected 3D recovery data is missing.")
+
+        session = InitializationSession(
+            session_id=session_id,
+            image_folder=image_folder,
+            images=[str(value) for value in images],
+            selected_image=selected_image,
+            image_width=_optional_int(payload.get("image_width")),
+            image_height=_optional_int(payload.get("image_height")),
+            is_full=is_full,
+            corner=str(payload.get("corner") or "").strip() or None,
+            candidates_3d=deepcopy(payload.get("candidates_3d") or []),
+            selected_3d_choice=(
+                int(selected_choice) if selected_choice is not None else None
+            ),
+            recovered_3d=deepcopy(recovered_3d) if recovered_3d is not None else None,
+            points=points,
+            point_history=list(points),
+            status=str(payload.get("status") or "awaiting_is_full"),
+        )
+        if points:
+            self._validate_geometry(session)
+        self._update_status(session)
+        self.sessions = {session_id: session}
+        self.active_session_id = session_id
+        return self.payload(session_id)
 
     def image_path(self, session_id: str) -> Path:
         session = self._get_session(session_id)
@@ -671,6 +743,12 @@ def read_jpeg_size(path: Path) -> tuple[int | None, int | None]:
                 file.seek(length - 2, 1)
     except OSError:
         return None, None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 __all__ = [

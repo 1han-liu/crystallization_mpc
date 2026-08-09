@@ -9,13 +9,10 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
-from crystallization_mpc.apps.gsensor.detection.initial_uv_struct import initialize_uv_struct
-from crystallization_mpc.apps.gsensor.detection.params import build_params_G
-from crystallization_mpc.apps.gsensor.detection.update_EKF_G import update_EKF_G
-from crystallization_mpc.apps.gsensor.detection.update_figure import update_figure
-from crystallization_mpc.apps.gsensor.detection.update_uv_struct import update_uv_struct
+from crystallization_mpc.apps.gsensor.growth_rate_processor import (
+    EdgeMeasurement,
+    GrowthRateProcessor,
+)
 from crystallization_mpc.apps.gsensor.utils.find_certain_image_file_by_date import (
     find_certain_image_file_by_date,
 )
@@ -58,6 +55,7 @@ def DSCGR(
     folder = Path(folder_G)
     output_path = Path(output_dir)
     overlay_dir = output_path / "overlays"
+    hough_debug_dir = output_path / "hough_debug"
     output_path.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
 
@@ -78,21 +76,14 @@ def DSCGR(
     if len(uv_struct_list) != 2:
         raise ValueError("uv_struct_list must contain u and v structures.")
 
-    dt_G = _required(params, "dt_G")
-    resolution = _required(params, "resolution")
-    q2 = _required(params, "q2")
-    r_diag = _required(params, "r_diag")
-    params_G = build_params_G(params)
-
-    uv_structs = list(uv_struct_list)
-    for kk in range(2):
-        uv_structs[kk] = initialize_uv_struct(
-            uv_structs[kk],
-            dt_G,
-            resolution,
-            q2,
-            r_diag,
-        )
+    processor = GrowthRateProcessor(
+        run_id="offline_dscgr",
+        params=params,
+        uv_struct_list=uv_struct_list,
+        kernel=kernel,
+        overlay_directory=overlay_dir,
+        debug_directory=hough_debug_dir,
+    )
 
     records: list[dict[str, Any]] = []
     processed_ptrs: list[int] = []
@@ -109,38 +100,27 @@ def DSCGR(
             raise FileNotFoundError(f"No image found for DSCGR pointer {ptr}.")
         logger.warning("DSCGR frame start: ptr=%s ii=%s image=%s", ptr, ii, next_image_file)
 
-        frame_records = []
+        frame_result = processor.process(next_image_file)
+        frame_records = [
+            _record(frame_result.u, "u", next_image_file, ptr, ii, frame_result.overlay_path),
+            _record(frame_result.v, "v", next_image_file, ptr, ii, frame_result.overlay_path),
+        ]
+        records.extend(frame_records)
         log_parts = [f"{ptr}: "]
-        I_orig = None
-        for kk, uv_name in enumerate(uv_names):
-            uv_structs[kk], I_orig = update_uv_struct(
-                uv_structs[kk],
-                next_image_file,
-                ii,
-                params_G,
-                kernel,
-            )
-            uv_structs[kk] = update_EKF_G(uv_structs[kk], dt_G, resolution, ii)
-            record = _record(uv_structs[kk], uv_name, next_image_file, ptr, ii)
-            frame_records.append(record)
+        for uv_name, record in zip(uv_names, frame_records, strict=True):
             log_parts.append(
                 f"{uv_name} | measured: {_format(record['G'])}, "
                 f"KF: {_format(record['G_KF'])}; "
             )
 
-        overlay_path = update_figure(
-            uv_structs[0],
-            uv_structs[1],
-            I_orig,
-            next_image_file,
-            output_dir=overlay_dir,
-        )
-        for record in frame_records:
-            record["overlay_path"] = str(overlay_path)
-            records.append(record)
-
         processed_ptrs.append(ptr)
-        logger.warning("DSCGR frame done: ptr=%s ii=%s overlay=%s", ptr, ii, overlay_path)
+        logger.warning(
+            "DSCGR frame done: ptr=%s ii=%s valid=%s overlay=%s",
+            ptr,
+            ii,
+            frame_result.valid,
+            frame_result.overlay_path,
+        )
         if print_fn is not None:
             print_fn("".join(log_parts))
         ii += 1
@@ -150,6 +130,7 @@ def DSCGR(
         "image_folder": str(folder),
         "output_dir": str(output_path),
         "overlay_dir": str(overlay_dir),
+        "hough_debug_dir": str(hough_debug_dir),
         "ptr_0": int(ptr_0),
         "initial_image": str(initial_image_file),
         "length_image_files": length_image_files,
@@ -172,36 +153,26 @@ def DSCGR(
     return payload
 
 
-def _record(uv_struct: Any, edge: str, image_file: Path, ptr: int, ii: int) -> dict[str, Any]:
+def _record(
+    measurement: EdgeMeasurement | None,
+    edge: str,
+    image_file: Path,
+    ptr: int,
+    ii: int,
+    overlay_path: str | None,
+) -> dict[str, Any]:
     return {
         "ii": int(ii),
         "ptr": int(ptr),
         "edge": edge,
         "image_name": image_file.name,
         "image_path": str(image_file),
-        "overlay_path": "",
-        "distance": _value(getattr(uv_struct, "distance_array", []), ii),
-        "distance_KF": _value(getattr(uv_struct, "distance_KF_array", []), ii),
-        "G": _value(getattr(uv_struct, "G_array", []), ii),
-        "G_KF": _value(getattr(uv_struct, "G_KF_array", []), ii),
+        "overlay_path": overlay_path or "",
+        "distance": None if measurement is None else measurement.distance_m,
+        "distance_KF": None if measurement is None else measurement.distance_KF_m,
+        "G": None if measurement is None else measurement.G,
+        "G_KF": None if measurement is None else measurement.G_KF,
     }
-
-
-def _value(values: Any, ii: int) -> float | None:
-    array = np.asarray(values, dtype=object).reshape(-1)
-    index = max(int(ii) - 1, 0)
-    if array.size <= index:
-        return None
-    value = array[index]
-    if value is None:
-        return None
-    return float(np.asarray(value).reshape(-1)[0])
-
-
-def _required(params: Mapping[str, Any], key: str) -> Any:
-    if key not in params:
-        raise KeyError(f"Missing DSCGR parameter: {key}")
-    return params[key]
 
 
 def _format(value: Any) -> str:
