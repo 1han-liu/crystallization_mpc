@@ -30,3 +30,8 @@ references_local/
 
 # Local verification suite; release commits contain runtime code only
 /tests/
+
+# Local development notes and experiment plans
+/gsensor_hough_test_plan.md
+/memory.md
+/plan.md
