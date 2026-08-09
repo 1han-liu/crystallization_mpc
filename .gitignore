@@ -32,6 +32,7 @@ references_local/
 /tests/
 
 # Local development notes and experiment plans
+/agent.md
 /gsensor_hough_test_plan.md
 /memory.md
 /plan.md
