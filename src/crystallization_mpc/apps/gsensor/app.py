@@ -1413,13 +1413,33 @@ class GsensorService:
         session_id: str,
         choice: int,
     ) -> Dict[str, Any]:
+        """Select one 3D candidate for preview without ending initialization."""
+
+        self.require_active_initialization()
+        return self.persist_initialization_progress(
+            self.initialization.select_3d_choice(session_id, choice)
+        )
+
+    def confirm_initialization_3d_choice(
+        self,
+        session_id: str,
+    ) -> Dict[str, Any]:
+        """Freeze the previewed candidate, establish baseline, and measure."""
+
         with self._lock:
             if self.experiment_lifecycle_status != GrowthRateStatus.INITIALIZING.value:
                 raise ValueError(
-                    "The experiment must be initializing before selecting a 3D candidate."
+                    "The experiment must be initializing before confirming a 3D candidate."
                 )
             selection = self.experiments.require_current()
-            payload = self.initialization.select_3d_choice(session_id, choice)
+            payload = self.initialization.payload(session_id)
+            if (
+                payload.get("status") != "ready_for_3d"
+                or payload.get("selected_3d_choice") is None
+            ):
+                raise ValueError(
+                    "Preview and select a 3D candidate before confirming initialization."
+                )
             uv_struct_list, kernel = initialize_DSCGR(
                 self.initialization,
                 session_id=session_id,
@@ -1695,6 +1715,16 @@ def choose_initialization_corner(payload: InitializationCornerRequest) -> Dict[s
 def choose_initialization_3d_choice(payload: Initialization3DChoiceRequest) -> Dict[str, Any]:
     try:
         return service.select_initialization_3d_choice(payload.session_id, payload.choice)
+    except Exception as exc:
+        _raise_http_error(exc)
+
+
+@web_app.post("/api/initialization/confirm")
+def confirm_initialization_3d_choice(
+    payload: InitializationSessionRequest,
+) -> Dict[str, Any]:
+    try:
+        return service.confirm_initialization_3d_choice(payload.session_id)
     except Exception as exc:
         _raise_http_error(exc)
 

@@ -465,9 +465,15 @@ button:disabled {
 }
 
 .candidate-controls-wrap {
+  display: grid;
+  gap: 10px;
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 12px;
+}
+
+.candidate-controls-wrap .eyebrow {
+  margin: 0;
 }
 
 .candidate-controls-wrap[hidden] {
@@ -483,6 +489,11 @@ button:disabled {
   justify-content: center;
   min-height: 36px;
   overflow-wrap: anywhere;
+}
+
+#confirm-3d-choice {
+  justify-content: center;
+  width: 100%;
 }
 
 .dscgr-controls {

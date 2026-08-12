@@ -127,10 +127,18 @@ def scan_new_images(
 
 
 def verify_image_readable(path: Path) -> None:
-    """Open and verify an image without retaining decoded pixel data."""
+    """Fully decode image pixels before admitting a camera frame.
+
+    ``Image.verify()`` validates every PNG chunk, including optional metadata.
+    Some camera/export tools emit readable pixel data with a bad checksum in an
+    ancillary chunk (for example ``mtAc``).  The measurement pipeline does not
+    consume that metadata, so pixel decoding is the relevant integrity check.
+    ``load()`` still rejects truncated or corrupt image data while accepting
+    frames whose non-pixel metadata is malformed.
+    """
 
     with Image.open(path) as image:
-        image.verify()
+        image.load()
 
 
 def image_identity_key(

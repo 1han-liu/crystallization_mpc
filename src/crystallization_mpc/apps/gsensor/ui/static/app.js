@@ -48,6 +48,7 @@ const cornerReferenceImage = document.querySelector("#corner-reference-image");
 const cornerControls = document.querySelector("#corner-controls");
 const candidateControlsWrap = document.querySelector("#candidate-controls-wrap");
 const candidateControls = document.querySelector("#candidate-controls");
+const confirm3DChoiceButton = document.querySelector("#confirm-3d-choice");
 const runDscgrButton = document.querySelector("#run-dscgr");
 const dscgrStatus = document.querySelector("#dscgr-status");
 const pointList = document.querySelector("#point-list");
@@ -101,6 +102,7 @@ const state = {
     items: new Map(),
   },
   cornerRequestInFlight: false,
+  confirm3DChoiceInFlight: false,
   dscgrInFlight: false,
   latestOverlayFrame: null,
   lastOverlayRefreshAt: 0,
@@ -449,7 +451,9 @@ function renderInitialization(payload) {
   const initializationEditable = state.experimentLifecycleStatus === "initializing";
   initStepTitle.textContent = hasSession ? payload.status : "Not started";
   initStepPrompt.textContent = step?.prompt || (selected3DChoice
-    ? `Selected 3D choice ${selected3DChoice}.`
+    ? (initializationEditable
+      ? `Previewing 3D choice ${selected3DChoice}. Compare other candidates or confirm this selection.`
+      : `Confirmed 3D choice ${selected3DChoice}.`)
     : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when the first image arrives."));
   initSaveStatus.textContent = hasSession
     ? `${payload.selected_image || ""}`
@@ -457,6 +461,10 @@ function renderInitialization(payload) {
 
   undoInitButton.disabled = !initializationEditable || !payload?.can_undo;
   resetInitButton.disabled = !initializationEditable || !hasSession;
+  confirm3DChoiceButton.disabled = !initializationEditable
+    || payload?.status !== "ready_for_3d"
+    || selected3DChoice == null
+    || state.confirm3DChoiceInFlight;
   runDscgrButton.disabled = payload?.status !== "ready_for_3d" || state.dscgrInFlight;
 
   fullModeControls.querySelectorAll("button").forEach((button) => {
@@ -1279,6 +1287,32 @@ candidateControls.addEventListener("click", async (event) => {
     }),
   });
   renderInitialization(payload);
+});
+
+confirm3DChoiceButton.addEventListener("click", async () => {
+  if (!state.initialization?.session_id
+      || state.initialization?.selected_3d_choice == null
+      || state.initialization?.status !== "ready_for_3d") {
+    return;
+  }
+  state.confirm3DChoiceInFlight = true;
+  initSaveStatus.textContent = "confirming selected 3D candidate";
+  renderInitialization(state.initialization);
+  try {
+    captureCurrent3DSnapshot();
+    const payload = await fetchJson("/api/initialization/confirm", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.initialization.session_id }),
+    });
+    renderInitialization(payload);
+    initSaveStatus.textContent = "baseline established; online measurement started";
+    await loadStatus();
+  } catch (error) {
+    initSaveStatus.textContent = error.message;
+  } finally {
+    state.confirm3DChoiceInFlight = false;
+    renderInitialization(state.initialization);
+  }
 });
 
 runDscgrButton.addEventListener("click", async () => {
