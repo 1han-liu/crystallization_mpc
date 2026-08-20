@@ -10,6 +10,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - UI_MODE=${UI_MODE:-production}
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
       - RABBIT_QUEUE=central.in
@@ -41,8 +42,12 @@ services:
     env_file:
       - config/influxdb.env
     environment:
+      - UI_MODE=${UI_MODE:-production}
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
+      - PARAMS_DEFAULT_FILE=/app/params_default.yaml
+      - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
+      - PARAM_META_FILE=/app/param_meta.yaml
       - EXPERIMENT_ROOT=/data/experiments
       - GSENSOR_IMAGE_POLL_INTERVAL_S=${GSENSOR_IMAGE_POLL_INTERVAL_S:-1.0}
       - GSENSOR_HOUGH_DEBUG_ENABLED=${GSENSOR_HOUGH_DEBUG_ENABLED:-false}

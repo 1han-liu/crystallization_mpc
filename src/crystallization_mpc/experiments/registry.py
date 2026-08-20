@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,8 @@ RUN_ID_PATTERN = re.compile(
     flags=re.ASCII,
 )
 INVALID_LABEL_CHARACTERS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+MANIFEST_READ_ATTEMPTS = 5
+MANIFEST_READ_RETRY_SECONDS = 0.025
 
 
 class ExperimentRegistryError(RuntimeError):
@@ -99,9 +102,14 @@ class ExperimentRegistry:
     def get(self, run_id: str) -> ExperimentManifest:
         run_dir = self._resolve_existing_run_dir(run_id)
         manifest_path = run_dir / MANIFEST_FILENAME
-        if not manifest_path.is_file():
-            raise ExperimentNotFoundError(f"Experiment manifest not found: {run_id}")
-        return self._read_manifest(manifest_path, expected_run_id=run_id)
+        try:
+            return self._read_manifest(manifest_path, expected_run_id=run_id)
+        except ExperimentRegistryError as exc:
+            if not manifest_path.is_file():
+                raise ExperimentNotFoundError(
+                    f"Experiment manifest not found: {run_id}"
+                ) from exc
+            raise
 
     def select(self, run_id: str) -> ExperimentManifest:
         """Validate and return an experiment without mutating persistent state."""
@@ -285,10 +293,21 @@ class ExperimentRegistry:
         )
 
     def _read_manifest(self, path: Path, *, expected_run_id: str) -> ExperimentManifest:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ExperimentRegistryError(f"Could not read experiment manifest: {path}") from exc
+        read_error: OSError | json.JSONDecodeError | None = None
+        data: Any = None
+        for attempt in range(MANIFEST_READ_ATTEMPTS):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                read_error = None
+                break
+            except (OSError, json.JSONDecodeError) as exc:
+                read_error = exc
+                if attempt + 1 < MANIFEST_READ_ATTEMPTS:
+                    time.sleep(MANIFEST_READ_RETRY_SECONDS * (attempt + 1))
+        if read_error is not None:
+            raise ExperimentRegistryError(
+                f"Could not read experiment manifest: {path}"
+            ) from read_error
         if not isinstance(data, dict):
             raise ExperimentRegistryError(f"Experiment manifest must be an object: {path}")
         try:

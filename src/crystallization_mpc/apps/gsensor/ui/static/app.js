@@ -2,14 +2,14 @@ const statusText = document.querySelector("#status-text");
 const initializedText = document.querySelector("#initialized-text");
 const paramsBlock = document.querySelector("#params-block");
 const messageBlock = document.querySelector("#message-block");
-const refreshButton = document.querySelector("#refresh-button");
 const shell = document.querySelector(".shell");
 const toggleParametersButton = document.querySelector("#toggle-parameters");
 const paramsForm = document.querySelector("#params-form");
 const fieldTemplate = document.querySelector("#param-field-template");
-const applyParamsButton = document.querySelector("#apply-params");
+const saveParamsButton = document.querySelector("#save-params");
 const resetParamsButton = document.querySelector("#reset-params");
-const paramSaveStatus = document.querySelector("#param-save-status");
+const parameterStatus = document.querySelector("#parameter-status");
+const parameterStatusText = document.querySelector("#parameter-status-text");
 
 const currentRunId = document.querySelector("#current-run-id");
 const currentImageDirectory = document.querySelector("#current-image-directory");
@@ -75,10 +75,14 @@ const initImage = new Image();
 const default3DView = { yaw: -0.65, pitch: 0.55 };
 
 const state = {
+  uiMode: "production",
+  params: null,
   paramsVersion: 1,
   paramMeta: {},
   drawerOpen: false,
-  actionInFlight: false,
+  parameterActionInFlight: false,
+  parameterError: null,
+  parameterUnsavedCount: 0,
   initialization: null,
   experimentSource: null,
   measurementActive: false,
@@ -108,6 +112,23 @@ const state = {
   lastOverlayRefreshAt: 0,
 };
 
+function applyUiMode(mode) {
+  const resolved = mode === "development" ? "development" : "production";
+  state.uiMode = resolved;
+  document.documentElement.dataset.uiMode = resolved;
+}
+
+async function loadUiConfig() {
+  applyUiMode("production");
+  try {
+    const payload = await fetchJson("/api/ui/config");
+    applyUiMode(payload.mode);
+    return payload;
+  } catch (error) {
+    return { mode: "production", development: false };
+  }
+}
+
 function setDrawerOpen(open) {
   state.drawerOpen = open;
   shell.classList.toggle("drawer-open", open);
@@ -130,6 +151,18 @@ function formatFieldValue(value) {
     return value;
   }
   return JSON.stringify(value);
+}
+
+function valuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function formatParameterTime(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString();
 }
 
 function cacheBustedUrl(url, options = {}) {
@@ -199,6 +232,9 @@ function renderForm(params) {
       const badges = field.querySelector(".field-badges");
       const description = field.querySelector(".field-description");
       const input = field.querySelector(".field-input");
+      const modifiedBadge = field.querySelector(".field-modified");
+      const resetButton = field.querySelector(".field-reset");
+      const defaultValue = state.params?.defaults?.params?.[key];
 
       label.textContent = meta.label || key;
       description.textContent = meta.description || "";
@@ -215,12 +251,97 @@ function renderForm(params) {
       badges.classList.toggle("is-empty", badgeItems.length === 0);
 
       input.dataset.key = key;
+      input.setAttribute("aria-label", meta.label || key);
       input.value = formatFieldValue(value);
+      input.addEventListener("input", () => {
+        state.parameterError = null;
+        updateParameterDraftState();
+      });
+      resetButton.addEventListener("click", () => {
+        input.value = formatFieldValue(defaultValue);
+        state.parameterError = null;
+        updateParameterDraftState();
+        input.focus();
+      });
+      const modified = !valuesEqual(value, defaultValue);
+      field.classList.toggle("modified", modified);
+      modifiedBadge.hidden = !modified;
+      resetButton.hidden = !modified;
       wrapper.appendChild(field);
     });
 
     paramsForm.appendChild(wrapper);
   });
+}
+
+function parametersLocked() {
+  return [
+    "waiting_for_initial_image",
+    "initializing",
+    "baseline_ready",
+    "measuring",
+    "stopping",
+  ].includes(state.experimentLifecycleStatus);
+}
+
+function updateParameterDraftState() {
+  if (!state.params) {
+    return;
+  }
+  let unsavedCount = 0;
+  let modifiedCount = 0;
+  const locked = parametersLocked();
+  paramsForm.querySelectorAll(".field-input").forEach((input) => {
+    const key = input.dataset.key;
+    const value = parseFieldValue(input.value);
+    const savedValue = state.params?.params?.[key];
+    const defaultValue = state.params?.defaults?.params?.[key];
+    input.disabled = state.parameterActionInFlight || locked;
+    if (!valuesEqual(value, savedValue)) {
+      unsavedCount += 1;
+    }
+    const modified = !valuesEqual(value, defaultValue);
+    if (modified) {
+      modifiedCount += 1;
+    }
+    const field = input.closest(".field");
+    field.classList.toggle("modified", modified);
+    field.querySelector(".field-modified").hidden = !modified;
+    const fieldReset = field.querySelector(".field-reset");
+    fieldReset.hidden = !modified;
+    fieldReset.disabled = state.parameterActionInFlight || locked;
+  });
+
+  saveParamsButton.disabled = state.parameterActionInFlight || locked || unsavedCount === 0;
+  resetParamsButton.disabled = state.parameterActionInFlight || locked || modifiedCount === 0;
+  state.parameterUnsavedCount = unsavedCount;
+  renderParameterStatus(unsavedCount);
+}
+
+function renderParameterStatus(unsavedCount = 0) {
+  let kind = state.params?.status?.kind || "loading";
+  let message = state.params?.status?.message || "Loading parameters…";
+  if (state.parameterActionInFlight) {
+    kind = "saving";
+    message = "Saving…";
+  } else if (state.parameterError) {
+    kind = "error";
+    message = `Save/validation failed: ${state.parameterError}`;
+  } else if (parametersLocked()) {
+    kind = "applied";
+    const runId = state.experimentSource?.run_id;
+    message = `Applied${runId ? ` to ${runId}` : ""} · version ${state.params?.version || state.paramsVersion}`;
+  } else if (unsavedCount > 0) {
+    kind = "unsaved";
+    message = `${unsavedCount} unsaved change${unsavedCount === 1 ? "" : "s"}`;
+  } else if (kind === "draft_saved") {
+    const savedTime = formatParameterTime(state.params?.status?.saved_at);
+    if (savedTime) {
+      message = `Draft saved at ${savedTime} · version ${state.params.version}`;
+    }
+  }
+  parameterStatus.className = `parameter-status ${kind}`;
+  parameterStatusText.textContent = message;
 }
 
 function collectForm() {
@@ -234,6 +355,18 @@ function collectForm() {
 function renderStatus(payload) {
   state.measurementActive = Boolean(payload.active);
   state.experimentLifecycleStatus = payload.experiment_lifecycle_status || "not_started";
+  if (parametersLocked() && state.params && payload.params) {
+    const paramsChanged = !valuesEqual(state.params.params, payload.params);
+    state.params.params = payload.params;
+    if (payload.experiment_parameter_version != null) {
+      state.params.version = Number(payload.experiment_parameter_version);
+      state.paramsVersion = state.params.version;
+    }
+    if (paramsChanged) {
+      renderForm(state.params.params);
+    }
+  }
+  updateParameterDraftState();
   statusText.textContent = state.experimentLifecycleStatus;
   const lifecycleRunning = [
     "waiting_for_initial_image",
@@ -378,7 +511,9 @@ function renderExperimentSource(payload) {
 }
 
 async function loadStatus() {
-  renderStatus(await fetchJson("/api/status"));
+  const payload = await fetchJson("/api/status");
+  renderStatus(payload);
+  return payload;
 }
 
 async function loadExperimentSource() {
@@ -397,7 +532,12 @@ async function refreshLiveStatus() {
   }
   state.liveStatusInFlight = true;
   try {
-    await loadStatus();
+    const payload = await loadStatus();
+    const statusRunId = payload.current_run_id || payload.experiment?.run_id || null;
+    const displayedRunId = state.experimentSource?.run_id || null;
+    if (statusRunId !== displayedRunId) {
+      await loadExperimentSource();
+    }
   } catch (error) {
     statusText.textContent = error.message;
     statusText.className = "status error";
@@ -407,38 +547,36 @@ async function refreshLiveStatus() {
 }
 
 async function loadParams() {
-  const payload = await fetchJson("/api/params");
-  state.paramsVersion = payload.version || 1;
-  state.paramMeta = payload.meta || {};
-  renderForm(payload.params || {});
-  paramSaveStatus.textContent = `loaded from ${payload.source_file || "server"}`;
-  return payload;
+  state.params = await fetchJson("/api/params");
+  state.paramsVersion = state.params.version || 1;
+  state.paramMeta = state.params.meta || {};
+  state.parameterError = null;
+  renderForm(state.params.params || {});
+  updateParameterDraftState();
+  return state.params;
 }
 
-async function applyParams() {
-  state.actionInFlight = true;
-  applyParamsButton.disabled = true;
-  resetParamsButton.disabled = true;
-  paramSaveStatus.textContent = "applying";
+async function saveParams() {
+  state.parameterActionInFlight = true;
+  state.parameterError = null;
+  updateParameterDraftState();
   try {
-    const payload = await fetchJson("/api/params", {
+    state.params = await fetchJson("/api/params", {
       method: "POST",
       body: JSON.stringify({
         version: state.paramsVersion,
         params: collectForm(),
       }),
     });
-    state.paramsVersion = payload.version || state.paramsVersion;
-    renderForm(payload.params || {});
-    paramSaveStatus.textContent = `saved to ${payload.runtime_file || "runtime"}`;
+    state.paramsVersion = state.params.version || state.paramsVersion;
+    state.paramMeta = state.params.meta || state.paramMeta;
+    renderForm(state.params.params || {});
     await loadStatus();
   } catch (error) {
-    paramSaveStatus.textContent = error.message;
-    throw error;
+    state.parameterError = error.message;
   } finally {
-    state.actionInFlight = false;
-    applyParamsButton.disabled = false;
-    resetParamsButton.disabled = false;
+    state.parameterActionInFlight = false;
+    updateParameterDraftState();
   }
 }
 
@@ -1174,44 +1312,32 @@ async function runDscgr() {
   }
 }
 
-refreshButton.addEventListener("click", async () => {
-  await refreshOverview();
-});
-
 toggleParametersButton.addEventListener("click", () => {
   setDrawerOpen(!state.drawerOpen);
 });
 
-applyParamsButton.addEventListener("click", async () => {
-  await applyParams().catch((error) => {
-    statusText.textContent = error.message;
-    statusText.className = "status error";
-  });
+saveParamsButton.addEventListener("click", async () => {
+  await saveParams();
 });
 
 resetParamsButton.addEventListener("click", async () => {
-  state.actionInFlight = true;
-  applyParamsButton.disabled = true;
-  resetParamsButton.disabled = true;
-  paramSaveStatus.textContent = "resetting";
+  state.parameterActionInFlight = true;
+  state.parameterError = null;
+  updateParameterDraftState();
   try {
-    const payload = await fetchJson("/api/params/reset", {
+    state.params = await fetchJson("/api/params/reset", {
       method: "POST",
       body: JSON.stringify({}),
     });
-    state.paramsVersion = payload.version || 1;
-    state.paramMeta = payload.meta || {};
-    renderForm(payload.params || {});
-    paramSaveStatus.textContent = `reset from ${payload.source_file || "default"}`;
+    state.paramsVersion = state.params.version || 1;
+    state.paramMeta = state.params.meta || {};
+    renderForm(state.params.params || {});
     await loadStatus();
   } catch (error) {
-    paramSaveStatus.textContent = error.message;
-    statusText.textContent = error.message;
-    statusText.className = "status error";
+    state.parameterError = error.message;
   } finally {
-    state.actionInFlight = false;
-    applyParamsButton.disabled = false;
-    resetParamsButton.disabled = false;
+    state.parameterActionInFlight = false;
+    updateParameterDraftState();
   }
 });
 
@@ -1400,25 +1526,28 @@ window.addEventListener("resize", () => {
   drawSelected3DPreview();
 });
 
-Promise.all([loadParams(), refreshOverview()]).catch((error) => {
+Promise.all([loadUiConfig(), loadParams(), refreshOverview()]).catch((error) => {
   statusText.textContent = error.message;
   statusText.className = "status error";
-  paramSaveStatus.textContent = error.message;
+  state.parameterError = error.message;
+  updateParameterDraftState();
 });
 
 window.addEventListener("focus", () => {
-  if (state.actionInFlight) {
+  if (state.parameterActionInFlight) {
     return;
   }
-  refreshOverview().catch((error) => {
+  const parameterRefresh = state.parameterUnsavedCount === 0 ? loadParams() : Promise.resolve();
+  Promise.all([parameterRefresh, refreshOverview()]).catch((error) => {
     statusText.textContent = error.message;
     statusText.className = "status error";
   });
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!state.actionInFlight && !document.hidden) {
-    refreshOverview().catch((error) => {
+  if (!state.parameterActionInFlight && !document.hidden) {
+    const parameterRefresh = state.parameterUnsavedCount === 0 ? loadParams() : Promise.resolve();
+    Promise.all([parameterRefresh, refreshOverview()]).catch((error) => {
       statusText.textContent = error.message;
       statusText.className = "status error";
     });

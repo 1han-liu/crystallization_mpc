@@ -15,8 +15,9 @@ from typing import Any, Dict, Literal, Optional, Tuple
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.params import (
     ParameterValidationError,
@@ -26,6 +27,16 @@ from crystallization_mpc.apps.central.params import (
     load_params,
     save_params_document,
     validate_params_section,
+)
+from crystallization_mpc.apps.central.run_configuration import (
+    ADAPTATION_MODES,
+    CONTROLLER_MODES,
+    CONTROL_TARGETS,
+    GROWTH_RATE_SOURCES,
+    RUN_CONFIGURATION_FILENAME,
+    RUN_TYPES,
+    RunConfiguration,
+    RunConfigurationStore,
 )
 from crystallization_mpc.experiments import (
     ExperimentNotFoundError,
@@ -81,6 +92,28 @@ class ParamsUpdate(BaseModel):
     gsensor: Dict[str, Any] = Field(default_factory=dict)
     controller: Dict[str, Any] = Field(default_factory=dict)
 
+
+class RunConfigurationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_type: Literal["experiment", "simulation"]
+    controller_mode: Literal["MPC", "PI"]
+    control_target: Literal["sigma", "G"]
+    adaptation_enabled: bool
+    adaptation_mode: Literal[
+        "E_A",
+        "k_0",
+        "n",
+        "E_A_and_k_0",
+        "E_A_and_n",
+        "k_0_and_n",
+        "all",
+    ]
+    growth_rate_source: Literal[
+        "live_gsensor",
+        "simulated",
+        "presaved_images",
+    ]
 
 class OperationValueUpdate(BaseModel):
     key: str
@@ -313,6 +346,7 @@ class CentralApp:
 
 class CentralService:
     def __init__(self, publisher: CentralApp | None = None) -> None:
+        self.ui_mode = resolve_ui_mode()
         self.default_params_path = Path(os.getenv("PARAMS_DEFAULT_FILE", str(DEFAULT_PARAMS_PATH)))
         self.params_path = Path(os.getenv("PARAMS_FILE", str(DEFAULT_RUNTIME_PARAMS_PATH)))
         self.param_meta_path = Path(os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH)))
@@ -324,11 +358,26 @@ class CentralService:
             self.experiment_root,
             host_root_display=os.getenv("EXPERIMENT_HOST_ROOT_DISPLAY"),
         )
-        self.target: Literal["sigma", "G"] = os.getenv("CONTROL_TARGET", "sigma")  # type: ignore[assignment]
-        if self.target not in TARGET_VALUES:
-            self.target = "sigma"
+        configured_target = os.getenv("CONTROL_TARGET", "sigma")
+        if configured_target not in TARGET_VALUES:
+            configured_target = "sigma"
+        self.default_run_configuration = RunConfiguration(
+            control_target=configured_target
+        )
+        run_configuration_path = Path(
+            os.getenv(
+                "RUN_CONFIGURATION_FILE",
+                str(self.experiment_root / RUN_CONFIGURATION_FILENAME),
+            )
+        )
+        self.run_configuration_store = RunConfigurationStore(run_configuration_path)
+        self.run_configuration = self.run_configuration_store.load(
+            self.default_run_configuration
+        )
+        self.target: Literal["sigma", "G"] = self.run_configuration.control_target  # type: ignore[assignment]
         self.publisher = publisher or CentralApp()
         self.operation_state = self._build_default_operation_state()
+        self._sync_operation_state_from_run_configuration()
         self.controller_status_url = os.getenv(
             "CONTROLLER_STATUS_URL", "http://localhost:8002/api/status"
         )
@@ -345,6 +394,91 @@ class CentralService:
         if self.params_path.exists():
             return self.params_path
         return self.default_params_path
+
+    def ui_config(self) -> Dict[str, str | bool]:
+        return ui_mode_payload(self.ui_mode)
+
+    def run_configuration_payload(self) -> Dict[str, Any]:
+        return {
+            "configuration": self.run_configuration.to_dict(),
+            "defaults": self.default_run_configuration.to_dict(),
+            "choices": {
+                "run_type": list(RUN_TYPES),
+                "controller_mode": list(CONTROLLER_MODES),
+                "control_target": list(CONTROL_TARGETS),
+                "adaptation_mode": list(ADAPTATION_MODES),
+                "growth_rate_source": list(GROWTH_RATE_SOURCES),
+            },
+            "saved": self.run_configuration_store.updated_at is not None,
+            "updated_at": self.run_configuration_store.updated_at,
+            "locked": self._run_configuration_locked(),
+            "source_file": str(self.run_configuration_store.path),
+        }
+
+    def update_run_configuration(
+        self,
+        payload: RunConfigurationUpdate | Dict[str, Any],
+    ) -> Dict[str, Any]:
+        self._require_run_configuration_editable()
+        if isinstance(payload, RunConfigurationUpdate):
+            raw = {
+                "run_type": payload.run_type,
+                "controller_mode": payload.controller_mode,
+                "control_target": payload.control_target,
+                "adaptation_enabled": payload.adaptation_enabled,
+                "adaptation_mode": payload.adaptation_mode,
+                "growth_rate_source": payload.growth_rate_source,
+            }
+        else:
+            raw = dict(payload)
+        configuration = RunConfiguration.from_mapping(raw)
+        changed = configuration != self.run_configuration
+        if changed:
+            self.run_configuration_store.save(configuration)
+            self.run_configuration = configuration
+            self.target = configuration.control_target  # type: ignore[assignment]
+            self._sync_operation_state_from_run_configuration()
+        result = self.run_configuration_payload()
+        result["saved"] = True
+        result["changed"] = changed
+        return result
+
+    def _run_configuration_locked(self) -> bool:
+        run_id = self.experiments.current_run_id()
+        if run_id is None:
+            return False
+        manifest = self.experiments.registry.get(run_id)
+        return manifest.status not in {
+            ExperimentStatus.CREATED,
+            ExperimentStatus.COMPLETED,
+            ExperimentStatus.ERROR,
+        }
+
+    def _require_run_configuration_editable(self) -> None:
+        if self._run_configuration_locked():
+            raise InvalidExperimentStateError(
+                "Run configuration is locked after an experiment starts."
+            )
+
+    def _sync_operation_state_from_run_configuration(self) -> None:
+        configuration = self.run_configuration
+        growth_source_to_legacy = {
+            "live_gsensor": "experiment",
+            "simulated": "simulation",
+            "presaved_images": "experiment_with_presaved",
+        }
+        self.operation_state.update(
+            {
+                "mode": configuration.controller_mode,
+                "exp_sim": configuration.run_type,
+                "target": configuration.control_target,
+                "adaptive": configuration.adaptation_enabled,
+                "adaptive_mode": configuration.adaptation_mode,
+                "exp_sim_G": growth_source_to_legacy[
+                    configuration.growth_rate_source
+                ],
+            }
+        )
 
     def start(self) -> None:
         self.publisher.connect()
@@ -403,7 +537,10 @@ class CentralService:
             return {"accepted": False, "reason": str(exc)}
 
         with self._lock:
-            self.last_gsensor_status = payload.to_dict()
+            self.last_gsensor_status = _retain_last_gsensor_frame(
+                self.last_gsensor_status,
+                payload.to_dict(),
+            )
             self.last_gsensor_status_received_at = utc_ts()
             self.last_status_consumer_error = None
             self.status_message_count += 1
@@ -517,7 +654,6 @@ class CentralService:
             "gsensor": gsensor,
             "controller": self.controller_status(),
         }
-
     def overlay_path(self, run_id: str, kind: str) -> Path:
         if kind not in {"latest", "final"}:
             raise ValueError("Overlay kind must be 'latest' or 'final'.")
@@ -559,10 +695,36 @@ class CentralService:
         return state
 
     def update_operation_value(self, key: str, value: Any) -> Dict[str, Any]:
+        legacy_fields = {
+            "mode": "controller_mode",
+            "exp_sim": "run_type",
+            "target": "control_target",
+            "adaptive": "adaptation_enabled",
+            "adaptive_mode": "adaptation_mode",
+        }
+        if key == "exp_sim_G":
+            legacy_growth_sources = {
+                "experiment": "live_gsensor",
+                "simulation": "simulated",
+                "experiment_with_presaved": "presaved_images",
+            }
+            if value not in legacy_growth_sources:
+                raise ValueError("Unsupported legacy growth-rate source.")
+            field = "growth_rate_source"
+            value = legacy_growth_sources[value]
+        else:
+            field = legacy_fields.get(key)
+        if field is not None:
+            updated = self.run_configuration.to_dict()
+            updated[field] = value
+            result = self.update_run_configuration(updated)
+            return {
+                "saved": True,
+                "key": key,
+                "value": self.operation_state.get(key),
+                "run_configuration": result,
+            }
         self.operation_state[key] = value
-        if key == "target" and value in TARGET_VALUES:
-            self.target = value
-            self.operation_state["target"] = value
         return {
             "saved": True,
             "key": key,
@@ -746,6 +908,7 @@ class CentralService:
         return {
             "version": version,
             "target": self.target,
+            "run_configuration": self.run_configuration.to_dict(),
             "shared": shared,
             "gsensor": gsensor,
             "controller": controller,
@@ -822,43 +985,46 @@ class CentralService:
             "experiment": experiment,
         }
 
-    def stop_experiment(self, *, reason: str = "central_stop") -> Dict[str, Any]:
-        run_id = self.experiments.current_run_id()
-        if run_id is None:
-            raise InvalidExperimentStateError(
-                "Create or select an experiment before stopping it."
-            )
-        commands = self.publisher.publish_experiment_stop_command(
-            run_id,
-            reason=reason,
-        )
-        experiment = self.experiments.request_stop(run_id)
-        self.operation_state["experiment_active"] = False
-        return {
-            "triggered": True,
-            "key": "experiment_active",
-            "value": False,
-            "commands": commands,
-            "experiment": experiment,
-        }
-
     def finish_experiment(self, run_id: str) -> Dict[str, Any]:
         manifest = self.experiments.registry.get(run_id)
-        if manifest.status not in {
-            ExperimentStatus.CREATED,
-            ExperimentStatus.STOPPING,
-            ExperimentStatus.COMPLETED,
-            ExperimentStatus.ERROR,
-        }:
+        current_run_id = self.experiments.current_run_id()
+
+        if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+            experiment = self.experiments.get(run_id)
+        elif manifest.status == ExperimentStatus.CREATED:
+            experiment = self.experiments.finish(run_id)
+        elif manifest.status == ExperimentStatus.STOPPING:
+            experiment = self.experiments.get(run_id)
+        else:
+            if run_id != current_run_id:
+                raise InvalidExperimentStateError(
+                    "Only the current experiment can be ended while it is active."
+                )
             self.publisher.publish_experiment_stop_command(
                 run_id,
                 reason="central_end_experiment",
             )
-            self.experiments.request_stop(run_id)
-        experiment = self.experiments.finish(run_id)
-        if run_id == self.experiments.current_run_id():
+            experiment = self.experiments.request_stop(run_id)
+
+        if run_id == current_run_id:
             self.operation_state["experiment_active"] = False
         return experiment
+
+
+def _retain_last_gsensor_frame(
+    previous: Dict[str, Any] | None,
+    current: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep the latest frame reference when a terminal status omits it."""
+
+    merged = dict(current)
+    if previous is None or previous.get("run_id") != merged.get("run_id"):
+        return merged
+    if merged.get("frame_seq") is None:
+        merged["frame_seq"] = previous.get("frame_seq")
+    if not merged.get("image_name"):
+        merged["image_name"] = previous.get("image_name")
+    return merged
 
 
 service = CentralService()
@@ -891,9 +1057,30 @@ def index() -> str:
     return (UI_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
 
+@web_app.get("/api/ui/config")
+def get_ui_config() -> Dict[str, str | bool]:
+    return service.ui_config()
+
+
 @web_app.get("/api/params")
 def get_params() -> Dict[str, Any]:
     return service.params_payload()
+
+
+@web_app.get("/api/run-configuration")
+def get_run_configuration() -> Dict[str, Any]:
+    try:
+        return service.run_configuration_payload()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.put("/api/run-configuration")
+def update_run_configuration(payload: RunConfigurationUpdate) -> Dict[str, Any]:
+    try:
+        return service.update_run_configuration(payload)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/params")
@@ -967,6 +1154,7 @@ def get_operation_state() -> Dict[str, Any]:
     return {
         "target": service.target,
         "state": service.operation_state,
+        "run_configuration": service.run_configuration_payload(),
         "preview": preview,
     }
 
@@ -988,31 +1176,31 @@ def get_operation_meta() -> Dict[str, Any]:
 
 @web_app.post("/api/operation/target")
 def update_target(payload: TargetUpdate) -> Dict[str, Any]:
-    service.target = payload.target
-    service.operation_state["target"] = payload.target
-    return {
-        "saved": True,
-        "target": service.target,
-    }
+    try:
+        updated = service.run_configuration.to_dict()
+        updated["control_target"] = payload.target
+        result = service.update_run_configuration(updated)
+        return {
+            "saved": True,
+            "target": service.target,
+            "run_configuration": result,
+        }
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/operation/value")
 def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
-    return service.update_operation_value(payload.key, payload.value)
+    try:
+        return service.update_operation_value(payload.key, payload.value)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/operation/experiment/start")
 def start_experiment(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
     try:
         return service.start_experiment(payload)
-    except Exception as exc:
-        raise _experiment_http_exception(exc) from exc
-
-
-@web_app.post("/api/operation/experiment/stop")
-def stop_experiment() -> Dict[str, Any]:
-    try:
-        return service.stop_experiment()
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 

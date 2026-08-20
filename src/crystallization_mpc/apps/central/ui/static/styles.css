@@ -15,6 +15,10 @@
   box-sizing: border-box;
 }
 
+html[data-ui-mode="production"] [data-ui-visibility="development-only"] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -84,7 +88,8 @@ textarea {
 
 .nav-link,
 .primary,
-.ghost {
+.ghost,
+.danger {
   border-radius: 4px;
   border: 1px solid var(--line);
   padding: 10px 12px;
@@ -107,6 +112,12 @@ textarea {
 
 .ghost {
   background: #ffffff;
+}
+
+.danger {
+  border-color: #b74b4b;
+  background: #ffffff;
+  color: #8a1c1c;
 }
 
 .drawer-body {
@@ -192,68 +203,6 @@ textarea {
   grid-auto-rows: max-content;
 }
 
-.operation-sections {
-  display: grid;
-  gap: 18px;
-}
-
-.operation-section {
-  display: grid;
-  gap: 10px;
-}
-
-.operation-section-title {
-  margin: 0;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
-  font-size: 0.95rem;
-  font-weight: 600;
-}
-
-.operation-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  padding: 10px 0;
-  border-bottom: 1px solid #efefef;
-}
-
-.operation-item:last-child {
-  border-bottom: none;
-}
-
-.operation-copy {
-  display: grid;
-  gap: 4px;
-}
-
-.operation-label {
-  font-size: 0.95rem;
-  color: var(--ink);
-}
-
-.operation-key {
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
-.operation-control {
-  min-width: 160px;
-}
-
-.operation-control-actions {
-  min-width: 320px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.operation-control select,
-.operation-control button {
-  width: 100%;
-}
-
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -273,6 +222,48 @@ textarea {
   gap: 8px;
   align-items: end;
   flex-wrap: wrap;
+}
+
+.run-configuration-panel {
+  display: grid;
+  gap: 4px;
+}
+
+.run-configuration-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 14px 16px;
+}
+
+.run-configuration-field {
+  display: grid;
+  gap: 6px;
+}
+
+.run-configuration-field > span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.run-configuration-field select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--panel-strong);
+  color: var(--ink);
+}
+
+.run-configuration-message {
+  min-height: 1.2em;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.run-configuration-message.error {
+  color: #8a1c1c;
 }
 
 .experiment-panel {
@@ -330,6 +321,25 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+#experiment-display-name {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.experiment-run-reference {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 6px !important;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.experiment-run-reference code {
+  color: var(--muted);
+  font-size: inherit;
+}
+
 .experiment-field small {
   font-size: inherit;
   font-weight: normal;
@@ -358,12 +368,11 @@ textarea {
 
 .experiment-action-row {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
-.experiment-action-row button,
-#select-experiment {
+.experiment-action-row button {
   justify-content: center;
 }
 
@@ -390,14 +399,23 @@ textarea:disabled {
   opacity: 0.55;
 }
 
-.grid {
+.development-tools-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
-.diagnostics-grid {
-  align-items: start;
+.development-tools-panel {
+  border-color: #cbd7e5;
+  background: #f7f9fc;
+}
+
+.development-tools-panel > .panel-head {
+  margin-bottom: 4px;
+}
+
+.development-tools-description {
+  margin: 0 0 16px;
 }
 
 .diagnostic-panel {
@@ -633,12 +651,16 @@ textarea:disabled {
     padding-right: 16px;
   }
 
-  .grid,
+  .development-tools-grid,
   .hero,
   .experiment-layout {
     display: grid;
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .run-configuration-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .experiment-controls {
@@ -656,17 +678,10 @@ textarea:disabled {
     grid-column: span 2;
   }
 
-  .operation-item {
-    grid-template-columns: 1fr;
-  }
-
-  .operation-control,
-  .operation-control-actions {
-    min-width: 0;
-  }
 }
 
 @media (max-width: 600px) {
+  .run-configuration-grid,
   .experiment-facts,
   .experiment-action-row,
   .path-control {

@@ -13,6 +13,10 @@
   box-sizing: border-box;
 }
 
+html[data-ui-mode="production"] [data-ui-visibility="development-only"] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -70,6 +74,41 @@ button {
 .drawer-panel {
   height: 100%;
   overflow: auto;
+}
+
+.parameter-status {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: #fafafa;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.parameter-status.using_defaults,
+.parameter-status.loading {
+  border-left-color: #8a8a8a;
+}
+
+.parameter-status.unsaved,
+.parameter-status.saving {
+  border-left-color: #b07a00;
+}
+
+.parameter-status.draft_saved {
+  border-left-color: #336ea8;
+}
+
+.parameter-status.applied {
+  border-left-color: #2c7a45;
+}
+
+.parameter-status.error {
+  border-left-color: #a12a2a;
+  color: #8a1c1c;
 }
 
 .content {
@@ -454,6 +493,20 @@ button:disabled {
   font-weight: 600;
 }
 
+.initialization-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.initialization-actions button {
+  width: 100%;
+  justify-content: center;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -504,7 +557,8 @@ button:disabled {
   padding: 12px;
 }
 
-.dscgr-controls .eyebrow {
+.dscgr-controls h3,
+.dscgr-controls p {
   margin: 0;
 }
 
@@ -529,13 +583,15 @@ button:disabled {
   color: var(--muted);
 }
 
-.grid {
+.development-tools-panel {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
-.diagnostics-grid {
+.development-tools-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.8fr) repeat(2, minmax(0, 1fr));
+  gap: 12px;
   align-items: start;
 }
 
@@ -603,6 +659,41 @@ button:disabled {
   display: grid;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.field-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.field-modified {
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: #fff4cf;
+  color: #735400;
+  font-size: 0.7rem;
+}
+
+.field-reset {
+  padding: 4px 7px;
+  font-size: 0.72rem;
+}
+
+.field-reset[hidden],
+.field-modified[hidden] {
+  display: none;
+}
+
+.field.modified textarea {
+  border-color: #b99128;
 }
 
 .field span {
@@ -713,7 +804,7 @@ button:disabled {
   }
 
   .hero,
-  .grid,
+  .development-tools-grid,
   .experiment-source-facts,
   .image-monitor-facts,
   .baseline-monitor-facts,

@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
@@ -15,10 +16,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from crystallization_mpc.apps.central.params import (
+    ParameterValidationError,
     load_param_meta,
     load_params,
     save_params_document,
+    validate_params_section,
 )
+from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.gsensor.DSCGR import DSCGR
 from crystallization_mpc.apps.gsensor.detection.initialize_DSCGR import initialize_DSCGR
 from crystallization_mpc.apps.gsensor.experiments import (
@@ -158,6 +162,7 @@ class GsensorService:
         measurement_writer: InfluxWriter | None = None,
         influx_enabled: bool | None = None,
     ) -> None:
+        self.ui_mode = resolve_ui_mode()
         self.url = url or os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")
         self.exchange = exchange or os.getenv("RABBIT_EXCHANGE", EXCHANGE)
         self.queue_name = queue_name or os.getenv("RABBIT_QUEUE", QUEUES[ROLE])
@@ -932,7 +937,16 @@ class GsensorService:
     def _run_image_polling_loop(self) -> None:
         try:
             while not self._measurement_stop.is_set():
-                self._scan_current_image_directory()
+                try:
+                    self._scan_current_image_directory()
+                except Exception as exc:
+                    logger.exception("Unexpected Gsensor image polling failure.")
+                    with self._lock:
+                        self.last_image_scan_at = utc_ts()
+                        self.image_scan_error = str(exc)
+                        self.image_scan_status = (
+                            "stopped" if self._measurement_stop.is_set() else "error"
+                        )
                 self._measurement_stop.wait(self.image_poll_interval_s)
         finally:
             with self._lock:
@@ -1178,74 +1192,124 @@ class GsensorService:
             return {**shared, **gsensor, **self.params}
 
     def params_payload(self) -> Dict[str, Any]:
-        _shared, _gsensor, _controller, version = self._load_persisted_params()
+        shared, gsensor, _controller, persisted_version = self._load_persisted_params()
+        default_shared, default_gsensor, _default_controller, default_version = load_params(
+            str(self.default_params_path)
+        )
+        with self._lock:
+            locked = self._experiment_in_progress_locked()
+            active_params = dict(self.experiment_params or self.params) if locked else None
+            active_version = self.experiment_parameter_version if locked else None
+        params = active_params or {**shared, **gsensor}
+        version = int(active_version) if active_version is not None else persisted_version
         return {
             "version": version,
-            "params": self.current_params(),
+            "params": params,
+            "defaults": {
+                "version": default_version,
+                "params": {**default_shared, **default_gsensor},
+            },
             "meta": self.load_param_meta(),
             "source_file": str(self._active_params_path()),
             "runtime_file": str(self.params_path),
+            "status": self._ui_parameter_status(
+                params=params,
+                defaults={**default_shared, **default_gsensor},
+                version=version,
+            ),
         }
+
+    def ui_config(self) -> Dict[str, str | bool]:
+        return ui_mode_payload(self.ui_mode)
 
     def default_params_payload(self) -> Dict[str, Any]:
         shared, gsensor, _controller, version = load_params(str(self.default_params_path))
         return {
             "version": version,
             "params": {**shared, **gsensor},
+            "defaults": {
+                "version": version,
+                "params": {**shared, **gsensor},
+            },
             "meta": self.load_param_meta(),
             "source_file": str(self.default_params_path),
             "runtime_file": str(self.params_path),
         }
 
     def apply_ui_params(self, params: Dict[str, Any], version: int = 1) -> Dict[str, Any]:
+        with self._lock:
+            if self._experiment_in_progress_locked():
+                raise ValueError(
+                    "Parameters are locked while an experiment is running. "
+                    "Stop the experiment before editing them."
+                )
         shared, gsensor, controller, current_version = self._load_persisted_params()
-
-        shared_keys = set(shared)
-        gsensor_keys = set(gsensor)
-        if not shared_keys or not gsensor_keys:
-            default_shared, default_gsensor, _default_controller, _default_version = load_params(
-                str(self.default_params_path)
+        if int(version) != current_version:
+            raise ParameterValidationError(
+                "The Gsensor parameter draft changed on the server. Reload it before saving."
             )
-            shared_keys.update(default_shared)
-            gsensor_keys.update(default_gsensor)
-
-        next_shared = dict(shared)
-        next_gsensor = dict(gsensor)
-        for key, value in params.items():
-            if key in shared_keys:
-                next_shared[key] = value
-            elif key in gsensor_keys:
-                next_gsensor[key] = value
-            else:
-                # Unknown gsensor-facing keys should still be preserved for the
-                # local service without being mixed into controller parameters.
-                next_gsensor[key] = value
-
-        save_params_document(
-            str(self.params_path),
-            version=version or current_version,
-            shared=next_shared,
-            gsensor=next_gsensor,
-            controller=controller,
+        default_shared, default_gsensor, _default_controller, _default_version = load_params(
+            str(self.default_params_path)
         )
+        meta = self.load_param_meta()
+        expected_keys = set(default_shared) | set(default_gsensor)
+        unknown = sorted(set(params) - expected_keys)
+        if unknown:
+            raise ParameterValidationError(
+                f"Unknown Gsensor parameter(s): {', '.join(unknown)}."
+            )
+        submitted_shared = {**default_shared, **shared}
+        submitted_shared.update({key: params[key] for key in default_shared if key in params})
+        submitted_gsensor = {**default_gsensor, **gsensor}
+        submitted_gsensor.update({key: params[key] for key in default_gsensor if key in params})
+        next_shared = validate_params_section(
+            "shared", submitted_shared, default_shared, meta
+        )
+        next_gsensor = validate_params_section(
+            "gsensor", submitted_gsensor, default_gsensor, meta
+        )
+        changed = (next_shared, next_gsensor) != (shared, gsensor)
+        next_version = current_version + 1 if changed else current_version
+        if changed:
+            save_params_document(
+                str(self.params_path),
+                version=next_version,
+                shared=next_shared,
+                gsensor=next_gsensor,
+                controller=controller,
+            )
 
         with self._lock:
-            self.params.update(params)
+            self.params.update(next_shared)
+            self.params.update(next_gsensor)
 
-        return self.params_payload()
+        result = self.params_payload()
+        result["saved"] = True
+        result["changed"] = changed
+        return result
 
     def reset_ui_params_to_default(self) -> Dict[str, Any]:
+        with self._lock:
+            if self._experiment_in_progress_locked():
+                raise ValueError(
+                    "Parameters are locked while an experiment is running. "
+                    "Stop the experiment before resetting them."
+                )
         default_shared, default_gsensor, _default_controller, default_version = load_params(
             str(self.default_params_path)
         )
-        _shared, _gsensor, controller, _current_version = self._load_persisted_params()
-        save_params_document(
-            str(self.params_path),
-            version=default_version,
-            shared=default_shared,
-            gsensor=default_gsensor,
-            controller=controller,
-        )
+        shared, gsensor, controller, current_version = self._load_persisted_params()
+        defaults = {**default_shared, **default_gsensor}
+        changed = defaults != {**shared, **gsensor}
+        next_version = current_version + 1 if changed else current_version
+        if changed:
+            save_params_document(
+                str(self.params_path),
+                version=next_version,
+                shared=default_shared,
+                gsensor=default_gsensor,
+                controller=controller,
+            )
 
         with self._lock:
             self.params = {
@@ -1256,7 +1320,52 @@ class GsensorService:
             self.params.update(default_shared)
             self.params.update(default_gsensor)
 
-        return self.params_payload()
+        result = self.params_payload()
+        result["saved"] = True
+        result["changed"] = changed
+        return result
+
+    def _ui_parameter_status(
+        self,
+        *,
+        params: Dict[str, Any],
+        defaults: Dict[str, Any],
+        version: int,
+    ) -> Dict[str, Any]:
+        using_defaults = params == defaults
+        saved_at = None
+        if self.params_path.is_file():
+            modified_at = datetime.fromtimestamp(
+                self.params_path.stat().st_mtime,
+                tz=timezone.utc,
+            )
+            saved_at = modified_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._lock:
+            locked = self._experiment_in_progress_locked()
+            run_id = self.current_experiment.get("run_id") if self.current_experiment else None
+            applied = (
+                run_id is not None
+                and self.experiment_parameter_version is not None
+                and int(self.experiment_parameter_version) == int(version)
+            )
+        if applied:
+            kind = "applied"
+            message = f"Applied to {run_id} · version {version}"
+        elif using_defaults:
+            kind = "using_defaults"
+            message = f"Using defaults · version {version}"
+        else:
+            kind = "draft_saved"
+            message = f"Draft saved · version {version}"
+        return {
+            "kind": kind,
+            "message": message,
+            "using_defaults": using_defaults,
+            "version": version,
+            "saved_at": saved_at,
+            "locked": locked,
+            "applied_run_id": run_id if applied else None,
+        }
 
     def status(self) -> Dict[str, Any]:
         current_params = self.current_params()
@@ -1608,6 +1717,11 @@ def index() -> str:
     return (UI_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
 
+@web_app.get("/api/ui/config")
+def get_ui_config() -> Dict[str, str | bool]:
+    return service.ui_config()
+
+
 @web_app.get("/api/status")
 def get_status() -> Dict[str, Any]:
     return service.status()
@@ -1629,12 +1743,18 @@ def get_params() -> Dict[str, Any]:
 
 @web_app.post("/api/params")
 def update_params(payload: GsensorParamsUpdate) -> Dict[str, Any]:
-    return service.apply_ui_params(payload.params, payload.version)
+    try:
+        return service.apply_ui_params(payload.params, payload.version)
+    except Exception as exc:
+        _raise_http_error(exc)
 
 
 @web_app.post("/api/params/reset")
 def reset_params() -> Dict[str, Any]:
-    return service.reset_ui_params_to_default()
+    try:
+        return service.reset_ui_params_to_default()
+    except Exception as exc:
+        _raise_http_error(exc)
 
 
 def _raise_http_error(exc: Exception) -> None:

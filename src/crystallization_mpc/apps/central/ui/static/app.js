@@ -1,15 +1,20 @@
 const state = {
+  uiMode: "production",
   params: null,
   paramMeta: {},
-  operationMeta: [],
-  operationState: {},
   target: "sigma",
+  runConfiguration: null,
+  runConfigurationDefaults: null,
+  runConfigurationUpdatedAt: null,
+  runConfigurationInFlight: false,
+  runConfigurationError: null,
   drawerOpen: false,
-  actionInFlight: false,
-  operationStateSignature: "",
   experiments: [],
   currentRunId: null,
+  lastRenderedRunId: null,
+  lastRenderedExperimentStatus: null,
   experimentActionInFlight: false,
+  experimentActionName: null,
   parameterActionInFlight: false,
   parameterError: null,
   parameterUnsavedCount: 0,
@@ -30,12 +35,10 @@ const refreshPreviewButton = document.querySelector("#refresh-preview");
 const sharedForm = document.querySelector("#shared-form");
 const gsensorForm = document.querySelector("#gsensor-form");
 const controllerForm = document.querySelector("#controller-form");
-const operationSections = document.querySelector("#operation-sections");
 const fieldTemplate = document.querySelector("#param-field-template");
-const operationItemTemplate = document.querySelector("#operation-item-template");
 const experimentStatus = document.querySelector("#experiment-status");
 const experimentRunId = document.querySelector("#experiment-run-id");
-const experimentCurrentLabel = document.querySelector("#experiment-current-label");
+const experimentDisplayName = document.querySelector("#experiment-display-name");
 const experimentCreatedAt = document.querySelector("#experiment-created-at");
 const experimentStartedAt = document.querySelector("#experiment-started-at");
 const experimentEndedAt = document.querySelector("#experiment-ended-at");
@@ -43,9 +46,8 @@ const cameraSavePath = document.querySelector("#camera-save-path");
 const copyCameraPathButton = document.querySelector("#copy-camera-path");
 const newExperimentLabel = document.querySelector("#new-experiment-label");
 const newExperimentButton = document.querySelector("#new-experiment");
+const startExperimentButton = document.querySelector("#start-experiment");
 const endExperimentButton = document.querySelector("#end-experiment");
-const experimentHistory = document.querySelector("#experiment-history");
-const selectExperimentButton = document.querySelector("#select-experiment");
 const experimentMessage = document.querySelector("#experiment-message");
 const systemRefreshStatus = document.querySelector("#system-refresh-status");
 const gsensorLiveStatus = document.querySelector("#gsensor-live-status");
@@ -63,6 +65,164 @@ const controllerLiveError = document.querySelector("#controller-live-error");
 const centralOverlayImage = document.querySelector("#central-overlay-image");
 const centralOverlayCaption = document.querySelector("#central-overlay-caption");
 const centralRefreshOverlay = document.querySelector("#central-refresh-overlay");
+const runConfigurationStatus = document.querySelector("#run-configuration-status");
+const runConfigurationMessage = document.querySelector("#run-configuration-message");
+const runTypeSelect = document.querySelector("#run-type");
+const controllerModeSelect = document.querySelector("#controller-mode");
+const controlTargetSelect = document.querySelector("#control-target");
+const adaptationEnabledSelect = document.querySelector("#adaptation-enabled");
+const adaptationModeSelect = document.querySelector("#adaptation-mode");
+const growthRateSourceSelect = document.querySelector("#growth-rate-source");
+
+const runConfigurationControls = [
+  runTypeSelect,
+  controllerModeSelect,
+  controlTargetSelect,
+  adaptationEnabledSelect,
+  adaptationModeSelect,
+  growthRateSourceSelect,
+];
+
+function applyUiMode(mode) {
+  const resolved = mode === "development" ? "development" : "production";
+  state.uiMode = resolved;
+  document.documentElement.dataset.uiMode = resolved;
+  renderRunConfiguration();
+}
+
+async function loadUiConfig() {
+  applyUiMode("production");
+  try {
+    const payload = await fetchJson("/api/ui/config");
+    applyUiMode(payload.mode);
+    return payload;
+  } catch (error) {
+    return { mode: "production", development: false };
+  }
+}
+
+function runConfigurationLocked() {
+  const status = currentExperiment()?.status;
+  if (!status) {
+    return false;
+  }
+  return !["created", "completed", "error"].includes(status);
+}
+
+function collectRunConfiguration() {
+  return {
+    run_type: runTypeSelect.value,
+    controller_mode: controllerModeSelect.value,
+    control_target: controlTargetSelect.value,
+    adaptation_enabled: adaptationEnabledSelect.value === "true",
+    adaptation_mode: adaptationModeSelect.value,
+    growth_rate_source: growthRateSourceSelect.value,
+  };
+}
+
+function applyRunConfigurationPayload(payload) {
+  if (!payload) {
+    return;
+  }
+  state.runConfiguration = payload.configuration || state.runConfiguration;
+  state.runConfigurationDefaults = payload.defaults || state.runConfigurationDefaults;
+  state.runConfigurationUpdatedAt = payload.updated_at || null;
+  state.target = state.runConfiguration?.control_target || state.target;
+  renderRunConfiguration();
+}
+
+function renderRunConfiguration() {
+  const configuration = state.runConfiguration;
+  if (!configuration || !runConfigurationStatus) {
+    return;
+  }
+
+  runTypeSelect.value = configuration.run_type;
+  controllerModeSelect.value = configuration.controller_mode;
+  controlTargetSelect.value = configuration.control_target;
+  adaptationEnabledSelect.value = String(configuration.adaptation_enabled);
+  adaptationModeSelect.value = configuration.adaptation_mode;
+  growthRateSourceSelect.value = configuration.growth_rate_source;
+
+  const locked = runConfigurationLocked();
+  runConfigurationControls.forEach((control) => {
+    control.disabled = state.runConfigurationInFlight || locked;
+  });
+  adaptationModeSelect.disabled = state.runConfigurationInFlight
+    || locked
+    || !configuration.adaptation_enabled;
+
+  growthRateSourceSelect.querySelectorAll("[data-development-source]").forEach((option) => {
+    const selected = option.value === configuration.growth_rate_source;
+    option.hidden = state.uiMode !== "development" && !selected;
+    option.disabled = state.uiMode !== "development";
+  });
+
+  if (state.runConfigurationInFlight) {
+    runConfigurationStatus.textContent = "saving";
+    runConfigurationStatus.className = "status idle";
+    runConfigurationMessage.textContent = "Saving run configuration…";
+    runConfigurationMessage.classList.remove("error");
+    return;
+  }
+  if (state.runConfigurationError) {
+    runConfigurationStatus.textContent = "error";
+    runConfigurationStatus.className = "status error";
+    runConfigurationMessage.textContent = state.runConfigurationError;
+    runConfigurationMessage.classList.add("error");
+    return;
+  }
+  if (locked) {
+    runConfigurationStatus.textContent = "locked";
+    runConfigurationStatus.className = "status running";
+    runConfigurationMessage.textContent = "Configuration is locked for the active run.";
+    runConfigurationMessage.classList.remove("error");
+    return;
+  }
+
+  const savedTime = formatParameterTime(state.runConfigurationUpdatedAt);
+  runConfigurationStatus.textContent = savedTime ? "saved" : "defaults";
+  runConfigurationStatus.className = "status success";
+  runConfigurationMessage.textContent = savedTime
+    ? `Configuration saved at ${savedTime}. Changes are applied automatically.`
+    : "Using the default run configuration. Changes are saved automatically.";
+  runConfigurationMessage.classList.remove("error");
+}
+
+async function loadRunConfiguration() {
+  const payload = await fetchJson("/api/run-configuration");
+  applyRunConfigurationPayload(payload);
+  return payload;
+}
+
+async function saveRunConfiguration() {
+  if (!state.runConfiguration || state.runConfigurationInFlight || runConfigurationLocked()) {
+    renderRunConfiguration();
+    return null;
+  }
+  const previous = { ...state.runConfiguration };
+  const draft = collectRunConfiguration();
+  state.runConfiguration = draft;
+  state.runConfigurationInFlight = true;
+  state.runConfigurationError = null;
+  renderRunConfiguration();
+  try {
+    const payload = await fetchJson("/api/run-configuration", {
+      method: "PUT",
+      body: JSON.stringify(draft),
+    });
+    applyRunConfigurationPayload(payload);
+    await loadOperationState({ updateRunConfiguration: false });
+    return payload;
+  } catch (error) {
+    state.runConfiguration = previous;
+    state.runConfigurationError = error.message;
+    return null;
+  } finally {
+    state.runConfigurationInFlight = false;
+    renderRunConfiguration();
+  }
+}
 
 function setDrawerOpen(open) {
   state.drawerOpen = open;
@@ -331,7 +491,26 @@ function formatExperimentTime(value) {
     return "—";
   }
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  const pad = (part) => String(part).padStart(2, "0");
+  return [
+    parsed.getFullYear(),
+    pad(parsed.getMonth() + 1),
+    pad(parsed.getDate()),
+  ].join("-") + ` ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
+}
+
+function displayNameForExperiment(experiment) {
+  if (!experiment) {
+    return "No experiment selected";
+  }
+  if (experiment.label) {
+    return experiment.label;
+  }
+  const createdAt = formatExperimentTime(experiment.created_at);
+  return createdAt === "—" ? "Untitled Experiment" : `Experiment ${createdAt}`;
 }
 
 function setExperimentMessage(message, { error = false } = {}) {
@@ -343,65 +522,53 @@ function currentExperiment() {
   return state.experiments.find((item) => item.run_id === state.currentRunId) || null;
 }
 
-function experimentOptionLabel(experiment) {
-  const label = experiment.label ? ` — ${experiment.label}` : "";
-  return `${experiment.run_id}${label} (${experiment.status})`;
-}
-
-function renderExperiments({ selectedRunId = null } = {}) {
+function renderExperiments() {
   const current = currentExperiment();
   const hasCurrent = Boolean(current);
-  const isTerminal = current && ["completed", "error"].includes(current.status);
+  const status = current?.status || null;
+  const completedAfterStop = current
+    && state.lastRenderedRunId === current.run_id
+    && state.lastRenderedExperimentStatus === "stopping"
+    && status === "completed";
+  const isTerminal = ["completed", "error"].includes(status);
+  const canCreate = !hasCurrent || isTerminal;
+  const canStart = status === "created";
+  const canEnd = hasCurrent && !isTerminal && status !== "stopping";
+  const action = state.experimentActionName;
 
   experimentStatus.textContent = current?.status || "not selected";
   experimentStatus.className = `status ${current?.status || "idle"}`;
-  experimentRunId.textContent = current?.run_id || "No experiment selected";
-  experimentCurrentLabel.textContent = current?.label || "—";
+  experimentDisplayName.textContent = displayNameForExperiment(current);
+  experimentRunId.textContent = current?.run_id || "—";
   experimentCreatedAt.textContent = formatExperimentTime(current?.created_at);
   experimentStartedAt.textContent = formatExperimentTime(current?.started_at);
   experimentEndedAt.textContent = formatExperimentTime(current?.ended_at);
   cameraSavePath.value = current?.camera_save_path || "";
 
   copyCameraPathButton.disabled = !hasCurrent || state.experimentActionInFlight;
-  endExperimentButton.disabled = !hasCurrent || isTerminal || state.experimentActionInFlight;
-  newExperimentButton.disabled = state.experimentActionInFlight;
-  newExperimentLabel.disabled = state.experimentActionInFlight;
+  newExperimentButton.disabled = !canCreate || state.experimentActionInFlight;
+  startExperimentButton.disabled = !canStart || state.experimentActionInFlight;
+  endExperimentButton.disabled = !canEnd || state.experimentActionInFlight;
+  newExperimentLabel.disabled = !canCreate || state.experimentActionInFlight;
 
-  const previousSelection = selectedRunId || experimentHistory.value || state.currentRunId;
-  experimentHistory.innerHTML = "";
-  if (state.experiments.length === 0) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "No experiments available";
-    experimentHistory.appendChild(option);
-  } else {
-    state.experiments.forEach((experiment) => {
-      const option = document.createElement("option");
-      option.value = experiment.run_id;
-      option.textContent = experimentOptionLabel(experiment);
-      experimentHistory.appendChild(option);
-    });
-    const availableSelection = state.experiments.some(
-      (experiment) => experiment.run_id === previousSelection,
-    );
-    experimentHistory.value = availableSelection
-      ? previousSelection
-      : state.experiments[0].run_id;
+  newExperimentButton.textContent = action === "create" ? "Creating…" : "Create Experiment";
+  startExperimentButton.textContent = action === "start" ? "Starting…" : "Start Experiment";
+  endExperimentButton.textContent = action === "end" ? "Ending…" : "End Experiment";
+
+  if (completedAfterStop) {
+    setExperimentMessage(`Completed ${displayNameForExperiment(current)}. Gsensor finalization is complete.`);
   }
-
-  experimentHistory.disabled = state.experiments.length === 0 || state.experimentActionInFlight;
-  selectExperimentButton.disabled = state.experiments.length === 0 || state.experimentActionInFlight;
+  state.lastRenderedRunId = current?.run_id || null;
+  state.lastRenderedExperimentStatus = status;
+  renderRunConfiguration();
 }
 
-async function loadExperiments(options = {}) {
+async function loadExperiments() {
   const payload = await fetchJson("/api/experiments");
   state.experiments = payload.experiments || [];
   state.currentRunId = payload.current_run_id || null;
-  renderExperiments(options);
+  renderExperiments();
   updateParameterDraftState();
-  if (state.operationMeta.length > 0) {
-    renderOperationSections();
-  }
 }
 
 function updateCentralOverlay(runId, frameSeq, { final = false, force = false } = {}) {
@@ -466,9 +633,6 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
   state.currentRunId = experiments.current_run_id || null;
   renderExperiments();
   updateParameterDraftState();
-  if (state.operationMeta.length > 0) {
-    renderOperationSections();
-  }
   renderSystemStatus(payload);
   if (forceOverlay) {
     const status = payload.gsensor?.last_status || {};
@@ -483,13 +647,14 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
   return payload;
 }
 
-async function runExperimentAction(action, successMessage) {
+async function runExperimentAction(actionName, action, successMessage) {
   state.experimentActionInFlight = true;
+  state.experimentActionName = actionName;
   setExperimentMessage("");
   renderExperiments();
   try {
     const result = await action();
-    await loadExperiments({ selectedRunId: result?.run_id || null });
+    await loadExperiments();
     setExperimentMessage(successMessage(result));
     return result;
   } catch (error) {
@@ -497,6 +662,7 @@ async function runExperimentAction(action, successMessage) {
     return null;
   } finally {
     state.experimentActionInFlight = false;
+    state.experimentActionName = null;
     renderExperiments();
   }
 }
@@ -512,11 +678,12 @@ async function createExperiment() {
   }
   const label = newExperimentLabel.value.trim();
   const result = await runExperimentAction(
+    "create",
     () => fetchJson("/api/experiments", {
       method: "POST",
       body: JSON.stringify({ label: label || null }),
     }),
-    (experiment) => `Created ${experiment.run_id}. Point the camera software to the path shown above.`,
+    (experiment) => `Created ${displayNameForExperiment(experiment)}. Point the camera software to the path shown above.`,
   );
   if (result) {
     newExperimentLabel.value = "";
@@ -526,36 +693,31 @@ async function createExperiment() {
   return result;
 }
 
-async function selectExperiment() {
-  const runId = experimentHistory.value;
-  if (!runId) {
-    return;
-  }
-  await runExperimentAction(
-    () => fetchJson(`/api/experiments/${encodeURIComponent(runId)}/select`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    }),
-    (experiment) => `Selected ${experiment.run_id}.`,
-  );
-}
-
 async function finishCurrentExperiment() {
   const current = currentExperiment();
   if (!current) {
     return;
   }
-  const confirmed = window.confirm(`End experiment ${current.run_id}? This action cannot be undone.`);
+  const confirmed = window.confirm(
+    "End the current experiment? New images will no longer be processed.",
+  );
   if (!confirmed) {
     return;
   }
-  await runExperimentAction(
+  const result = await runExperimentAction(
+    "end",
     () => fetchJson(`/api/experiments/${encodeURIComponent(current.run_id)}/finish`, {
       method: "POST",
       body: JSON.stringify({}),
     }),
-    (experiment) => `Ended ${experiment.run_id}.`,
+    (experiment) => experiment.status === "completed"
+      ? `Ended ${displayNameForExperiment(experiment)}.`
+      : `End requested for ${displayNameForExperiment(experiment)}. Waiting for Gsensor to finish saving results.`,
   );
+  const refreshed = currentExperiment();
+  if (result && refreshed?.status === "completed") {
+    setExperimentMessage(`Completed ${displayNameForExperiment(refreshed)}. Gsensor finalization is complete.`);
+  }
 }
 
 async function copyCameraPath() {
@@ -577,124 +739,13 @@ async function copyCameraPath() {
   setExperimentMessage("Camera save path copied.");
 }
 
-async function loadOperationMeta() {
-  const payload = await fetchJson("/api/operation/meta");
-  state.operationMeta = payload.sections || [];
-}
-
-function renderOperationControl(item) {
-  const control = document.createElement("div");
-  control.className = "operation-control";
-  const currentValue = state.operationState[item.key];
-
-  if (item.key === "experiment_active") {
-    return renderExperimentLifecycleControl();
-  }
-
-  if (item.kind === "list") {
-    const select = document.createElement("select");
-    select.disabled = state.actionInFlight;
-    (item.options || []).forEach((option) => {
-      const optionEl = document.createElement("option");
-      optionEl.value = option;
-      optionEl.textContent = option;
-      optionEl.selected = option === currentValue;
-      select.appendChild(optionEl);
-    });
-    select.addEventListener("change", async (event) => {
-      try {
-        state.actionInFlight = true;
-        select.disabled = true;
-        await updateOperationValue(item.key, event.target.value);
-      } finally {
-        state.actionInFlight = false;
-        await loadOperationState({ forceRender: true });
-      }
-    });
-    control.appendChild(select);
-    return control;
-  }
-
-  return control;
-}
-
-function renderExperimentLifecycleControl() {
-  const control = document.createElement("div");
-  control.className = "operation-control operation-control-actions";
-  const current = currentExperiment();
-  const canStart = current?.status === "created";
-  const canStop = current && !["created", "completed", "error"].includes(current.status);
-
-  const startButton = document.createElement("button");
-  startButton.className = "primary";
-  startButton.textContent = "Start experiment";
-  startButton.disabled = state.actionInFlight || !canStart;
-  startButton.addEventListener("click", async () => {
-    try {
-      state.actionInFlight = true;
-      startButton.disabled = true;
-      await startExperimentCommand();
-    } finally {
-      state.actionInFlight = false;
-      await loadOperationState({ forceRender: true });
-    }
-  });
-
-  const stopButton = document.createElement("button");
-  stopButton.className = "ghost";
-  stopButton.textContent = "Stop experiment";
-  stopButton.disabled = state.actionInFlight || !canStop;
-  stopButton.addEventListener("click", async () => {
-    try {
-      state.actionInFlight = true;
-      stopButton.disabled = true;
-      await stopExperimentCommand();
-    } finally {
-      state.actionInFlight = false;
-      await loadOperationState({ forceRender: true });
-    }
-  });
-
-  control.appendChild(startButton);
-  control.appendChild(stopButton);
-  return control;
-}
-
-function renderOperationSections() {
-  operationSections.innerHTML = "";
-  state.operationMeta.forEach((section) => {
-    const wrapper = document.createElement("section");
-    wrapper.className = "operation-section";
-
-    const title = document.createElement("h4");
-    title.className = "operation-section-title";
-    title.textContent = section.title;
-    wrapper.appendChild(title);
-
-    (section.items || []).forEach((item) => {
-      const row = operationItemTemplate.content.firstElementChild.cloneNode(true);
-      row.querySelector(".operation-label").textContent = item.label;
-      row.querySelector(".operation-key").textContent = item.key;
-      row.querySelector(".operation-control").replaceWith(renderOperationControl(item));
-      wrapper.appendChild(row);
-    });
-
-    operationSections.appendChild(wrapper);
-  });
-}
-
-async function loadOperationState({ forceRender = false } = {}) {
+async function loadOperationState({ updateRunConfiguration = true } = {}) {
   const payload = await fetchJson("/api/operation/state");
   state.target = payload.target;
-  const nextOperationState = payload.state || {};
-  const nextSignature = JSON.stringify(nextOperationState);
-  const shouldRender = forceRender || nextSignature !== state.operationStateSignature;
-  state.operationState = nextOperationState;
-  state.operationStateSignature = nextSignature;
-  derivedPreview.textContent = JSON.stringify(payload.preview, null, 2);
-  if (shouldRender) {
-    renderOperationSections();
+  if (updateRunConfiguration && !state.runConfigurationInFlight) {
+    applyRunConfigurationPayload(payload.run_configuration);
   }
+  derivedPreview.textContent = JSON.stringify(payload.preview, null, 2);
 }
 
 async function saveParams() {
@@ -740,19 +791,16 @@ async function resetParamsToDefaults() {
   }
 }
 
-async function updateOperationValue(key, value) {
-  await fetchJson("/api/operation/value", {
-    method: "POST",
-    body: JSON.stringify({ key, value }),
-  });
-}
-
 async function startExperimentCommand() {
   commandStatus.textContent = "saving parameters";
   commandStatus.className = "status idle";
   state.parameterActionInFlight = true;
+  state.experimentActionInFlight = true;
+  state.experimentActionName = "start";
   state.parameterError = null;
+  setExperimentMessage("");
   updateParameterDraftState();
+  renderExperiments();
   try {
     const payload = await fetchJson("/api/operation/experiment/start", {
       method: "POST",
@@ -763,36 +811,22 @@ async function startExperimentCommand() {
     commandResult.textContent = JSON.stringify(payload, null, 2);
     commandStatus.textContent = "started";
     commandStatus.className = "status success";
-    await loadExperiments({ selectedRunId: payload.experiment?.run_id || null });
+    await loadExperiments();
+    setExperimentMessage(`Started ${displayNameForExperiment(payload.experiment)}. Waiting for the first image.`);
+    return payload;
   } catch (error) {
     state.parameterError = error.message;
+    setExperimentMessage(error.message, { error: true });
     commandResult.textContent = error.message;
     commandStatus.textContent = "error";
     commandStatus.className = "status error";
     return null;
   } finally {
     state.parameterActionInFlight = false;
+    state.experimentActionInFlight = false;
+    state.experimentActionName = null;
     updateParameterDraftState();
-  }
-}
-
-async function stopExperimentCommand() {
-  commandStatus.textContent = "stopping experiment";
-  commandStatus.className = "status idle";
-  try {
-    const payload = await fetchJson("/api/operation/experiment/stop", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    commandResult.textContent = JSON.stringify(payload, null, 2);
-    commandStatus.textContent = "stopped";
-    commandStatus.className = "status success";
-    await loadExperiments({ selectedRunId: payload.experiment?.run_id || null });
-  } catch (error) {
-    commandResult.textContent = error.message;
-    commandStatus.textContent = "error";
-    commandStatus.className = "status error";
-    return null;
+    renderExperiments();
   }
 }
 
@@ -825,8 +859,8 @@ newExperimentLabel.addEventListener("keydown", async (event) => {
   }
 });
 
-selectExperimentButton.addEventListener("click", async () => {
-  await selectExperiment();
+startExperimentButton.addEventListener("click", async () => {
+  await startExperimentCommand();
 });
 
 endExperimentButton.addEventListener("click", async () => {
@@ -849,10 +883,21 @@ centralOverlayImage.addEventListener("error", () => {
   centralOverlayCaption.textContent = "Overlay is not available yet.";
 });
 
+runConfigurationControls.forEach((control) => {
+  control.addEventListener("change", () => {
+    saveRunConfiguration().catch((error) => {
+      state.runConfigurationError = error.message;
+      state.runConfigurationInFlight = false;
+      renderRunConfiguration();
+    });
+  });
+});
+
 async function bootstrap() {
+  await loadUiConfig();
+  await loadRunConfiguration();
   await loadParams();
-  await loadOperationMeta();
-  await loadOperationState({ forceRender: true });
+  await loadOperationState();
   try {
     await loadSystemStatus();
   } catch (error) {
@@ -867,7 +912,7 @@ bootstrap().catch((error) => {
 });
 
 setInterval(() => {
-  if (!state.actionInFlight && !document.hidden) {
+  if (!state.experimentActionInFlight && !document.hidden) {
     Promise.all([loadOperationState(), loadSystemStatus()]).catch((error) => {
       commandResult.textContent = error.message;
       commandStatus.textContent = "error";
@@ -879,8 +924,14 @@ setInterval(() => {
 }, 2000);
 
 window.addEventListener("focus", () => {
-  if (!state.actionInFlight) {
-    loadOperationState({ forceRender: true }).catch((error) => {
+  if (!state.parameterActionInFlight && state.parameterUnsavedCount === 0) {
+    loadParams().catch((error) => {
+      state.parameterError = error.message;
+      updateParameterDraftState();
+    });
+  }
+  if (!state.experimentActionInFlight) {
+    loadOperationState().catch((error) => {
       commandResult.textContent = error.message;
       commandStatus.textContent = "error";
       commandStatus.className = "status error";

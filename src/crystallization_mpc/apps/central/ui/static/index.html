@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-ui-mode="production">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260809-system-status1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-run-configuration">
   </head>
   <body>
     <div class="shell">
@@ -63,12 +63,82 @@
           <div>
             <p class="eyebrow">Operation</p>
             <h2>Operation Console</h2>
-            <p class="muted">Parameters stay in the left drawer. Operation controls are rendered from metadata on the main page.</p>
+            <p class="muted">Create, start, and end the current experiment from one control area. Parameters stay in the left drawer.</p>
           </div>
           <div class="hero-actions">
             <a class="ghost" href="http://localhost:3000" target="_blank" rel="noopener noreferrer">Grafana</a>
             <a class="ghost" href="http://localhost:8001" target="_blank" rel="noopener noreferrer">Gsensor UI</a>
           </div>
+        </section>
+
+        <section class="panel run-configuration-panel" aria-labelledby="run-configuration-heading">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Experiment Setup</p>
+              <h3 id="run-configuration-heading">Run Configuration</h3>
+            </div>
+            <span id="run-configuration-status" class="status idle">loading</span>
+          </div>
+
+          <div class="run-configuration-grid">
+            <label class="run-configuration-field" for="run-type">
+              <span>Run Type</span>
+              <select id="run-type">
+                <option value="experiment">Experiment</option>
+                <option value="simulation">Simulation</option>
+              </select>
+            </label>
+
+            <label class="run-configuration-field" for="controller-mode">
+              <span>Controller Mode</span>
+              <select id="controller-mode">
+                <option value="MPC">MPC</option>
+                <option value="PI">PI</option>
+              </select>
+            </label>
+
+            <label class="run-configuration-field" for="control-target">
+              <span>Control Target</span>
+              <select id="control-target">
+                <option value="sigma">Relative Supersaturation (sigma)</option>
+                <option value="G">Growth Rate (G)</option>
+              </select>
+            </label>
+
+            <label class="run-configuration-field" for="adaptation-enabled">
+              <span>Adaptation</span>
+              <select id="adaptation-enabled">
+                <option value="false">Disabled</option>
+                <option value="true">Enabled</option>
+              </select>
+            </label>
+
+            <label class="run-configuration-field" for="adaptation-mode">
+              <span>Adaptive Mode</span>
+              <select id="adaptation-mode">
+                <option value="E_A">E_A</option>
+                <option value="k_0">k_0</option>
+                <option value="n">n</option>
+                <option value="E_A_and_k_0">E_A and k_0</option>
+                <option value="E_A_and_n">E_A and n</option>
+                <option value="k_0_and_n">k_0 and n</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+
+            <label class="run-configuration-field" for="growth-rate-source">
+              <span>Growth-rate Source</span>
+              <select id="growth-rate-source">
+                <option value="live_gsensor">Live Gsensor</option>
+                <option value="simulated" data-development-source>Simulated</option>
+                <option value="presaved_images" data-development-source>Presaved Images</option>
+              </select>
+            </label>
+          </div>
+
+          <p id="run-configuration-message" class="run-configuration-message" role="status" aria-live="polite">
+            Changes are saved automatically and locked when the run starts.
+          </p>
         </section>
 
         <section class="panel experiment-panel" aria-labelledby="experiment-heading">
@@ -83,13 +153,13 @@
           <div class="experiment-layout">
             <div class="experiment-current">
               <dl class="experiment-facts">
-                <div>
-                  <dt>Run ID</dt>
-                  <dd id="experiment-run-id" class="monospace">No experiment selected</dd>
-                </div>
-                <div>
-                  <dt>Label</dt>
-                  <dd id="experiment-current-label">—</dd>
+                <div class="experiment-identity">
+                  <dt>Experiment</dt>
+                  <dd id="experiment-display-name">No experiment selected</dd>
+                  <dd class="experiment-run-reference">
+                    <span>Run ID</span>
+                    <code id="experiment-run-id" class="monospace">—</code>
+                  </dd>
                 </div>
                 <div>
                   <dt>Created</dt>
@@ -116,22 +186,15 @@
 
             <div class="experiment-controls">
               <label class="experiment-field" for="new-experiment-label">
-                <span>New Experiment Label <small>(optional)</small></span>
+                <span>Experiment Label <small>(optional)</small></span>
                 <input id="new-experiment-label" type="text" maxlength="120" placeholder="e.g. glycine batch 1">
               </label>
 
               <div class="experiment-action-row">
-                <button id="new-experiment" class="primary" type="button">New Experiment</button>
-                <button id="end-experiment" class="ghost" type="button" disabled>End Experiment</button>
+                <button id="new-experiment" class="primary" type="button">Create Experiment</button>
+                <button id="start-experiment" class="primary" type="button" disabled>Start Experiment</button>
+                <button id="end-experiment" class="danger" type="button" disabled>End Experiment</button>
               </div>
-
-              <label class="experiment-field" for="experiment-history">
-                <span>Existing Experiments</span>
-                <select id="experiment-history" disabled>
-                  <option value="">No experiments available</option>
-                </select>
-              </label>
-              <button id="select-experiment" class="ghost" type="button" disabled>Use Selected Experiment</button>
             </div>
           </div>
 
@@ -183,29 +246,38 @@
           </div>
         </section>
 
-        <section class="panel">
+        <section
+          class="panel development-tools-panel"
+          data-ui-visibility="development-only"
+          aria-labelledby="development-tools-heading"
+        >
           <div class="panel-head">
-            <h3>Operation Controls</h3>
+            <div>
+              <p class="eyebrow">Development Mode</p>
+              <h3 id="development-tools-heading">Development Tools</h3>
+            </div>
+            <span class="status idle">development only</span>
           </div>
-          <div id="operation-sections" class="operation-sections"></div>
+          <p class="muted development-tools-description">
+            Inspect derived parameter values and the latest lifecycle command response during development.
+          </p>
+          <div class="development-tools-grid">
+            <details class="panel diagnostic-panel">
+              <summary class="diagnostic-summary">
+                <span>Derived Preview</span>
+                <button id="refresh-preview" class="ghost" type="button">Refresh</button>
+              </summary>
+              <pre id="derived-preview" class="code-block"></pre>
+            </details>
+            <details class="panel diagnostic-panel">
+              <summary class="diagnostic-summary">
+                <span>Experiment Command Result</span>
+                <span id="command-status" class="status idle">idle</span>
+              </summary>
+              <pre id="command-result" class="code-block"></pre>
+            </details>
+          </div>
         </section>
-
-        <div class="grid diagnostics-grid">
-          <details class="panel diagnostic-panel">
-            <summary class="diagnostic-summary">
-              <span>Derived Preview</span>
-              <button id="refresh-preview" class="ghost" type="button">Refresh</button>
-            </summary>
-            <pre id="derived-preview" class="code-block"></pre>
-          </details>
-          <details class="panel diagnostic-panel">
-            <summary class="diagnostic-summary">
-              <span>Experiment Command Result</span>
-              <span id="command-status" class="status idle">idle</span>
-            </summary>
-            <pre id="command-result" class="code-block"></pre>
-          </details>
-        </div>
       </main>
     </div>
 
@@ -226,16 +298,6 @@
       </div>
     </template>
 
-    <template id="operation-item-template">
-      <div class="operation-item">
-        <div class="operation-copy">
-          <span class="operation-label"></span>
-          <span class="operation-key"></span>
-        </div>
-        <div class="operation-control"></div>
-      </div>
-    </template>
-
-    <script src="/static/app.js?v=20260809-system-status1"></script>
+    <script src="/static/app.js?v=20260820-run-configuration"></script>
   </body>
 </html>

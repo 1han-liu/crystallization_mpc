@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-ui-mode="production">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260809-3d-confirm1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-init-actions">
   </head>
   <body>
     <div class="shell">
@@ -25,12 +25,14 @@
                 <h2>Gsensor Values</h2>
               </div>
               <div class="actions">
-                <button id="reset-params" class="ghost">Reset</button>
-                <button id="apply-params" class="primary">Apply</button>
+                <button id="reset-params" class="ghost" type="button">Reset to Defaults</button>
+                <button id="save-params" class="primary" type="button">Save Parameters</button>
               </div>
             </div>
+            <div id="parameter-status" class="parameter-status loading" role="status" aria-live="polite">
+              <span id="parameter-status-text">Loading parameters…</span>
+            </div>
             <form id="params-form" class="param-form"></form>
-            <p id="param-save-status" class="save-status muted">idle</p>
           </div>
         </div>
       </aside>
@@ -45,7 +47,6 @@
           <div class="actions">
             <span id="status-text" class="status idle">idle</span>
             <span id="initialized-text" class="status idle">not initialized</span>
-            <button id="refresh-button" class="ghost">Refresh</button>
           </div>
         </section>
 
@@ -54,10 +55,6 @@
             <div>
               <p class="eyebrow">Initialization</p>
               <h2>Image Marking</h2>
-            </div>
-            <div class="actions">
-              <button id="undo-init" class="ghost" disabled>Undo</button>
-              <button id="reset-init" class="ghost" disabled>Reset</button>
             </div>
           </div>
 
@@ -151,7 +148,12 @@
                   <button id="reset-3d-view" class="ghost">Reset View</button>
                 </div>
                 <canvas id="three-d-canvas"></canvas>
-                <div class="three-d-snapshots" id="three-d-snapshots" hidden>
+                <div
+                  class="three-d-snapshots"
+                  id="three-d-snapshots"
+                  data-ui-visibility="development-only"
+                  hidden
+                >
                   <div class="three-d-snapshots-head">
                     <p class="eyebrow">Snapshots</p>
                     <button id="clear-3d-snapshots" class="ghost">Clear</button>
@@ -166,6 +168,10 @@
                 <p class="eyebrow">Step</p>
                 <h3 id="init-step-title">Not started</h3>
                 <p id="init-step-prompt" class="muted">Select an experiment and begin initialization.</p>
+                <div class="initialization-actions">
+                  <button id="undo-init" class="ghost" disabled>Undo</button>
+                  <button id="reset-init" class="ghost" disabled>Reset</button>
+                </div>
               </div>
 
               <div class="segmented" id="full-mode-controls">
@@ -185,12 +191,6 @@
                 <button id="confirm-3d-choice" class="primary" disabled>
                   Confirm selected candidate
                 </button>
-              </div>
-
-              <div class="dscgr-controls">
-                <p class="eyebrow">Offline Test</p>
-                <button id="run-dscgr" class="primary" disabled>Run DSCGR</button>
-                <p id="dscgr-status" class="save-status muted">idle</p>
               </div>
 
               <div class="point-list-wrap">
@@ -237,33 +237,60 @@
           </div>
         </section>
 
-        <section class="grid diagnostics-grid">
-          <details class="panel diagnostic-panel">
-            <summary class="diagnostic-summary">
-              <span>Active Parameters</span>
-            </summary>
-            <pre id="params-block" class="code-block"></pre>
-          </details>
+        <section
+          class="panel development-tools-panel"
+          data-ui-visibility="development-only"
+          aria-labelledby="development-tools-heading"
+        >
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Development Mode</p>
+              <h2 id="development-tools-heading">Development Tools</h2>
+            </div>
+            <span class="status idle">development only</span>
+          </div>
 
-          <details class="panel diagnostic-panel">
-            <summary class="diagnostic-summary">
-              <span>Last Message</span>
-            </summary>
-            <pre id="message-block" class="code-block"></pre>
-          </details>
+          <div class="development-tools-grid">
+            <div class="dscgr-controls">
+              <h3>DSCGR Offline Run</h3>
+              <p class="muted">Process the selected image directory as an offline diagnostic run.</p>
+              <button id="run-dscgr" class="primary" disabled>Run DSCGR</button>
+              <p id="dscgr-status" class="save-status muted">idle</p>
+            </div>
+
+            <details class="panel diagnostic-panel">
+              <summary class="diagnostic-summary">
+                <span>Active Parameters</span>
+              </summary>
+              <pre id="params-block" class="code-block"></pre>
+            </details>
+
+            <details class="panel diagnostic-panel">
+              <summary class="diagnostic-summary">
+                <span>Last Message</span>
+              </summary>
+              <pre id="message-block" class="code-block"></pre>
+            </details>
+          </div>
         </section>
       </main>
     </div>
 
     <template id="param-field-template">
-      <label class="field">
-        <span class="field-key"></span>
+      <div class="field">
+        <div class="field-heading">
+          <span class="field-key"></span>
+          <div class="field-actions">
+            <span class="field-modified" hidden>Modified</span>
+            <button class="field-reset ghost" type="button" hidden>Reset</button>
+          </div>
+        </div>
         <div class="field-badges"></div>
         <p class="field-description"></p>
         <textarea rows="1" class="field-input"></textarea>
-      </label>
+      </div>
     </template>
 
-    <script src="/static/app.js?v=20260809-3d-confirm1"></script>
+    <script src="/static/app.js?v=20260820-remove-refresh"></script>
   </body>
 </html>
