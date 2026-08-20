@@ -71,6 +71,8 @@ services:
     command: ["uvicorn", "crystallization_mpc.apps.controller.app:web_app", "--host", "0.0.0.0", "--port", "8002"]
     ports:
       - "8002:8002"
+    env_file:
+      - config/influxdb.env
     environment:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
@@ -78,11 +80,20 @@ services:
       - EXPERIMENT_ROOT=/data/experiments
       - CONTROLLER_ADAPTER=${CONTROLLER_ADAPTER:-}
       - CONTROLLER_OPCUA_ENABLED=${CONTROLLER_OPCUA_ENABLED:-false}
-      - CONTROLLER_OPCUA_ENDPOINT=${CONTROLLER_OPCUA_ENDPOINT:-}
-      - CONTROLLER_INFLUX_ENABLED=${CONTROLLER_INFLUX_ENABLED:-false}
+      - CONTROLLER_OPCUA_ENDPOINT=${CONTROLLER_OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:62552}
+      - CONTROLLER_OPCUA_NAMESPACE_INDEX=${CONTROLLER_OPCUA_NAMESPACE_INDEX:-2}
+      - CONTROLLER_OPCUA_T_J_SET_NODE=${CONTROLLER_OPCUA_T_J_SET_NODE:-iCache.Temperature1}
+      - CONTROLLER_OPCUA_T_NODE=${CONTROLLER_OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
+      - CONTROLLER_OPCUA_T_J_NODE=${CONTROLLER_OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
+      - CONTROLLER_OPCUA_C_NODE=${CONTROLLER_OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
+      - CONTROLLER_OPCUA_COUNT_MIDDLE_NODE=${CONTROLLER_OPCUA_COUNT_MIDDLE_NODE:-Local.iControl.Experiment1.Trends.count.Value}
+      - CONTROLLER_OPCUA_TIMEOUT_S=${CONTROLLER_OPCUA_TIMEOUT_S:-5.0}
+      - CONTROLLER_OPCUA_JACKET_MIN_K=${CONTROLLER_OPCUA_JACKET_MIN_K:-253.15}
+      - CONTROLLER_OPCUA_JACKET_MAX_K=${CONTROLLER_OPCUA_JACKET_MAX_K:-453.15}
+      - CONTROLLER_OPCUA_VERIFY_WRITE=${CONTROLLER_OPCUA_VERIFY_WRITE:-true}
+      - CONTROLLER_OPCUA_VERIFY_TOLERANCE_K=${CONTROLLER_OPCUA_VERIFY_TOLERANCE_K:-0.05}
+      - CONTROLLER_INFLUX_ENABLED=${CONTROLLER_INFLUX_ENABLED:-true}
       - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
-      - CONTROLLER_INFLUX_ORG=${CONTROLLER_INFLUX_ORG:-lab}
-      - CONTROLLER_INFLUX_BUCKET=${CONTROLLER_INFLUX_BUCKET:-process}
     volumes:
       - type: bind
         source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
@@ -91,6 +102,7 @@ services:
           create_host_path: true
     depends_on:
       - rabbitmq
+      - influxdb
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/api/status', timeout=2)"]

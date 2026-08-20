@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260820-run-configuration">
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-adaptation">
   </head>
   <body>
     <div class="shell">
@@ -106,7 +106,7 @@
             </label>
 
             <label class="run-configuration-field" for="adaptation-enabled">
-              <span>Adaptation</span>
+              <span>Adaptation at Start</span>
               <select id="adaptation-enabled">
                 <option value="false">Disabled</option>
                 <option value="true">Enabled</option>
@@ -235,6 +235,28 @@
                   <div><dt>Valid Samples</dt><dd id="controller-valid-count">0</dd></div>
                   <div><dt>Invalid Samples</dt><dd id="controller-invalid-count">0</dd></div>
                 </dl>
+                <div class="controller-runtime-action">
+                  <div class="controller-seed-summary">
+                    <span>Seed Additions</span>
+                    <strong id="controller-seed-count">0</strong>
+                    <span>Last recorded</span>
+                    <strong id="controller-last-seed-at">&mdash;</strong>
+                  </div>
+                  <button id="add-seed" class="primary" type="button" disabled>Add Seed</button>
+                  <p class="runtime-action-help">Use after seed has physically been added to record the event in Controller.</p>
+                  <p id="seed-action-message" class="runtime-action-message" role="status" aria-live="polite"></p>
+                </div>
+                <div class="controller-runtime-action">
+                  <div class="controller-seed-summary">
+                    <span>Adaptation</span>
+                    <strong id="controller-adaptation-status">inactive</strong>
+                    <span>Mode</span>
+                    <strong id="controller-adaptation-mode">E_A</strong>
+                  </div>
+                  <button id="toggle-adaptation" class="primary" type="button" disabled>Start Adaptation</button>
+                  <p class="runtime-action-help">Starts or stops the Controller algorithm's online parameter-adaptation hook.</p>
+                  <p id="adaptation-action-message" class="runtime-action-message" role="status" aria-live="polite"></p>
+                </div>
                 <p id="controller-live-error" class="service-error" hidden></p>
               </article>
             </div>
@@ -298,6 +320,6 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260820-run-configuration"></script>
+    <script src="/static/app.js?v=20260820-adaptation"></script>
   </body>
 </html>

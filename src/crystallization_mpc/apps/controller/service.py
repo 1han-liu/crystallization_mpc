@@ -18,14 +18,34 @@ from crystallization_mpc.apps.controller.adapter import (
     load_controller_adapter,
 )
 from crystallization_mpc.apps.controller.config import ControllerSettings
+from crystallization_mpc.apps.controller.process import (
+    NoOpProcessAdapter,
+    OpcUaNodeConfig,
+    OpcUaProcessAdapter,
+    OpcUaProcessConfig,
+    ProcessAdapter,
+    ProcessState,
+    ProcessWriteResult,
+)
+from crystallization_mpc.apps.controller.result import ControllerStepResult
+from crystallization_mpc.apps.controller.telemetry import (
+    ControllerMeasurementRecord,
+    write_controller_measurement,
+)
+from crystallization_mpc.infra.influxdb.client import InfluxSettings
+from crystallization_mpc.infra.influxdb.write import InfluxWriter
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
+    CONTROLLER_ADD_SEED_COMMAND,
+    CONTROLLER_ADAPTATION_SET_COMMAND,
     EXPERIMENT_START_COMMAND,
     EXPERIMENT_STOP_COMMAND,
     GROWTH_RATE_SAMPLE_MESSAGE,
     PARAMS_UPDATE_MESSAGE,
 )
 from crystallization_mpc.messaging.contracts import (
+    ControllerAddSeedPayload,
+    ControllerAdaptationPayload,
     ExperimentStartPayload,
     ExperimentStopPayload,
     GrowthRateSamplePayload,
@@ -57,9 +77,12 @@ class ControllerService:
         settings: ControllerSettings | None = None,
         adapter: ControllerAdapter | None = None,
         consumer_runner: ConsumerRunner = start_consumer,
+        measurement_writer: InfluxWriter | None = None,
+        process_adapter: ProcessAdapter | None = None,
     ) -> None:
         self.settings = settings or ControllerSettings.from_env()
         self.adapter = adapter or load_controller_adapter(self.settings.adapter_spec)
+        self.process_adapter = process_adapter or self._build_process_adapter()
         self._consumer_runner = consumer_runner
         self._consumer_thread: threading.Thread | None = None
         self._consumer_stop = threading.Event()
@@ -85,6 +108,46 @@ class ControllerService:
         self.duplicate_sample_count = 0
         self.missing_frame_count = 0
         self.adapter_error_count = 0
+        self.process_error_count = 0
+        self.last_process_error: str | None = None
+        self.last_process_state: dict[str, Any] | None = None
+        self.last_process_write: dict[str, Any] | None = None
+        self.last_control_output: dict[str, Any] | None = None
+        self.control_output_count = 0
+        self.invalid_control_output_count = 0
+        self.influx_write_success_count = 0
+        self.influx_write_failure_count = 0
+        self.last_influx_write_at: str | None = None
+        self.last_influx_error: str | None = None
+        self.influx_initialization_error: str | None = None
+        self.measurement_writer = measurement_writer
+        self._measurement_writer_closed = False
+        if self.measurement_writer is None and self.settings.influx_enabled:
+            try:
+                if not self.settings.influx_token:
+                    raise RuntimeError("INFLUX_TOKEN is required for Controller persistence.")
+                self.measurement_writer = InfluxWriter(
+                    InfluxSettings(
+                        url=self.settings.influx_url,
+                        token=self.settings.influx_token,
+                        org=self.settings.influx_org,
+                        bucket=self.settings.influx_bucket,
+                    )
+                )
+            except Exception as exc:
+                self.influx_initialization_error = str(exc)
+                self.last_influx_error = str(exc)
+                logger.warning("Could not initialize Controller InfluxDB writer: %s", exc)
+        self.seed_event_count = 0
+        self.duplicate_seed_event_count = 0
+        self.last_seed_event: dict[str, Any] | None = None
+        self._processed_seed_event_ids: set[str] = set()
+        self.adaptation_enabled = False
+        self.adaptation_mode = "E_A"
+        self.adaptation_event_count = 0
+        self.duplicate_adaptation_event_count = 0
+        self.last_adaptation_event: dict[str, Any] | None = None
+        self._processed_adaptation_event_ids: set[str] = set()
         self.recovery_status = "disabled"
         self.recovery_error: str | None = None
         self.state_path = (
@@ -95,6 +158,32 @@ class ControllerService:
         )
         if self.state_path is not None:
             self._restore_persisted_state()
+
+    def _build_process_adapter(self) -> ProcessAdapter:
+        if not self.settings.opcua_enabled:
+            return NoOpProcessAdapter()
+        if not self.settings.opcua_endpoint:
+            raise ValueError(
+                "CONTROLLER_OPCUA_ENDPOINT is required when OPC UA is enabled."
+            )
+        return OpcUaProcessAdapter(
+            OpcUaProcessConfig(
+                endpoint=self.settings.opcua_endpoint,
+                nodes=OpcUaNodeConfig(
+                    namespace_index=self.settings.opcua_namespace_index,
+                    T_j_set=self.settings.opcua_t_j_set_node,
+                    T=self.settings.opcua_t_node,
+                    T_j=self.settings.opcua_t_j_node,
+                    c=self.settings.opcua_c_node,
+                    count_middle=self.settings.opcua_count_middle_node,
+                ),
+                timeout_s=self.settings.opcua_timeout_s,
+                jacket_min_K=self.settings.opcua_jacket_min_K,
+                jacket_max_K=self.settings.opcua_jacket_max_K,
+                verify_write=self.settings.opcua_verify_write,
+                verify_tolerance_K=self.settings.opcua_verify_tolerance_K,
+            )
+        )
 
     def _state_document_locked(self) -> dict[str, Any]:
         adapter_state = self.adapter.export_state()
@@ -123,6 +212,32 @@ class ControllerService:
                 "duplicate": self.duplicate_sample_count,
                 "missing": self.missing_frame_count,
                 "adapter_error": self.adapter_error_count,
+                "process_error": self.process_error_count,
+            },
+            "control_output": {
+                "count": self.control_output_count,
+                "invalid_count": self.invalid_control_output_count,
+                "last": copy.deepcopy(self.last_control_output),
+                "influx_write_success": self.influx_write_success_count,
+                "influx_write_failure": self.influx_write_failure_count,
+                "last_influx_write_at": self.last_influx_write_at,
+                "last_influx_error": self.last_influx_error,
+            },
+            "seed_events": {
+                "count": self.seed_event_count,
+                "duplicate_count": self.duplicate_seed_event_count,
+                "last": copy.deepcopy(self.last_seed_event),
+                "processed_event_ids": sorted(self._processed_seed_event_ids),
+            },
+            "adaptation": {
+                "enabled": self.adaptation_enabled,
+                "mode": self.adaptation_mode,
+                "event_count": self.adaptation_event_count,
+                "duplicate_count": self.duplicate_adaptation_event_count,
+                "last_event": copy.deepcopy(self.last_adaptation_event),
+                "processed_event_ids": sorted(
+                    self._processed_adaptation_event_ids
+                ),
             },
             "adapter": {
                 "class": (
@@ -132,6 +247,11 @@ class ControllerService:
                 "state": copy.deepcopy(dict(adapter_state))
                 if adapter_state is not None
                 else None,
+            },
+            "process_io": {
+                "last_error": self.last_process_error,
+                "last_state": copy.deepcopy(self.last_process_state),
+                "last_write": copy.deepcopy(self.last_process_write),
             },
         }
 
@@ -182,6 +302,15 @@ class ControllerService:
             counts = document.get("counts") or {}
             if not isinstance(counts, dict):
                 raise ValueError("Controller recovery counts must be an object.")
+            seed_events = document.get("seed_events") or {}
+            if not isinstance(seed_events, dict):
+                raise ValueError("Controller recovery seed events must be an object.")
+            adaptation = document.get("adaptation") or {}
+            if not isinstance(adaptation, dict):
+                raise ValueError("Controller recovery adaptation must be an object.")
+            control_output = document.get("control_output") or {}
+            if not isinstance(control_output, dict):
+                raise ValueError("Controller recovery control output must be an object.")
 
             self.state = state
             self.parameters = copy.deepcopy(parameters)
@@ -210,6 +339,97 @@ class ControllerService:
             self.duplicate_sample_count = int(counts.get("duplicate", 0))
             self.missing_frame_count = int(counts.get("missing", 0))
             self.adapter_error_count = int(counts.get("adapter_error", 0))
+            self.process_error_count = int(counts.get("process_error", 0))
+            process_io = document.get("process_io") or {}
+            if not isinstance(process_io, dict):
+                raise ValueError("Controller recovery process_io must be an object.")
+            self.last_process_error = process_io.get("last_error")
+            self.last_process_state = copy.deepcopy(process_io.get("last_state"))
+            self.last_process_write = copy.deepcopy(process_io.get("last_write"))
+            self.control_output_count = int(control_output.get("count", 0))
+            self.invalid_control_output_count = int(
+                control_output.get("invalid_count", 0)
+            )
+            last_control_output = control_output.get("last")
+            if last_control_output is not None:
+                if not isinstance(last_control_output, dict):
+                    raise ValueError(
+                        "Controller last control output must be an object or null."
+                    )
+                result_document = last_control_output.get("result")
+                if not isinstance(result_document, Mapping):
+                    raise ValueError(
+                        "Controller last control output is missing its result object."
+                    )
+                ControllerStepResult.from_mapping(result_document)
+            self.last_control_output = copy.deepcopy(last_control_output)
+            self.influx_write_success_count = int(
+                control_output.get("influx_write_success", 0)
+            )
+            self.influx_write_failure_count = int(
+                control_output.get("influx_write_failure", 0)
+            )
+            self.last_influx_write_at = control_output.get("last_influx_write_at")
+            persisted_influx_error = control_output.get("last_influx_error")
+            if self.influx_initialization_error is None:
+                self.last_influx_error = persisted_influx_error
+            self.seed_event_count = int(seed_events.get("count", 0))
+            self.duplicate_seed_event_count = int(
+                seed_events.get("duplicate_count", 0)
+            )
+            last_seed_event = seed_events.get("last")
+            if last_seed_event is not None and not isinstance(last_seed_event, dict):
+                raise ValueError("Controller last seed event must be an object or null.")
+            self.last_seed_event = copy.deepcopy(last_seed_event)
+            processed_seed_event_ids = seed_events.get("processed_event_ids") or []
+            if not isinstance(processed_seed_event_ids, list) or not all(
+                isinstance(event_id, str) and event_id.strip()
+                for event_id in processed_seed_event_ids
+            ):
+                raise ValueError(
+                    "Controller processed seed event IDs must be a list of strings."
+                )
+            self._processed_seed_event_ids = set(processed_seed_event_ids)
+            adaptation_enabled = adaptation.get("enabled", False)
+            if not isinstance(adaptation_enabled, bool):
+                raise ValueError(
+                    "Controller recovery adaptation enabled must be a boolean."
+                )
+            self.adaptation_enabled = adaptation_enabled
+            self.adaptation_mode = str(adaptation.get("mode", "E_A"))
+            # Reuse the shared contract to validate both mode and strict bool.
+            ControllerAdaptationPayload(
+                run_id=str(self.current_run_id or "recovery"),
+                event_id="recovery-validation",
+                enabled=self.adaptation_enabled,
+                mode=self.adaptation_mode,
+                requested_at=str(document.get("updated_at") or "recovery"),
+            )
+            self.adaptation_event_count = int(adaptation.get("event_count", 0))
+            self.duplicate_adaptation_event_count = int(
+                adaptation.get("duplicate_count", 0)
+            )
+            last_adaptation_event = adaptation.get("last_event")
+            if last_adaptation_event is not None and not isinstance(
+                last_adaptation_event, dict
+            ):
+                raise ValueError(
+                    "Controller last adaptation event must be an object or null."
+                )
+            self.last_adaptation_event = copy.deepcopy(last_adaptation_event)
+            processed_adaptation_event_ids = (
+                adaptation.get("processed_event_ids") or []
+            )
+            if not isinstance(processed_adaptation_event_ids, list) or not all(
+                isinstance(event_id, str) and event_id.strip()
+                for event_id in processed_adaptation_event_ids
+            ):
+                raise ValueError(
+                    "Controller processed adaptation event IDs must be a list of strings."
+                )
+            self._processed_adaptation_event_ids = set(
+                processed_adaptation_event_ids
+            )
 
             if state == ControllerState.RUNNING:
                 if not self.current_run_id or self.parameter_version is None:
@@ -233,6 +453,13 @@ class ControllerService:
                     raise ValueError(
                         "The configured Controller adapter cannot restore a running experiment."
                     )
+                self.adapter.set_adaptation(
+                    self.adaptation_enabled,
+                    self.adaptation_mode,
+                    copy.deepcopy(self.last_adaptation_event),
+                )
+                if self.settings.opcua_enabled:
+                    self.process_adapter.connect()
             self.recovery_status = "restored"
             self.recovery_error = None
         except Exception as exc:
@@ -266,11 +493,24 @@ class ControllerService:
                 except Exception:
                     self.adapter_error_count += 1
                     logger.exception("Controller adapter failed during shutdown.")
+            try:
+                self.process_adapter.disconnect()
+            except Exception:
+                self.process_error_count += 1
+                logger.exception("Controller process adapter failed during shutdown.")
             self.consumer_status = "stopped"
             # A process shutdown is not an experiment.stop. Preserve the
             # logical RUNNING state so a replacement container can recover it.
             if self.state != ControllerState.RUNNING:
                 self._try_persist_state_locked()
+        if not self._measurement_writer_closed:
+            close_writer = getattr(self.measurement_writer, "close", None)
+            if callable(close_writer):
+                try:
+                    close_writer()
+                except Exception:
+                    logger.exception("Controller InfluxDB writer failed during shutdown.")
+            self._measurement_writer_closed = True
 
     def _consume_forever(self) -> None:
         while not self._consumer_stop.is_set():
@@ -348,6 +588,16 @@ class ControllerService:
                 raise ValueError("experiment.stop must come from Central.")
             return self._stop_experiment(payload)
 
+        if msg_type == "command" and name == CONTROLLER_ADD_SEED_COMMAND:
+            if source != "central":
+                raise ValueError("controller.add_seed must come from Central.")
+            return self._add_seed(payload)
+
+        if msg_type == "command" and name == CONTROLLER_ADAPTATION_SET_COMMAND:
+            if source != "central":
+                raise ValueError("controller.adaptation.set must come from Central.")
+            return self._set_adaptation(payload)
+
         if msg_type == "measurement" and name == GROWTH_RATE_SAMPLE_MESSAGE:
             if source != "gsensor":
                 raise ValueError("growth_rate.sample must come from Gsensor.")
@@ -405,12 +655,55 @@ class ControllerService:
             self.invalid_sample_count = 0
             self.duplicate_sample_count = 0
             self.missing_frame_count = 0
+            self.last_control_output = None
+            self.control_output_count = 0
+            self.invalid_control_output_count = 0
+            self.process_error_count = 0
+            self.last_process_error = None
+            self.last_process_state = None
+            self.last_process_write = None
+            self.influx_write_success_count = 0
+            self.influx_write_failure_count = 0
+            self.last_influx_write_at = None
+            self.last_influx_error = self.influx_initialization_error
+            self.seed_event_count = 0
+            self.duplicate_seed_event_count = 0
+            self.last_seed_event = None
+            self._processed_seed_event_ids.clear()
+            self.adaptation_enabled = command.adaptation_enabled
+            self.adaptation_mode = command.adaptation_mode
+            self.adaptation_event_count = 0
+            self.duplicate_adaptation_event_count = 0
+            self.last_adaptation_event = None
+            self._processed_adaptation_event_ids.clear()
 
             try:
                 self.adapter.configure(copy.deepcopy(self.parameters), command.run_id)
+                self.adapter.set_adaptation(
+                    self.adaptation_enabled,
+                    self.adaptation_mode,
+                    None,
+                )
+            except Exception as exc:
+                self.adapter_error_count += 1
+                self.state = ControllerState.ERROR
+                raise RuntimeError(f"Controller adapter configure failed: {exc}") from exc
+            if self.settings.opcua_enabled:
+                try:
+                    self.process_adapter.connect()
+                except Exception as exc:
+                    self.process_error_count += 1
+                    self.last_process_error = str(exc)
+                    self.process_adapter.disconnect()
+                    self.state = ControllerState.ERROR
+                    raise RuntimeError(
+                        f"Controller process connection failed: {exc}"
+                    ) from exc
+            try:
                 self.adapter.start()
             except Exception as exc:
                 self.adapter_error_count += 1
+                self.process_adapter.disconnect()
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter start failed: {exc}") from exc
             self.state = ControllerState.RUNNING
@@ -432,10 +725,108 @@ class ControllerService:
                 self.adapter_error_count += 1
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter stop failed: {exc}") from exc
+            finally:
+                self.process_adapter.disconnect()
             self.state = ControllerState.STOPPED
             self.stopped_at = command.stopped_at
 
         return {"accepted": True, "kind": "stop", "run_id": command.run_id}
+
+    def _add_seed(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        event = ControllerAddSeedPayload.from_mapping(payload)
+        with self._lock:
+            if self.current_run_id is None:
+                raise ValueError("Controller has no current experiment.")
+            if event.run_id != self.current_run_id:
+                raise ValueError(
+                    "controller.add_seed run_id does not match current experiment."
+                )
+            if event.event_id in self._processed_seed_event_ids:
+                self.duplicate_seed_event_count += 1
+                return {
+                    "accepted": True,
+                    "duplicate": True,
+                    "kind": "seed_event",
+                    "event_id": event.event_id,
+                }
+            if self.state != ControllerState.RUNNING:
+                raise ValueError("Controller is not running an experiment.")
+
+            event_document = event.to_dict()
+            try:
+                self.adapter.add_seed(copy.deepcopy(event_document))
+            except Exception as exc:
+                self.adapter_error_count += 1
+                self.state = ControllerState.ERROR
+                raise RuntimeError(
+                    f"Controller adapter Add Seed failed: {exc}"
+                ) from exc
+
+            self._processed_seed_event_ids.add(event.event_id)
+            self.seed_event_count += 1
+            self.last_seed_event = event_document
+
+        return {
+            "accepted": True,
+            "kind": "seed_event",
+            "event_id": event.event_id,
+            "adapter_called": True,
+        }
+
+    def _set_adaptation(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        event = ControllerAdaptationPayload.from_mapping(payload)
+        with self._lock:
+            if self.current_run_id is None:
+                raise ValueError("Controller has no current experiment.")
+            if event.run_id != self.current_run_id:
+                raise ValueError(
+                    "controller.adaptation.set run_id does not match current experiment."
+                )
+            if event.event_id in self._processed_adaptation_event_ids:
+                self.duplicate_adaptation_event_count += 1
+                return {
+                    "accepted": True,
+                    "duplicate": True,
+                    "kind": "adaptation",
+                    "event_id": event.event_id,
+                }
+            if self.state != ControllerState.RUNNING:
+                raise ValueError("Controller is not running an experiment.")
+
+            event_document = event.to_dict()
+            no_change = (
+                self.adaptation_enabled == event.enabled
+                and self.adaptation_mode == event.mode
+            )
+            if not no_change:
+                try:
+                    self.adapter.set_adaptation(
+                        event.enabled,
+                        event.mode,
+                        copy.deepcopy(event_document),
+                    )
+                except Exception as exc:
+                    self.adapter_error_count += 1
+                    self.state = ControllerState.ERROR
+                    raise RuntimeError(
+                        f"Controller adapter adaptation change failed: {exc}"
+                    ) from exc
+
+            self.adaptation_enabled = event.enabled
+            self.adaptation_mode = event.mode
+            self._processed_adaptation_event_ids.add(event.event_id)
+            self.adaptation_event_count += 1
+            self.last_adaptation_event = event_document
+
+        return {
+            "accepted": True,
+            "kind": "adaptation",
+            "event_id": event.event_id,
+            "enabled": event.enabled,
+            "mode": event.mode,
+            "no_change": no_change,
+            "adapter_called": not no_change,
+        }
 
     def _accept_sample(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         _positive_int(payload.get("frame_seq"), "frame_seq")
@@ -468,21 +859,189 @@ class ControllerService:
                     "adapter_called": False,
                 }
 
+            process_state: ProcessState | None = None
+            if self.settings.opcua_enabled:
+                try:
+                    process_state = self.process_adapter.read_state()
+                except Exception as exc:
+                    self.process_error_count += 1
+                    self.last_process_error = str(exc)
+                    self.state = ControllerState.ERROR
+                    self.process_adapter.disconnect()
+                    raise RuntimeError(f"Controller process read failed: {exc}") from exc
+                self.last_process_state = process_state.to_dict()
+                self.last_process_error = None
+
             try:
-                self.adapter.step(sample)
+                output = self.adapter.step(sample, process_state)
+                if output is not None and not isinstance(
+                    output, ControllerStepResult
+                ):
+                    raise TypeError(
+                        "Controller adapter step() must return "
+                        "ControllerStepResult or None."
+                    )
             except Exception as exc:
                 self.adapter_error_count += 1
                 self.state = ControllerState.ERROR
+                self.process_adapter.disconnect()
                 raise RuntimeError(f"Controller adapter step failed: {exc}") from exc
             self.valid_sample_count += 1
 
-        return {
+            output_status: dict[str, Any] | None = None
+            if output is not None:
+                process_write: ProcessWriteResult | None = None
+                process_write_attempted = bool(
+                    self.settings.opcua_enabled
+                    and output.valid
+                    and output.T_j_set is not None
+                )
+                process_write_error: str | None = None
+                if process_write_attempted:
+                    try:
+                        process_write = self.process_adapter.write_jacket_setpoint(
+                            output.T_j_set
+                        )
+                    except Exception as exc:
+                        self.process_error_count += 1
+                        self.last_process_error = str(exc)
+                        process_write_error = str(exc)
+                        self.state = ControllerState.ERROR
+                        self.process_adapter.disconnect()
+                    else:
+                        self.last_process_write = process_write.to_dict()
+                        self.last_process_error = None
+                output_status = self._record_control_output_locked(
+                    sample,
+                    output,
+                    process_state=process_state,
+                    process_write=process_write,
+                    process_write_attempted=process_write_attempted,
+                    process_write_error=process_write_error,
+                )
+                if process_write_error is not None:
+                    raise RuntimeError(
+                        f"Controller process write failed: {process_write_error}"
+                    )
+
+        result = {
             "accepted": True,
             "kind": "sample",
             "valid": True,
             "frame_seq": sample.frame_seq,
             "adapter_called": True,
         }
+        if output_status is not None:
+            result.update(output_status)
+        return result
+
+    def _record_control_output_locked(
+        self,
+        sample: GrowthRateSamplePayload,
+        output: ControllerStepResult,
+        *,
+        process_state: ProcessState | None = None,
+        process_write: ProcessWriteResult | None = None,
+        process_write_attempted: bool = False,
+        process_write_error: str | None = None,
+    ) -> dict[str, Any]:
+        computed_at = utc_ts()
+        written: bool | None = None
+        record = ControllerMeasurementRecord(
+            sample=sample,
+            result=output,
+            computed_at=computed_at,
+            adaptation_enabled=self.adaptation_enabled,
+            adaptation_mode=self.adaptation_mode,
+            process_state=process_state,
+            process_write=process_write,
+            process_write_attempted=process_write_attempted,
+            process_write_error=process_write_error,
+        )
+        if self.measurement_writer is not None:
+            try:
+                write_controller_measurement(self.measurement_writer, record)
+            except Exception as exc:
+                written = False
+                self.influx_write_failure_count += 1
+                self.last_influx_error = str(exc)
+                logger.warning(
+                    "Could not persist Controller measurement for %s frame %s: %s",
+                    sample.run_id,
+                    sample.frame_seq,
+                    exc,
+                )
+            else:
+                written = True
+                self.influx_write_success_count += 1
+                self.last_influx_write_at = computed_at
+                self.last_influx_error = None
+        elif self.settings.influx_enabled:
+            written = False
+            self.influx_write_failure_count += 1
+            if self.last_influx_error is None:
+                self.last_influx_error = (
+                    "Controller InfluxDB persistence is enabled but no writer is available."
+                )
+
+        self.control_output_count += 1
+        if not output.valid:
+            self.invalid_control_output_count += 1
+        self.last_control_output = {
+            "run_id": sample.run_id,
+            "frame_seq": sample.frame_seq,
+            "image_name": sample.image_name,
+            "sample_processed_at": sample.processed_at,
+            "computed_at": computed_at,
+            "result": output.to_dict(),
+            "process_state": (
+                process_state.to_dict() if process_state is not None else None
+            ),
+            "process_write_attempted": process_write_attempted,
+            "process_write": (
+                process_write.to_dict() if process_write is not None else None
+            ),
+            "process_write_error": process_write_error,
+            "influxdb_written": written,
+        }
+        return {
+            "output_generated": True,
+            "output_valid": output.valid,
+            "influxdb_written": written,
+            "process_write_attempted": process_write_attempted,
+            "process_write_succeeded": (
+                process_write is not None if process_write_attempted else None
+            ),
+        }
+
+    def _integration_status_locked(self) -> dict[str, dict[str, object]]:
+        integrations = self.settings.integration_status()
+        opcua = integrations["opcua"]
+        opcua.update(copy.deepcopy(dict(self.process_adapter.status())))
+        opcua.update(
+            {
+                "enabled": self.settings.opcua_enabled,
+                "configured": bool(self.settings.opcua_endpoint),
+                "service_error_count": self.process_error_count,
+                "service_last_error": self.last_process_error,
+            }
+        )
+        influx = integrations["influxdb"]
+        influx.update(
+            {
+                "writer_ready": self.measurement_writer is not None,
+                "connected": (
+                    self.influx_write_success_count > 0
+                    and self.last_influx_error is None
+                ),
+                "write_success_count": self.influx_write_success_count,
+                "write_failure_count": self.influx_write_failure_count,
+                "last_write_at": self.last_influx_write_at,
+                "last_error": self.last_influx_error,
+                "initialization_error": self.influx_initialization_error,
+            }
+        )
+        return integrations
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -506,6 +1065,22 @@ class ControllerService:
                     "invalid": self.invalid_sample_count,
                     "duplicate": self.duplicate_sample_count,
                     "missing": self.missing_frame_count,
+                },
+                "seed_events": {
+                    "count": self.seed_event_count,
+                    "duplicate_count": self.duplicate_seed_event_count,
+                    "last": copy.deepcopy(self.last_seed_event),
+                },
+                "adaptation": {
+                    "enabled": self.adaptation_enabled,
+                    "active": (
+                        self.state == ControllerState.RUNNING
+                        and self.adaptation_enabled
+                    ),
+                    "mode": self.adaptation_mode,
+                    "event_count": self.adaptation_event_count,
+                    "duplicate_count": self.duplicate_adaptation_event_count,
+                    "last_event": copy.deepcopy(self.last_adaptation_event),
                 },
                 "message_counts": {
                     "received": self.received_message_count,
@@ -534,9 +1109,13 @@ class ControllerService:
                     "error": self.recovery_error,
                     "state_file": str(self.state_path) if self.state_path else None,
                 },
-                "control_output_enabled": False,
-                "last_control_output": None,
-                "integrations": self.settings.integration_status(),
+                "control_output_enabled": self.last_control_output is not None,
+                "control_output_counts": {
+                    "generated": self.control_output_count,
+                    "invalid": self.invalid_control_output_count,
+                },
+                "last_control_output": copy.deepcopy(self.last_control_output),
+                "integrations": self._integration_status_locked(),
             }
 
 

@@ -10,6 +10,15 @@ from typing import Any, Mapping
 from crystallization_mpc.messaging.commands import EXPERIMENT_MODE_LIVE
 
 GROWTH_RATE_UNIT = "m/s"
+CONTROLLER_ADAPTATION_MODES = (
+    "E_A",
+    "k_0",
+    "n",
+    "E_A_and_k_0",
+    "E_A_and_n",
+    "k_0_and_n",
+    "all",
+)
 
 
 class GrowthRateStatus(str, Enum):
@@ -30,6 +39,8 @@ class ExperimentStartPayload:
     started_at: str
     image_directory: str = "images"
     mode: str = EXPERIMENT_MODE_LIVE
+    adaptation_enabled: bool = False
+    adaptation_mode: str = "E_A"
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run_id")
@@ -40,6 +51,11 @@ class ExperimentStartPayload:
             raise ValueError("image_directory must be 'images'.")
         if self.mode != EXPERIMENT_MODE_LIVE:
             raise ValueError(f"mode must be {EXPERIMENT_MODE_LIVE!r}.")
+        if not isinstance(self.adaptation_enabled, bool):
+            raise ValueError("adaptation_enabled must be a boolean.")
+        if self.adaptation_mode not in CONTROLLER_ADAPTATION_MODES:
+            allowed = ", ".join(CONTROLLER_ADAPTATION_MODES)
+            raise ValueError(f"adaptation_mode must be one of: {allowed}.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +64,8 @@ class ExperimentStartPayload:
             "started_at": self.started_at,
             "image_directory": self.image_directory,
             "mode": self.mode,
+            "adaptation_enabled": self.adaptation_enabled,
+            "adaptation_mode": self.adaptation_mode,
         }
 
     @classmethod
@@ -58,6 +76,12 @@ class ExperimentStartPayload:
             started_at=_mapping_text(payload, "started_at"),
             image_directory=str(payload.get("image_directory", "images")),
             mode=str(payload.get("mode", EXPERIMENT_MODE_LIVE)),
+            adaptation_enabled=(
+                _mapping_bool(payload, "adaptation_enabled")
+                if "adaptation_enabled" in payload
+                else False
+            ),
+            adaptation_mode=str(payload.get("adaptation_mode", "E_A")),
         )
 
 
@@ -85,6 +109,75 @@ class ExperimentStopPayload:
             run_id=_mapping_text(payload, "run_id"),
             stopped_at=_mapping_text(payload, "stopped_at"),
             reason=str(payload.get("reason", "central_stop")),
+        )
+
+
+@dataclass(frozen=True)
+class ControllerAddSeedPayload:
+    """One operator-confirmed seed-addition event for a running experiment."""
+
+    run_id: str
+    event_id: str
+    added_at: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.run_id, "run_id")
+        _required_text(self.event_id, "event_id")
+        _required_text(self.added_at, "added_at")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "event_id": self.event_id,
+            "added_at": self.added_at,
+        }
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "ControllerAddSeedPayload":
+        return cls(
+            run_id=_mapping_text(payload, "run_id"),
+            event_id=_mapping_text(payload, "event_id"),
+            added_at=_mapping_text(payload, "added_at"),
+        )
+
+
+@dataclass(frozen=True)
+class ControllerAdaptationPayload:
+    """One requested runtime change to Controller parameter adaptation."""
+
+    run_id: str
+    event_id: str
+    enabled: bool
+    mode: str
+    requested_at: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.run_id, "run_id")
+        _required_text(self.event_id, "event_id")
+        if not isinstance(self.enabled, bool):
+            raise ValueError("enabled must be a boolean.")
+        if self.mode not in CONTROLLER_ADAPTATION_MODES:
+            allowed = ", ".join(CONTROLLER_ADAPTATION_MODES)
+            raise ValueError(f"mode must be one of: {allowed}.")
+        _required_text(self.requested_at, "requested_at")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "event_id": self.event_id,
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "requested_at": self.requested_at,
+        }
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "ControllerAdaptationPayload":
+        return cls(
+            run_id=_mapping_text(payload, "run_id"),
+            event_id=_mapping_text(payload, "event_id"),
+            enabled=_mapping_bool(payload, "enabled"),
+            mode=_mapping_text(payload, "mode"),
+            requested_at=_mapping_text(payload, "requested_at"),
         )
 
 
@@ -272,7 +365,10 @@ def _optional_float(value: Any) -> float | None:
 
 
 __all__ = [
+    "CONTROLLER_ADAPTATION_MODES",
     "GROWTH_RATE_UNIT",
+    "ControllerAddSeedPayload",
+    "ControllerAdaptationPayload",
     "ExperimentStartPayload",
     "ExperimentStopPayload",
     "GrowthRateSamplePayload",

@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
@@ -51,6 +52,8 @@ from crystallization_mpc.infra.rabbitmq.publisher import publish
 from crystallization_mpc.infra.rabbitmq.topology import declare_exchange, declare_queue
 from crystallization_mpc.messaging.idgen import next_seq
 from crystallization_mpc.messaging.commands import (
+    CONTROLLER_ADD_SEED_COMMAND,
+    CONTROLLER_ADAPTATION_SET_COMMAND,
     EXPERIMENT_MODE_LIVE,
     EXPERIMENT_SELECT_COMMAND,
     EXPERIMENT_START_COMMAND,
@@ -60,6 +63,8 @@ from crystallization_mpc.messaging.commands import (
     PARAMS_UPDATE_MESSAGE,
 )
 from crystallization_mpc.messaging.contracts import (
+    ControllerAddSeedPayload,
+    ControllerAdaptationPayload,
     ExperimentStartPayload,
     ExperimentStopPayload,
     GrowthRateStatus,
@@ -122,6 +127,12 @@ class OperationValueUpdate(BaseModel):
 
 class ExperimentCreateRequest(BaseModel):
     label: str | None = Field(default=None, max_length=120)
+
+
+class AdaptationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool
 
 
 class CentralApp:
@@ -234,6 +245,8 @@ class CentralApp:
         experiment: Dict[str, Any],
         *,
         dst: str,
+        adaptation_enabled: bool = False,
+        adaptation_mode: str = "E_A",
         seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         payload = ExperimentStartPayload(
@@ -242,6 +255,8 @@ class CentralApp:
             started_at=str(experiment["started_at"]),
             image_directory=str(experiment.get("image_directory", "images")),
             mode=EXPERIMENT_MODE_LIVE,
+            adaptation_enabled=adaptation_enabled,
+            adaptation_mode=adaptation_mode,
         )
         return build_envelope(
             src=ROLE,
@@ -255,11 +270,20 @@ class CentralApp:
     def publish_experiment_start_command(
         self,
         experiment: Dict[str, Any],
+        *,
+        adaptation_enabled: bool = False,
+        adaptation_mode: str = "E_A",
     ) -> Dict[str, Dict[str, Any]]:
         seq = next_seq()
         messages: Dict[str, Dict[str, Any]] = {}
         for dst in ("gsensor", "controller"):
-            env = self.build_experiment_start_command(experiment, dst=dst, seq=seq)
+            env = self.build_experiment_start_command(
+                experiment,
+                dst=dst,
+                adaptation_enabled=adaptation_enabled,
+                adaptation_mode=adaptation_mode,
+                seq=seq,
+            )
             self._publish_with_reconnect(route(ROLE, dst), env, persistent=True)
             messages[dst] = env
         return messages
@@ -307,6 +331,96 @@ class CentralApp:
             self._publish_with_reconnect(route(ROLE, dst), env, persistent=True)
             messages[dst] = env
         return messages
+
+    def build_controller_add_seed_command(
+        self,
+        run_id: str,
+        *,
+        event_id: str,
+        added_at: str,
+        seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = ControllerAddSeedPayload(
+            run_id=run_id,
+            event_id=event_id,
+            added_at=added_at,
+        )
+        return build_envelope(
+            src=ROLE,
+            dst="controller",
+            msg_type="command",
+            name=CONTROLLER_ADD_SEED_COMMAND,
+            seq=next_seq() if seq is None else seq,
+            payload=payload.to_dict(),
+        )
+
+    def publish_controller_add_seed_command(
+        self,
+        run_id: str,
+        *,
+        event_id: str | None = None,
+        added_at: str | None = None,
+    ) -> Dict[str, Any]:
+        env = self.build_controller_add_seed_command(
+            run_id,
+            event_id=event_id or uuid4().hex,
+            added_at=added_at or utc_ts(),
+        )
+        self._publish_with_reconnect(
+            route(ROLE, "controller"),
+            env,
+            persistent=True,
+        )
+        return env
+
+    def build_controller_adaptation_command(
+        self,
+        run_id: str,
+        *,
+        event_id: str,
+        enabled: bool,
+        mode: str,
+        requested_at: str,
+        seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = ControllerAdaptationPayload(
+            run_id=run_id,
+            event_id=event_id,
+            enabled=enabled,
+            mode=mode,
+            requested_at=requested_at,
+        )
+        return build_envelope(
+            src=ROLE,
+            dst="controller",
+            msg_type="command",
+            name=CONTROLLER_ADAPTATION_SET_COMMAND,
+            seq=next_seq() if seq is None else seq,
+            payload=payload.to_dict(),
+        )
+
+    def publish_controller_adaptation_command(
+        self,
+        run_id: str,
+        *,
+        enabled: bool,
+        mode: str,
+        event_id: str | None = None,
+        requested_at: str | None = None,
+    ) -> Dict[str, Any]:
+        env = self.build_controller_adaptation_command(
+            run_id,
+            event_id=event_id or uuid4().hex,
+            enabled=enabled,
+            mode=mode,
+            requested_at=requested_at or utc_ts(),
+        )
+        self._publish_with_reconnect(
+            route(ROLE, "controller"),
+            env,
+            persistent=True,
+        )
+        return env
 
     def build_experiment_select_command(
         self,
@@ -916,8 +1030,9 @@ class CentralService:
         }
 
     def create_experiment(self, *, label: str | None = None) -> Dict[str, Any]:
+        """Prepare a new run without starting either experiment service."""
+
         self._require_experiment_switch_allowed()
-        self.reset_params_to_defaults()
         experiment = self.experiments.create(label=label)
         command = self.publisher.publish_experiment_select_command(
             experiment["run_id"],
@@ -935,13 +1050,16 @@ class CentralService:
         return {**experiment, "selection_command": command}
 
     def _require_experiment_switch_allowed(self, run_id: str | None = None) -> None:
-        if not bool(self.operation_state.get("experiment_active", False)):
-            return
         current_run_id = self.experiments.current_run_id()
+        if current_run_id is None:
+            return
         if run_id is not None and run_id == current_run_id:
             return
+        current = self.experiments.registry.get(current_run_id)
+        if current.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+            return
         raise InvalidExperimentStateError(
-            "Stop the current experiment before creating or switching experiments."
+            "End the current experiment before creating or switching experiments."
         )
 
     def start_experiment(self, params: ParamsUpdate | None = None) -> Dict[str, Any]:
@@ -962,19 +1080,40 @@ class CentralService:
                 allow_locked=manifest.status == ExperimentStatus.STARTING,
             )
         params_snapshot = self.preview_publish_payload()
+        if (
+            manifest.status == ExperimentStatus.STARTING
+            and manifest.parameter_version != int(params_snapshot["version"])
+        ):
+            raise InvalidExperimentStateError(
+                "The prepared experiment parameter version no longer matches the "
+                "saved parameter draft. End this experiment and create a new one."
+            )
         experiment = self.experiments.start(
             run_id,
             params_snapshot=params_snapshot,
             parameter_version=int(params_snapshot["version"]),
         )
-        parameter_messages = self.publisher.publish_params(
-            params_snapshot["shared"],
-            params_snapshot["gsensor"],
-            params_snapshot["controller"],
-            int(params_snapshot["version"]),
-        )
-        commands = self.publisher.publish_experiment_start_command(experiment)
+        # STARTING is intentionally persisted before RabbitMQ delivery. If a
+        # publish is interrupted, the immutable snapshot can be retried while
+        # configuration changes and experiment switching remain locked.
         self.operation_state["experiment_active"] = True
+        try:
+            parameter_messages = self.publisher.publish_params(
+                params_snapshot["shared"],
+                params_snapshot["gsensor"],
+                params_snapshot["controller"],
+                int(params_snapshot["version"]),
+            )
+            commands = self.publisher.publish_experiment_start_command(
+                experiment,
+                adaptation_enabled=self.run_configuration.adaptation_enabled,
+                adaptation_mode=self.run_configuration.adaptation_mode,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "The experiment snapshot was saved, but service startup delivery did "
+                "not complete. Keep this experiment selected and retry Start."
+            ) from exc
         return {
             "triggered": True,
             "key": "experiment_active",
@@ -993,22 +1132,108 @@ class CentralService:
             experiment = self.experiments.get(run_id)
         elif manifest.status == ExperimentStatus.CREATED:
             experiment = self.experiments.finish(run_id)
-        elif manifest.status == ExperimentStatus.STOPPING:
-            experiment = self.experiments.get(run_id)
         else:
             if run_id != current_run_id:
                 raise InvalidExperimentStateError(
                     "Only the current experiment can be ended while it is active."
                 )
-            self.publisher.publish_experiment_stop_command(
-                run_id,
-                reason="central_end_experiment",
+            retrying = manifest.status == ExperimentStatus.STOPPING
+            experiment = (
+                self.experiments.get(run_id)
+                if retrying
+                else self.experiments.request_stop(run_id)
             )
-            experiment = self.experiments.request_stop(run_id)
+            # Persist STOPPING before delivery. A broker interruption can then
+            # be recovered by pressing Retry End for this same run.
+            self.operation_state["experiment_active"] = False
+            try:
+                self.publisher.publish_experiment_stop_command(
+                    run_id,
+                    reason=(
+                        "central_retry_end_experiment"
+                        if retrying
+                        else "central_end_experiment"
+                    ),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "The experiment is marked as stopping, but service stop delivery "
+                    "did not complete. Keep this experiment selected and retry End."
+                ) from exc
 
         if run_id == current_run_id:
             self.operation_state["experiment_active"] = False
         return experiment
+
+    def add_seed(self) -> Dict[str, Any]:
+        """Record one operator-confirmed seed addition in the live Controller."""
+
+        run_id, _controller = self._require_running_controller("Add Seed")
+        command = self.publisher.publish_controller_add_seed_command(run_id)
+        return {
+            "requested": True,
+            "event": dict(command["payload"]),
+            "command": command,
+        }
+
+    def set_adaptation(self, enabled: bool) -> Dict[str, Any]:
+        """Start or stop Controller parameter adaptation for the current run."""
+
+        run_id, controller = self._require_running_controller("Adaptation")
+        current_enabled = bool(controller.get("adaptation", {}).get("enabled", False))
+        if current_enabled == enabled:
+            return {
+                "requested": False,
+                "unchanged": True,
+                "adaptation": dict(controller.get("adaptation", {})),
+            }
+
+        command = self.publisher.publish_controller_adaptation_command(
+            run_id,
+            enabled=enabled,
+            mode=self.run_configuration.adaptation_mode,
+        )
+        return {
+            "requested": True,
+            "event": dict(command["payload"]),
+            "command": command,
+        }
+
+    def _require_running_controller(
+        self,
+        action_label: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        run_id = self.experiments.current_run_id()
+        if run_id is None:
+            raise InvalidExperimentStateError(
+                f"Create and start an experiment before using {action_label}."
+            )
+        manifest = self.experiments.registry.get(run_id)
+        active_statuses = {
+            ExperimentStatus.STARTING,
+            ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
+            ExperimentStatus.INITIALIZING,
+            ExperimentStatus.MEASURING,
+        }
+        if manifest.status not in active_statuses:
+            raise InvalidExperimentStateError(
+                f"{action_label} is available only while an experiment is running."
+            )
+
+        controller = self.controller_status()
+        if not controller.get("available"):
+            raise RuntimeError(
+                f"Controller is unavailable; {action_label} was not sent."
+            )
+        if controller.get("status") != "running":
+            raise InvalidExperimentStateError(
+                f"Controller is not ready for {action_label}."
+            )
+        if controller.get("current_run_id") != run_id:
+            raise InvalidExperimentStateError(
+                "Controller run_id does not match the current Central experiment."
+            )
+        return run_id, controller
 
 
 def _retain_last_gsensor_frame(
@@ -1201,6 +1426,22 @@ def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
 def start_experiment(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
     try:
         return service.start_experiment(payload)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/operation/controller/add-seed")
+def add_seed() -> Dict[str, Any]:
+    try:
+        return service.add_seed()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/operation/controller/adaptation")
+def set_adaptation(payload: AdaptationUpdate) -> Dict[str, Any]:
+    try:
+        return service.set_adaptation(payload.enabled)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 

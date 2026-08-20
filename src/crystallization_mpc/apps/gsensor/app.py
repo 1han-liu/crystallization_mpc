@@ -662,6 +662,7 @@ class GsensorService:
     def start_experiment(self, message: Dict[str, Any]) -> None:
         self._validate_central_lifecycle_message(message)
         payload = ExperimentStartPayload.from_mapping(message.get("payload", {}))
+        duplicate_status: GrowthRateStatus | None = None
         with self._lock:
             selection = self.experiments.require_current()
             if payload.run_id != selection["run_id"]:
@@ -670,50 +671,95 @@ class GsensorService:
                 raise ValueError(
                     "experiment.start image_directory does not match the selected experiment."
                 )
-            self.initialized = False
-            self.initialization_status = "not_initialized"
-            self.initialized_at = None
-            self.initialization = GsensorInitializationManager()
-            self.baseline = None
-            self.uv_struct_list = None
-            self.kernel = None
-            self.growth_rate_processor = None
-            self.last_growth_rate_result = None
-            self.last_processing_error = None
-            self.latest_overlay_path = None
-            self.final_overlay_path = None
-            self.processed_image_files.clear()
-            self.processed_image_records.clear()
-            self.last_detected_image = None
-            self.file_modified_at = None
-            self.detected_at = None
-            self.pending_image_count = 0
-            self.measurement_step_count = 0
-            self.last_measurement_step_at = None
-            self.experiment_started_at = payload.started_at
-            self.experiment_parameter_version = payload.parameter_version
-            self.experiment_params = self.current_params()
-            self.experiment_lifecycle_status = (
-                GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE.value
-            )
-            self.experiment_lifecycle_error = None
-            self.last_lifecycle_message = message
-            self.recovery_status = "not_needed"
-            self.recovery_error = None
-            self._persist_processing_state_locked()
+            active_statuses = {
+                GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE,
+                GrowthRateStatus.INITIALIZING,
+                GrowthRateStatus.BASELINE_READY,
+                GrowthRateStatus.MEASURING,
+            }
+            current_status = self.experiment_lifecycle_status
+            if (
+                self.experiment_started_at == payload.started_at
+                and self.experiment_parameter_version == payload.parameter_version
+                and current_status in {status.value for status in active_statuses}
+            ):
+                # RabbitMQ delivery can be retried after Central has persisted
+                # STARTING. Treat the same command as idempotent so an active
+                # initialization or measurement is never reset.
+                self.last_lifecycle_message = message
+                duplicate_status = GrowthRateStatus(current_status)
+            if duplicate_status is None:
+                self.initialized = False
+                self.initialization_status = "not_initialized"
+                self.initialized_at = None
+                self.initialization = GsensorInitializationManager()
+                self.baseline = None
+                self.uv_struct_list = None
+                self.kernel = None
+                self.growth_rate_processor = None
+                self.last_growth_rate_result = None
+                self.last_processing_error = None
+                self.latest_overlay_path = None
+                self.final_overlay_path = None
+                self.processed_image_files.clear()
+                self.processed_image_records.clear()
+                self.last_detected_image = None
+                self.file_modified_at = None
+                self.detected_at = None
+                self.pending_image_count = 0
+                self.measurement_step_count = 0
+                self.last_measurement_step_at = None
+                self.experiment_started_at = payload.started_at
+                self.experiment_parameter_version = payload.parameter_version
+                self.experiment_params = self.current_params()
+                self.experiment_lifecycle_status = (
+                    GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE.value
+                )
+                self.experiment_lifecycle_error = None
+                self.last_lifecycle_message = message
+                self.recovery_status = "not_needed"
+                self.recovery_error = None
+                self._persist_processing_state_locked()
+        if duplicate_status is not None:
+            self._publish_growth_rate_status(duplicate_status)
+            return
         self._publish_growth_rate_status(GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE)
         self.start_image_scanning()
 
     def stop_experiment(self, message: Dict[str, Any]) -> None:
         self._validate_central_lifecycle_message(message)
         payload = ExperimentStopPayload.from_mapping(message.get("payload", {}))
+        duplicate_status: GrowthRateStatus | None = None
         with self._lock:
             selection = self.experiments.require_current()
             if payload.run_id != selection["run_id"]:
                 raise ValueError("experiment.stop run_id does not match the selected experiment.")
-            self.experiment_lifecycle_status = GrowthRateStatus.STOPPING.value
-            self.experiment_lifecycle_error = None
-            self.last_lifecycle_message = message
+            current_status = self.experiment_lifecycle_status
+            if current_status in {
+                GrowthRateStatus.STOPPED.value,
+                GrowthRateStatus.COMPLETED.value,
+            }:
+                duplicate_status = GrowthRateStatus(current_status)
+                self.last_lifecycle_message = message
+            else:
+                self.experiment_lifecycle_status = GrowthRateStatus.STOPPING.value
+                self.experiment_lifecycle_error = None
+                self.last_lifecycle_message = message
+        if duplicate_status == GrowthRateStatus.COMPLETED:
+            self._publish_growth_rate_status(
+                GrowthRateStatus.COMPLETED,
+                message_name=GROWTH_RATE_COMPLETED_MESSAGE,
+            )
+            return
+        if duplicate_status == GrowthRateStatus.STOPPED:
+            with self._lock:
+                self.experiment_lifecycle_status = GrowthRateStatus.COMPLETED.value
+                self._persist_processing_state_locked()
+            self._publish_growth_rate_status(
+                GrowthRateStatus.COMPLETED,
+                message_name=GROWTH_RATE_COMPLETED_MESSAGE,
+            )
+            return
         self.stop_image_scanning()
         with self._lock:
             processor = self.growth_rate_processor
@@ -727,6 +773,9 @@ class GsensorService:
             self.experiment_lifecycle_status = GrowthRateStatus.STOPPED.value
             self._persist_processing_state_locked()
         self._publish_growth_rate_status(GrowthRateStatus.STOPPED)
+        with self._lock:
+            self.experiment_lifecycle_status = GrowthRateStatus.COMPLETED.value
+            self._persist_processing_state_locked()
         self._publish_growth_rate_status(
             GrowthRateStatus.COMPLETED,
             message_name=GROWTH_RATE_COMPLETED_MESSAGE,

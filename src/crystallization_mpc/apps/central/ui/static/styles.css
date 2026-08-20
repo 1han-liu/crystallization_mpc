@@ -754,6 +754,56 @@ textarea:disabled {
   overflow-wrap: anywhere;
 }
 
+.controller-runtime-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.controller-seed-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.controller-seed-summary span,
+.runtime-action-help,
+.runtime-action-message {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.controller-seed-summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.84rem;
+}
+
+.controller-runtime-action button {
+  justify-content: center;
+}
+
+.runtime-action-help,
+.runtime-action-message {
+  grid-column: 1 / -1;
+  margin: 0;
+  line-height: 1.35;
+}
+
+.runtime-action-message {
+  min-height: 1.1em;
+}
+
+.runtime-action-message.error {
+  color: #8a1c1c;
+}
+
 .central-overlay-preview {
   margin: 0;
   display: grid;
@@ -794,5 +844,13 @@ textarea:disabled {
   .service-status-grid,
   .service-facts {
     grid-template-columns: 1fr;
+  }
+
+  .controller-runtime-action {
+    grid-template-columns: 1fr;
+  }
+
+  .controller-runtime-action button {
+    width: 100%;
   }
 }
