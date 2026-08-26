@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,31 @@ def test_operation_contract_preserves_matlab_options_and_explicit_safe_defaults(
     assert contract["runtime_value_source"] == (
         "parameters base workspace via OperationsTab evalin"
     )
+
+
+@pytest.mark.parametrize("source_name", ["parameters.m", "parameters_G.m"])
+def test_every_matlab_parameter_assignment_is_classified(
+    manifest: dict, source_name: str
+) -> None:
+    reference_root = Path(manifest["baseline"]["reference_worktree"])
+    source_path = reference_root / "source_codes" / source_name
+    if not source_path.is_file():
+        pytest.skip("Frozen MATLAB reference worktree is not present on this machine.")
+    assignments = set()
+    for line in source_path.read_text(encoding="utf-8").splitlines():
+        code = line.split("%", 1)[0].strip()
+        match = re.match(r"^([A-Za-z]\w*(?:\.[A-Za-z]\w*)?)\s*=\s*(?!=)", code)
+        if match:
+            assignments.add(match.group(1))
+
+    classified = {
+        item["matlab"]
+        for item in manifest["parameters"]
+        if item["source"] == source_name
+    }
+    if source_name == "parameters.m":
+        classified.update(manifest["operation_contract"]["action_fields"])
+    assert classified == assignments
 
 
 def test_manifest_has_unique_matlab_and_python_parameter_keys(manifest: dict) -> None:

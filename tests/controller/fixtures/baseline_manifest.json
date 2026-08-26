@@ -145,6 +145,16 @@
       "adaptation_mode": "E_A",
       "growth_rate_source": "live_gsensor"
     },
+    "action_fields": [
+      "controller_active",
+      "controller_refresh_request",
+      "add_seed_request",
+      "adaptive",
+      "G_active",
+      "G_refresh_request",
+      "inline_display",
+      "pop_up_and_save_variables_refresh_request"
+    ],
     "action_owner": "platform"
   },
   "runtime": {
@@ -211,6 +221,7 @@
     {"matlab": "r_reactor", "python": "r_reactor", "type": "float", "unit": "m", "default": 0.04, "source": "parameters.m", "owner": "shared"},
     {"matlab": "rho_solvent", "python": "rho_solvent", "type": "float", "unit": "kg/m^3", "default": 998.0, "source": "parameters.m", "owner": "shared"},
     {"matlab": "rho_solute", "python": "rho_solute", "type": "float", "unit": "kg/m^3", "default": 1160.7, "source": "parameters.m", "owner": "shared"},
+    {"matlab": "params.rho_solute", "python": "params.rho_solute", "type": "derived", "unit": "kg/m^3", "formula": "rho_solute", "source": "parameters.m", "owner": "shared"},
     {"matlab": "m_solvent", "python": "m_solvent", "type": "float", "unit": "kg", "default": 0.3, "source": "parameters.m", "owner": "shared"},
     {"matlab": "area_1", "python": "params.area_1", "type": "derived", "unit": "m^2", "formula": "2*m_solvent/(rho_solvent*r_reactor)", "source": "parameters.m", "owner": "shared"},
     {"matlab": "area_2", "python": "params.area_2", "type": "derived", "unit": "m^2", "formula": "pi*r_reactor^2", "source": "parameters.m", "owner": "shared"},
