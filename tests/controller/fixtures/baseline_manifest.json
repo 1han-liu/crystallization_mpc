@@ -9,6 +9,144 @@
     "required_functions": ["extendedKalmanFilter", "fmincon", "ode45"],
     "excluded_function": "opcua"
   },
+  "traceability": {
+    "source_groups": {
+      "convert": [
+        "source_codes/calc_mode.m",
+        "source_codes/parameters_on_target_change.m",
+        "source_codes/subroutines_controller/control/adapt_growth_parameters.m",
+        "source_codes/subroutines_controller/control/add_to_int_X_dt.m",
+        "source_codes/subroutines_controller/control/assign_list.m",
+        "source_codes/subroutines_controller/control/calc_G.m",
+        "source_codes/subroutines_controller/control/calc_K_I_target.m",
+        "source_codes/subroutines_controller/control/calc_K_P_target.m",
+        "source_codes/subroutines_controller/control/calc_Q.m",
+        "source_codes/subroutines_controller/control/calc_R.m",
+        "source_codes/subroutines_controller/control/calc_T_j.m",
+        "source_codes/subroutines_controller/control/calc_T_j_set.m",
+        "source_codes/subroutines_controller/control/calc_T_j_set_.m",
+        "source_codes/subroutines_controller/control/calc_T_with_zero_dT_dt.m",
+        "source_codes/subroutines_controller/control/calc_c_meta.m",
+        "source_codes/subroutines_controller/control/calc_c_sat.m",
+        "source_codes/subroutines_controller/control/calc_dT_dt.m",
+        "source_codes/subroutines_controller/control/calc_dT_dt_model.m",
+        "source_codes/subroutines_controller/control/calc_dT_dt_set.m",
+        "source_codes/subroutines_controller/control/calc_dT_j_dt.m",
+        "source_codes/subroutines_controller/control/calc_dc_dt.m",
+        "source_codes/subroutines_controller/control/calc_dc_sat_dT.m",
+        "source_codes/subroutines_controller/control/calc_e_dT_dt.m",
+        "source_codes/subroutines_controller/control/calc_e_target.m",
+        "source_codes/subroutines_controller/control/calc_relative_sigma.m",
+        "source_codes/subroutines_controller/control/calc_sigma.m",
+        "source_codes/subroutines_controller/control/calc_t_lag_perc.m",
+        "source_codes/subroutines_controller/control/calc_t_lag_perc2.m",
+        "source_codes/subroutines_controller/control/clip.m",
+        "source_codes/subroutines_controller/control/construct_EKF.m",
+        "source_codes/subroutines_controller/control/create_EKF_general.m",
+        "source_codes/subroutines_controller/control/measurement_function.m",
+        "source_codes/subroutines_controller/control/measurement_matrices.m",
+        "source_codes/subroutines_controller/control/objective_function.m",
+        "source_codes/subroutines_controller/control/smooth_EKF.m",
+        "source_codes/subroutines_controller/control/smooth_EKF_general.m",
+        "source_codes/subroutines_controller/control/state_transition_ODE.m",
+        "source_codes/subroutines_controller/control/state_transition_ODE_T.m",
+        "source_codes/subroutines_controller/control/state_transition_function.m",
+        "source_codes/subroutines_controller/control/state_transition_function_T.m",
+        "source_codes/subroutines_controller/control/state_transition_matrices.m",
+        "source_codes/subroutines_controller/control/state_transition_matrices_model.m",
+        "source_codes/subroutines_controller/control/update_T_j.m",
+        "source_codes/subroutines_controller/mass_balance/calc_next_crystallization_mass_balance.m",
+        "source_codes/subroutines_controller/mass_balance/calc_size_from_volume.m",
+        "source_codes/subroutines_controller/mass_balance/calc_surface_area.m",
+        "source_codes/subroutines_controller/mass_balance/calc_volume.m",
+        "source_codes/subroutines_controller/mass_balance/create_size_list.m",
+        "source_codes/subroutines_controller/utils/fill_target_list.m",
+        "source_codes/subroutines_controller/utils/initialize_lists.m",
+        "source_codes/gui_main/snipptets_controller/calculate_T_j_set.m",
+        "source_codes/gui_main/snipptets_controller/calculate_lag_time.m",
+        "source_codes/gui_main/snipptets_controller/calculate_target.m",
+        "source_codes/gui_main/snipptets_controller/control_target.m",
+        "source_codes/gui_main/snipptets_controller/execute_growth_parameters_adaption.m",
+        "source_codes/gui_main/snipptets_controller/initialize_controller.m",
+        "source_codes/gui_main/snipptets_controller/initialize_controller_for_gui.m",
+        "source_codes/gui_main/snipptets_controller/record_controller_time.m",
+        "source_codes/gui_main/snipptets_controller/record_growth_parameters.m",
+        "source_codes/gui_main/snipptets_controller/refresh_adaptive.m",
+        "source_codes/gui_main/snipptets_controller/refresh_controller.m"
+      ],
+      "split": [
+        "source_codes/controller_for_gui.m",
+        "source_codes/subroutines_controller/utils/initialize_G.m",
+        "source_codes/gui_main/snipptets_controller/measure_controller_data.m",
+        "source_codes/gui_main/snipptets_controller/read_growth_rate.m"
+      ],
+      "contract": [
+        "source_codes/parameters.m",
+        "source_codes/parameters_G.m",
+        "source_codes/gui_main/op_section.m"
+      ],
+      "platform": [
+        "source_codes/subroutines_controller/control/read_value.m",
+        "source_codes/subroutines_controller/control/safe_read_value.m",
+        "source_codes/subroutines_controller/utils/create_nodes.m"
+      ],
+      "non-production": [
+        "source_codes/subroutines_controller/utils/add_point.m",
+        "source_codes/subroutines_controller/utils/add_points.m",
+        "source_codes/subroutines_controller/utils/create_animated_line.m",
+        "source_codes/subroutines_controller/utils/initialize_animated_lines.m",
+        "source_codes/subroutines_controller/utils/initialize_plots.m",
+        "source_codes/subroutines_controller/utils/plot_line.m",
+        "source_codes/subroutines_controller/utils/plot_lines.m",
+        "source_codes/subroutines_controller/utils/replot_results.m",
+        "source_codes/gui_main/snipptets_controller/initialize_inline_display.m",
+        "source_codes/gui_main/snipptets_controller/pop_up_and_save_variables.m",
+        "source_codes/gui_main/snipptets_controller/save_inline_display.m"
+      ],
+      "canonical-duplicate": [
+        "source_codes/subroutines_controller/control/calc_size_from_volume.m",
+        "source_codes/subroutines_controller/control/calc_surface_area.m",
+        "source_codes/subroutines_controller/control/calc_volume.m"
+      ],
+      "backup": [
+        "source_codes/subroutines_controller/utils/add_points.asv",
+        "source_codes/subroutines_controller/utils/initialize_plots.asv"
+      ]
+    },
+    "expected_source_count": 87
+  },
+  "operation_contract": {
+    "source": "source_codes/gui_main/op_section.m",
+    "runtime_value_source": "parameters base workspace via OperationsTab evalin",
+    "matlab_options": {
+      "mode": ["MPC", "PI"],
+      "exp_sim": ["experiment", "simulation"],
+      "target": ["sigma", "G"],
+      "adaptive_mode": ["E_A", "k_0", "n", "E_A_and_k_0", "E_A_and_n", "k_0_and_n", "all"],
+      "exp_sim_G": ["simulation", "experiment", "experiment_with_presaved"]
+    },
+    "declared_but_not_used_as_list_runtime_defaults": {
+      "mode": "MPC",
+      "exp_sim": "experiment",
+      "target": "sigma",
+      "adaptive_mode": "E_A",
+      "exp_sim_G": "simulation"
+    },
+    "python_growth_source_mapping": {
+      "simulation": "simulated",
+      "experiment": "live_gsensor",
+      "experiment_with_presaved": "presaved_images"
+    },
+    "central_safe_default": {
+      "run_type": "experiment",
+      "controller_mode": "MPC",
+      "control_target": "sigma",
+      "adaptation_enabled": false,
+      "adaptation_mode": "E_A",
+      "growth_rate_source": "live_gsensor"
+    },
+    "action_owner": "platform"
+  },
   "runtime": {
     "python": "3.12",
     "controller_dt_s": 5.0,
@@ -202,7 +340,8 @@
   "deviations": [
     {"id": "D-001", "source": "calc_mode.m", "behavior": "always returns MPC", "decision": "reproduce"},
     {"id": "D-002", "source": "calc_T_j_set_.m", "behavior": "local K_P_T reads params.K_P_target", "decision": "reproduce"},
-    {"id": "D-003", "source": "MATLAB rng", "behavior": "MATLAB and NumPy RNG streams differ", "decision": "store and replay MATLAB arrays"}
+    {"id": "D-003", "source": "MATLAB rng", "behavior": "MATLAB and NumPy RNG streams differ", "decision": "store and replay MATLAB arrays"},
+    {"id": "D-004", "source": "op_section.m and OperationsTab.m", "behavior": "op_section list defaults for exp_sim and adaptive_mode differ from parameters.m, while OperationsTab obtains current list values from the base workspace via evalin", "decision": "preserve parameters.m algorithm defaults and use explicit Central safe run configuration"}
   ],
   "fixtures": [
     {

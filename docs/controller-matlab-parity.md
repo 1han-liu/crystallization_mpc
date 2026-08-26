@@ -57,6 +57,7 @@ Python implementation; **backup** is excluded `.asv` material.
 | `source_codes/parameters.m` | contract | `baseline_manifest.json`, Central parameter contract tests |
 | `source_codes/parameters_on_target_change.m` | convert | target-dependent parameter selection in `translated/parameters.py` |
 | `source_codes/parameters_G.m` | contract | timing/G-source entries in manifest |
+| `source_codes/gui_main/op_section.m` | contract + platform | operation-mode enums and declared UI metadata are tracked in the manifest; OperationsTab list values come from the base workspace; UI actions remain platform-owned |
 | `source_codes/calc_mode.m` | convert exactly | compatibility helper in `translated/control.py`; deviation D-001 |
 | `control/adapt_growth_parameters.m` | convert | `translated/adaptation.py`; seven-mode oracle tests |
 | `control/add_to_int_X_dt.m` | convert | `translated/control.py`; algebra oracle |
@@ -85,9 +86,11 @@ Python implementation; **backup** is excluded `.asv` material.
 | `snipptets_controller/initialize_inline_display.m`, `save_inline_display.m`, `pop_up_and_save_variables.m` | non-production | Central UI, telemetry and platform persistence |
 
 All 63 production `.m` files and both `.asv` files under
-`subroutines_controller`, all 16 controller snippets, and the five related
-top-level parameter/mode/loop sources are represented above. Grouped rows list
-every source basename explicitly.
+`subroutines_controller`, all 16 controller snippets, the five related
+top-level parameter/mode/loop sources, and `gui_main/op_section.m` are
+represented above: 87 classified sources in total. The same inventory is
+machine-readable in `baseline_manifest.json` and is tested directly against the
+frozen reference worktree. Grouped rows list every source basename explicitly.
 
 ## Parameter contract
 
@@ -114,6 +117,7 @@ The four confirmed pre-conversion drifts are:
 | D-001 | `calc_mode()` always returns `MPC`, although UI/config exposes PI | reproduce exactly; explicit `mode='PI'` branches still use PI | mixed-semantics PI oracle fixture |
 | D-002 | `calc_T_j_set_.m` assigns local `K_P_T` from `params.K_P_target`, not `params.K_P_T` | reproduce exactly, do not silently correct | direct function oracle and code comment |
 | D-003 | MATLAB and NumPy RNG streams differ for the same seed | store MATLAB-generated random arrays in fixtures and replay them in Python | fixture hashes and deterministic repeat test |
+| D-004 | `op_section.m` declares `exp_sim='experiment'` and `adaptive_mode='E_A'`, while `parameters.m` initializes `simulation` and `all`; `OperationsTab` actually calls `evalin('base', ...)` for list values | preserve `parameters.m` algorithm defaults; Central sends an explicit safe run configuration (`experiment/MPC/sigma/E_A/live_gsensor`) | machine-readable operation contract and Central default test |
 
 Intentional fixes require separate approval, a separate commit, and both
 baseline-compatible and corrected-behavior tests.

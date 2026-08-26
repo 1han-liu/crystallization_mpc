@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from crystallization_mpc.apps.central.run_configuration import RunConfiguration
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "tests/controller/fixtures/baseline_manifest.json"
@@ -34,6 +36,51 @@ def test_baseline_is_frozen_to_approved_commit(manifest: dict) -> None:
     assert manifest["baseline"]["matlab_release"] == "R2021a Update 8"
 
 
+def test_controller_source_traceability_is_complete_and_matches_reference(
+    manifest: dict,
+) -> None:
+    traceability = manifest["traceability"]
+    groups = traceability["source_groups"]
+    assert set(groups) == {
+        "convert",
+        "split",
+        "contract",
+        "platform",
+        "non-production",
+        "canonical-duplicate",
+        "backup",
+    }
+    classified = [path for paths in groups.values() for path in paths]
+    assert len(classified) == traceability["expected_source_count"] == 87
+    assert len(classified) == len(set(classified))
+    assert "source_codes/gui_main/op_section.m" in groups["contract"]
+
+    reference_root = Path(manifest["baseline"]["reference_worktree"])
+    if not reference_root.is_dir():
+        pytest.skip("Frozen MATLAB reference worktree is not present on this machine.")
+    discovered = {
+        "source_codes/controller_for_gui.m",
+        "source_codes/parameters.m",
+        "source_codes/parameters_on_target_change.m",
+        "source_codes/parameters_G.m",
+        "source_codes/calc_mode.m",
+        "source_codes/gui_main/op_section.m",
+    }
+    discovered.update(
+        path.relative_to(reference_root).as_posix()
+        for path in (reference_root / "source_codes/subroutines_controller").rglob("*")
+        if path.is_file() and path.suffix in {".m", ".asv"}
+    )
+    discovered.update(
+        path.relative_to(reference_root).as_posix()
+        for path in (
+            reference_root / "source_codes/gui_main/snipptets_controller"
+        ).iterdir()
+        if path.is_file() and path.suffix in {".m", ".asv"}
+    )
+    assert set(classified) == discovered
+
+
 def test_manifest_declares_all_seven_adaptation_modes(manifest: dict) -> None:
     assert manifest["enums"]["adaptation_mode"] == [
         "E_A",
@@ -44,6 +91,28 @@ def test_manifest_declares_all_seven_adaptation_modes(manifest: dict) -> None:
         "k_0_and_n",
         "all",
     ]
+
+
+def test_operation_contract_preserves_matlab_options_and_explicit_safe_defaults(
+    manifest: dict,
+) -> None:
+    contract = manifest["operation_contract"]
+    options = contract["matlab_options"]
+    assert options["mode"] == manifest["enums"]["mode"]
+    assert options["exp_sim"] == manifest["enums"]["run_type"]
+    assert options["target"] == manifest["enums"]["target"]
+    assert options["adaptive_mode"] == manifest["enums"]["adaptation_mode"]
+    source_mapping = contract["python_growth_source_mapping"]
+    assert [source_mapping[value] for value in options["exp_sim_G"]] == [
+        "simulated",
+        "live_gsensor",
+        "presaved_images",
+    ]
+    assert set(source_mapping.values()) == set(manifest["enums"]["growth_rate_source"])
+    assert RunConfiguration().to_dict() == contract["central_safe_default"]
+    assert contract["runtime_value_source"] == (
+        "parameters base workspace via OperationsTab evalin"
+    )
 
 
 def test_manifest_has_unique_matlab_and_python_parameter_keys(manifest: dict) -> None:
@@ -84,6 +153,10 @@ def test_deviation_ledger_has_required_reference_anomalies(manifest: dict) -> No
     assert deviations["D-001"]["decision"] == "reproduce"
     assert deviations["D-002"]["source"] == "calc_T_j_set_.m"
     assert deviations["D-002"]["decision"] == "reproduce"
+    assert deviations["D-004"]["source"] == "op_section.m and OperationsTab.m"
+    assert "explicit Central safe run configuration" in deviations["D-004"][
+        "decision"
+    ]
 
 
 @pytest.mark.parametrize("path", [ROOT / "params_default.yaml", ROOT / "params_runtime.yaml"])
