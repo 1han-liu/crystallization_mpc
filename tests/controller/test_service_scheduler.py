@@ -13,6 +13,7 @@ from crystallization_mpc.apps.controller.process import (
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.service import ControllerService, ControllerState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
+from crystallization_mpc.apps.controller.translated.adapter import MatlabControllerAdapter
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 
@@ -103,7 +104,9 @@ def settings(*, opcua: bool, write: bool = False) -> ControllerSettings:
     )
 
 
-def sample(frame: int, *, valid: bool = True) -> GrowthRateSamplePayload:
+def sample(
+    frame: int, *, valid: bool = True, dt_s: float = 15.0
+) -> GrowthRateSamplePayload:
     values = (3e-8, 3e-8, 3e-8, 3e-8) if valid else (None, None, None, None)
     return GrowthRateSamplePayload(
         run_id="run-1",
@@ -111,7 +114,7 @@ def sample(frame: int, *, valid: bool = True) -> GrowthRateSamplePayload:
         image_name=f"frame-{frame}.png",
         captured_at="2026-08-26T12:00:00Z",
         processed_at="2026-08-26T12:00:01Z",
-        dt_s=15.0,
+        dt_s=dt_s,
         valid=valid,
         status="measuring" if valid else "error",
         G_u=values[0],
@@ -174,6 +177,10 @@ def test_three_controller_ticks_reuse_one_growth_frame_without_extra_ticks() -> 
     assert process.write_count == 0
     assert service.control_tick_count == 3
     assert service.valid_sample_count == 1
+    assert service.last_control_output is not None
+    assert service.last_control_output["tick_seq"] == 3
+    assert service.last_control_output["growth_frame_seq"] == 1
+    assert service.last_control_output["growth_sample_age_s"] == 15.0
 
 
 def test_invalid_and_duplicate_frames_do_not_replace_valid_cache() -> None:
@@ -189,6 +196,21 @@ def test_invalid_and_duplicate_frames_do_not_replace_valid_cache() -> None:
     assert duplicate["duplicate"] is True
     assert service.last_valid_sample is not None
     assert service.last_valid_sample.frame_seq == 1
+
+
+def test_variable_growth_frame_intervals_only_replace_cache() -> None:
+    adapter = RecordingAdapter()
+    service = ControllerService(settings(opcua=False), adapter=adapter)
+    start_service(service, run_type="simulation")
+    service._accept_sample(sample(1, dt_s=7.0).to_dict())
+    service._accept_sample(sample(2, dt_s=19.0).to_dict())
+    assert adapter.ticks == []
+    service._control_tick_once(now=105.0)
+    assert len(adapter.ticks) == 1
+    assert adapter.ticks[0].controller_dt_s == 5.0
+    assert adapter.ticks[0].growth_sample is not None
+    assert adapter.ticks[0].growth_sample.frame_seq == 2
+    assert adapter.ticks[0].growth_sample.dt_s == 19.0
 
 
 def test_shadow_reads_process_but_default_gate_makes_zero_writes() -> None:
@@ -319,3 +341,26 @@ def test_write_gate_cannot_be_enabled_without_read_gate() -> None:
         assert "requires CONTROLLER_OPCUA_ENABLED" in str(exc)
     else:
         raise AssertionError("Expected invalid OPC write-only configuration")
+
+
+def test_translated_controller_shadow_window_reads_eight_times_and_never_writes() -> None:
+    clock = FakeClock()
+    process = RecordingProcess()
+    service = ControllerService(
+        settings(opcua=True, write=False),
+        adapter=MatlabControllerAdapter(),
+        process_adapter=process,
+        monotonic_clock=clock,
+    )
+    start_service(service)
+    service._accept_sample(sample(1).to_dict())
+    for tick_index in range(1, 9):
+        now = 100.0 + tick_index * 5.0
+        clock.value = now
+        result = service._control_tick_once(now=now)
+        assert result["output_generated"] is True
+        assert result["output_valid"] is True
+        assert result["process_write_attempted"] is False
+    assert process.read_count == 8
+    assert process.write_count == 0
+    assert service.control_output_count == 8

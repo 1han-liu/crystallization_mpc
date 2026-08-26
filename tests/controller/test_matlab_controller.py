@@ -13,14 +13,16 @@ from crystallization_mpc.apps.controller.translated.matlab_controller import (
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 
-def growth_sample(frame: int, *, value: float = 3e-8) -> GrowthRateSamplePayload:
+def growth_sample(
+    frame: int, *, value: float = 3e-8, dt_s: float = 15.0
+) -> GrowthRateSamplePayload:
     return GrowthRateSamplePayload(
         run_id="run-1",
         frame_seq=frame,
         image_name=f"frame-{frame}.png",
         captured_at="2026-08-26T12:00:00Z",
         processed_at="2026-08-26T12:00:01Z",
-        dt_s=15.0,
+        dt_s=dt_s,
         valid=True,
         status="measuring",
         G_u=value,
@@ -147,6 +149,22 @@ def test_invalid_physical_process_input_returns_invalid_result() -> None:
     assert result.error == "Process input violates physical bounds."
 
 
+def test_abnormal_simulation_temperature_returns_invalid_result() -> None:
+    controller = MatlabController()
+    controller.configure(
+        {
+            "run_type": "simulation",
+            "growth_rate_source": "simulated",
+            "T_init_sigma": -1.0,
+        },
+        "run-1",
+    )
+    controller.start()
+    result = controller.step(ControllerTickInput(1, 5.0, 5.0))
+    assert result is not None and not result.valid
+    assert result.error == "Process input violates physical bounds."
+
+
 def test_zero_supersaturation_first_tick_is_recoverable_warmup_none() -> None:
     c_sat = float(calc_c_sat(315.15))
     params = {
@@ -253,3 +271,79 @@ def test_temporary_missing_experiment_state_does_not_break_next_tick() -> None:
     assert valid is not None and valid.valid
     assert controller.frame_index == 2
     assert {len(values) for values in controller.history.values()} == {1}
+
+
+@pytest.mark.parametrize("source", ["live_gsensor", "presaved_images"])
+def test_simulation_external_growth_sources_use_cached_sample_without_process(
+    source: str,
+) -> None:
+    controller = MatlabController()
+    controller.configure(
+        {"run_type": "simulation", "growth_rate_source": source}, "run-1"
+    )
+    controller.start()
+    result = controller.step(
+        ControllerTickInput(
+            1,
+            5.0,
+            5.0,
+            growth_sample(1, value=4e-8, dt_s=11.0),
+            2.0,
+        )
+    )
+    assert result is not None and result.valid
+    assert result.G_measure == pytest.approx(4e-8)
+    assert controller.history["t"] == [5.0]
+
+
+def test_controller_consumes_matlab_rng_and_seed_fixture_arrays() -> None:
+    from pathlib import Path
+
+    import numpy as np
+    from scipy.io import loadmat
+
+    from crystallization_mpc.apps.controller.translated.dynamics import (
+        state_transition_function_T,
+    )
+    from crystallization_mpc.apps.controller.translated.thermodynamics import calc_G
+
+    fixture = loadmat(
+        Path(__file__).parent / "fixtures/matlab_r2021a_golden.mat",
+        simplify_cells=True,
+    )
+    rng = fixture["rng_data"]
+    noise = {
+        "T_noise": rng["T_noise"],
+        "c_noise": rng["c_noise"],
+        "G_u_noise": rng["G_noise"][:, 0],
+        "G_u_KF_noise": rng["G_noise"][:, 1],
+        "G_v_noise": rng["G_noise"][:, 2],
+        "G_v_KF_noise": rng["G_noise"][:, 3],
+    }
+    seed_sizes = fixture["seed_population"]["sizes"]
+    controller = MatlabController(
+        simulation_noise=noise,
+        simulation_seed_sizes=seed_sizes,
+    )
+    controller.configure(
+        {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
+    )
+    controller.start()
+    controller.add_seed({"event_id": "seed-before-first-tick"})
+    first = controller.step(ControllerTickInput(1, 5.0, 5.0))
+    assert first is not None and first.valid
+    np.testing.assert_array_equal(controller.size_list, seed_sizes)
+    expected_G = float(calc_G(controller.params, first.c_KF, first.T_KF, True))
+    assert controller.history["G_u"][0] == pytest.approx(
+        expected_G + rng["G_noise"][0, 0], abs=1e-18
+    )
+    assert controller.history["G_u_KF"][0] == pytest.approx(
+        expected_G + rng["G_noise"][0, 1], abs=1e-18
+    )
+
+    expected_T_second = state_transition_function_T(
+        controller.params, first.T, first.T_j, 5.0
+    ) + rng["T_noise"][1]
+    second = controller.step(ControllerTickInput(2, 5.0, 10.0))
+    assert second is not None and second.valid
+    assert second.T == pytest.approx(expected_T_second, abs=1e-10)

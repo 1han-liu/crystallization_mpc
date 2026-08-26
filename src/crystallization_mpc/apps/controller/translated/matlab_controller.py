@@ -67,7 +67,22 @@ def _json_value(value: Any) -> Any:
 class MatlabController:
     """Own the MATLAB workspace variables for one configured experiment."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        simulation_noise: Mapping[str, Any] | None = None,
+        simulation_seed_sizes: Any | None = None,
+    ) -> None:
+        self._fixture_simulation_noise = (
+            copy.deepcopy(dict(simulation_noise))
+            if simulation_noise is not None
+            else None
+        )
+        self._fixture_seed_sizes = (
+            np.asarray(simulation_seed_sizes, dtype=float).reshape(-1).copy()
+            if simulation_seed_sizes is not None
+            else None
+        )
         self.params: dict[str, Any] = {}
         self._configured_params: dict[str, Any] = {}
         self.params_digest: str | None = None
@@ -128,13 +143,22 @@ class MatlabController:
             "c": initial_c,
             "count_middle": 0.0,
         }
-        self.size_list_seed = create_size_list(
-            self.params,
-            float(self.params["m_seed"]),
-            float(self.params["d_mean_seed"]),
-            float(self.params["d_std_seed"]),
-            rng=np.random.default_rng(123),
-        )
+        if self._fixture_seed_sizes is not None:
+            if (
+                self._fixture_seed_sizes.size == 0
+                or not np.isfinite(self._fixture_seed_sizes).all()
+                or np.any(self._fixture_seed_sizes <= 0)
+            ):
+                raise ValueError("Injected simulation seed sizes must be finite and positive.")
+            self.size_list_seed = self._fixture_seed_sizes.copy()
+        else:
+            self.size_list_seed = create_size_list(
+                self.params,
+                float(self.params["m_seed"]),
+                float(self.params["d_mean_seed"]),
+                float(self.params["d_std_seed"]),
+                rng=np.random.default_rng(123),
+            )
         self.size_list = np.zeros_like(self.size_list_seed)
         if self.params["run_type"] == "simulation":
             self._initialize_filters(initial_T, initial_c)
@@ -159,7 +183,9 @@ class MatlabController:
         )
 
     def _noise_value(self, name: str, index: int, seed: int, scale: float) -> float:
-        supplied = self.params.get("simulation_noise")
+        supplied = self._fixture_simulation_noise
+        if supplied is None:
+            supplied = self.params.get("simulation_noise")
         if isinstance(supplied, Mapping):
             values = supplied.get(name)
             if isinstance(values, (list, tuple, np.ndarray)) and index < len(values):
@@ -170,13 +196,13 @@ class MatlabController:
     def _advance_simulation(self, tick_index: int, dt: float) -> dict[str, float]:
         if self.simulation_state is None:
             raise RuntimeError("Simulation state is not initialized.")
-        if tick_index == 0:
-            return dict(self.simulation_state)
-        previous = dict(self.simulation_state)
         if self.pending_seed:
             self.size_list = self.size_list_seed.copy()
             self.pending_seed = False
             self.mark_seed = True
+        if tick_index == 0:
+            return dict(self.simulation_state)
+        previous = dict(self.simulation_state)
         T = state_transition_function_T(self.params, previous["T"], previous["T_j"], dt)
         T_j = update_T_j(
             previous["T_j_set"], previous["T_j"], float(self.params["dT_j_dt_max"]),

@@ -76,7 +76,7 @@ class ControllerStepResult:
             if not self.error.strip():
                 raise ValueError("Controller result error cannot be empty.")
 
-        present = []
+        has_numeric = False
         for name in self.NUMERIC_FIELDS:
             value = getattr(self, name)
             if value is None:
@@ -85,19 +85,18 @@ class ControllerStepResult:
                 raise ValueError(f"Controller result {name} must be a number or null.")
             if not math.isfinite(float(value)):
                 raise ValueError(f"Controller result {name} must be finite.")
-            present.append(name)
-
+            has_numeric = True
         if self.valid:
             if self.error is not None:
                 raise ValueError("A valid Controller result cannot include an error.")
-            if not present:
+            if self.T_j_set is None:
                 raise ValueError(
-                    "A valid Controller result must contain at least one calculated value."
+                    "A valid Controller result requires a calculated T_j_set."
                 )
         else:
             if self.error is None:
                 raise ValueError("An invalid Controller result requires an error.")
-            if present:
+            if has_numeric:
                 raise ValueError(
                     "An invalid Controller result must use null calculated values."
                 )

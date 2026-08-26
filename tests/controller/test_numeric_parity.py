@@ -285,6 +285,27 @@ def test_all_seven_adaptation_modes_match_r2021a(golden: dict) -> None:
         assert updated["n"] == pytest.approx(expected["n"], rel=1e-5)
 
 
+def test_adaptation_minimum_sample_gate_and_recent_window() -> None:
+    params = build_parameters({})
+    sigma = np.linspace(0.03, 0.06, 35)
+    temperature = np.linspace(303.15, 310.15, 35)
+    growth = np.asarray(calc_G(params, sigma * 0 + 0.31, temperature))
+    unchanged, count = adapt_growth_parameters(
+        params,
+        np.abs(growth[:20]),
+        sigma[:20],
+        temperature[:20],
+        np.ones(20, dtype=bool),
+        max_num_adapt=10,
+        min_num_adapt=30,
+        adaptive_mode="all",
+    )
+    assert count == 10
+    assert unchanged["E_A"] == params["E_A"]
+    assert unchanged["k_0"] == params["k_0"]
+    assert unchanged["n"] == params["n"]
+
+
 def test_eight_tick_simulation_state_and_seed_replay_match_r2021a(golden: dict) -> None:
     params = build_parameters({"target": "sigma"})
     inputs = golden["inputs"]

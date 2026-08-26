@@ -55,3 +55,16 @@ def test_central_derivations_equal_controller_contract(target: str) -> None:
 def test_v1_rejects_non_live_growth_source_for_experiment(params: dict) -> None:
     with pytest.raises(ValueError, match="requires live_gsensor"):
         build_parameters(params)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"c_init": float("nan")},
+        {"T_init_sigma": float("inf")},
+        {"params.E_A": float("-inf")},
+    ],
+)
+def test_nonfinite_configuration_is_rejected(params: dict) -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        build_parameters(params)
