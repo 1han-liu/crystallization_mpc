@@ -164,3 +164,13 @@ documented in `tests/controller/matlab_harness/README.md`.
 On the target development machine on 2026-08-26, the required 20-tick warm-up
 plus 1000 measured simulation ticks produced p95 `0.003448 s`, maximum
 `0.015908 s`, and mean `0.003192 s` for algorithm computation only.
+
+The on-site shadow evidence collector is
+`crystallization_mpc.apps.controller.shadow_audit`. It observes only the
+Controller status API and refuses a window unless the translated adapter is
+running, real OPC UA reads are active, the write gate is disabled, all ticks are
+consecutive, every candidate remains inside the configured jacket-temperature
+range, and OPC UA write attempts/calls remain zero. Each JSON record contains
+the tick, G frame and age, live process snapshot, candidate `T_j_set`, objective,
+constraint result, solver validity, and failure reason. The generated evidence
+contains real process values and is deliberately excluded from Git.

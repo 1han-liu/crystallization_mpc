@@ -37,3 +37,6 @@ references_local/
 /plan.md
 /docs/phase*_plan.md
 /docs/screenshots/
+
+# Local on-site Controller shadow evidence (may contain real process values)
+/artifacts/controller-shadow-*.json
