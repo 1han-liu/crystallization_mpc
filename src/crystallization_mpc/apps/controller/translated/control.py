@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -14,6 +15,9 @@ from .thermodynamics import calc_G, calc_relative_sigma
 
 class OptimizationError(RuntimeError):
     """Expected numerical optimizer failure."""
+
+
+MPC_OPTIMIZER_TIMEOUT_S = 4.0
 
 
 def clip(value: float, lower: float, upper: float) -> float:
@@ -128,14 +132,41 @@ def calc_dT_dt_set(
     error = calc_e_target(params, target, target_set, state[2], state[0])
     integral = add_to_int_X_dt(error, int_e_target_dt, dt)
     if mode == "MPC":
-        result = minimize_scalar(
-            lambda value: objective_function(
+        lower = float(dT_dt_min)
+        upper = float(dT_dt_max)
+        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise OptimizationError("MPC optimization bounds are infeasible.")
+        started = time.monotonic()
+
+        def bounded_objective(value: float) -> float:
+            if time.monotonic() - started >= MPC_OPTIMIZER_TIMEOUT_S:
+                raise OptimizationError(
+                    f"MPC optimization timed out after {MPC_OPTIMIZER_TIMEOUT_S:g} s."
+                )
+            objective = objective_function(
                 params, state, target, float(value), target_set, dt
-            ),
-            bounds=(float(dT_dt_min), float(dT_dt_max)),
-            method="bounded",
-            options={"xatol": 1e-4},
-        )
+            )
+            if time.monotonic() - started >= MPC_OPTIMIZER_TIMEOUT_S:
+                raise OptimizationError(
+                    f"MPC optimization timed out after {MPC_OPTIMIZER_TIMEOUT_S:g} s."
+                )
+            return objective
+
+        try:
+            result = minimize_scalar(
+                bounded_objective,
+                bounds=(lower, upper),
+                method="bounded",
+                options={"xatol": 1e-4},
+            )
+        except OptimizationError:
+            raise
+        except (RuntimeError, ValueError) as exc:
+            raise OptimizationError(f"MPC optimization failed: {exc}") from exc
+        if time.monotonic() - started >= MPC_OPTIMIZER_TIMEOUT_S:
+            raise OptimizationError(
+                f"MPC optimization timed out after {MPC_OPTIMIZER_TIMEOUT_S:g} s."
+            )
         if not result.success or not math.isfinite(float(result.x)):
             raise OptimizationError(f"MPC optimization failed: {result.message}")
         value = float(result.x)
@@ -285,6 +316,7 @@ def update_T_j(
 
 
 __all__ = [
+    "MPC_OPTIMIZER_TIMEOUT_S",
     "OptimizationError",
     "add_to_int_X_dt",
     "calc_T_j",

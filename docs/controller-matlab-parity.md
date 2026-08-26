@@ -130,6 +130,10 @@ baseline-compatible and corrected-behavior tests.
 - Exceptions mean lifecycle/state/interface/programming failure. The service
   enters `ERROR` and disconnects the device.
 - A valid result always has a finite, constrained real `T_j_set`.
+- MPC rejects infeasible/non-finite bounds before invoking SciPy and aborts
+  between objective evaluations after a 4 s monotonic deadline. Infeasible,
+  timed-out, and unsuccessful optimizations all produce invalid results and no
+  device write; normal solver inputs and MATLAB parity tolerances are unchanged.
 - `CONTROLLER_OPCUA_WRITE_ENABLED=false` is a separate, default-deny write gate.
   Shadow mode may read live state but its write-call count must remain zero.
 

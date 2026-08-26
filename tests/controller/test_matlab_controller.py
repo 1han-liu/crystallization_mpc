@@ -207,6 +207,45 @@ def test_expected_optimizer_failure_returns_invalid_result(monkeypatch: pytest.M
     assert {len(values) for values in controller.history.values()} == {0}
 
 
+def test_infeasible_mpc_bounds_return_invalid_result() -> None:
+    controller = MatlabController()
+    controller.configure(
+        {
+            "run_type": "simulation",
+            "growth_rate_source": "simulated",
+            "dT_dt_min_sigma": 0.1,
+            "dT_dt_max_sigma": -0.1,
+        },
+        "run-1",
+    )
+    controller.start()
+    result = controller.step(ControllerTickInput(1, 5.0, 5.0))
+    assert result is not None and result.valid is False
+    assert result.error == "MPC optimization bounds are infeasible."
+    assert all(getattr(result, field) is None for field in result.NUMERIC_FIELDS)
+
+
+def test_mpc_timeout_returns_invalid_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    from crystallization_mpc.apps.controller.translated import control
+
+    timestamps = iter([0.0, control.MPC_OPTIMIZER_TIMEOUT_S])
+    monkeypatch.setattr(control.time, "monotonic", lambda: next(timestamps))
+    monkeypatch.setattr(
+        control,
+        "minimize_scalar",
+        lambda objective, **_kwargs: objective(0.0),
+    )
+    controller = MatlabController()
+    controller.configure(
+        {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
+    )
+    controller.start()
+    result = controller.step(ControllerTickInput(1, 5.0, 5.0))
+    assert result is not None and result.valid is False
+    assert result.error == "MPC optimization timed out after 4 s."
+    assert all(getattr(result, field) is None for field in result.NUMERIC_FIELDS)
+
+
 def test_restore_rebuilds_ekf_closures_from_adapted_parameters() -> None:
     params = {
         "run_type": "simulation",
