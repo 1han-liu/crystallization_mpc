@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.process import ProcessState
+from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 
@@ -25,7 +26,7 @@ class ControllerAdapter(ABC):
     @abstractmethod
     def step(
         self,
-        sample: GrowthRateSamplePayload,
+        sample: GrowthRateSamplePayload | ControllerTickInput,
         process_state: ProcessState | None = None,
     ) -> ControllerStepResult | None:
         """Consume one valid sample and optionally return a real calculation.
@@ -95,7 +96,7 @@ class NoOpControllerAdapter(ControllerAdapter):
 
     def step(
         self,
-        sample: GrowthRateSamplePayload,
+        sample: GrowthRateSamplePayload | ControllerTickInput,
         process_state: ProcessState | None = None,
     ) -> ControllerStepResult | None:
         return None

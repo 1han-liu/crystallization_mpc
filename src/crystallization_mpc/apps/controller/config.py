@@ -52,6 +52,7 @@ class ControllerSettings:
     influx_url: str
     influx_org: str
     influx_bucket: str
+    opcua_write_enabled: bool = False
     experiment_root: str | None = None
     influx_token: str | None = None
     opcua_namespace_index: int = 2
@@ -65,6 +66,12 @@ class ControllerSettings:
     opcua_jacket_max_K: float = 453.15
     opcua_verify_write: bool = True
     opcua_verify_tolerance_K: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.opcua_write_enabled and not self.opcua_enabled:
+            raise ValueError(
+                "CONTROLLER_OPCUA_WRITE_ENABLED requires CONTROLLER_OPCUA_ENABLED."
+            )
 
     @classmethod
     def from_env(cls) -> "ControllerSettings":
@@ -98,6 +105,7 @@ class ControllerSettings:
                 os.getenv("CONTROLLER_INFLUX_BUCKET", "").strip()
                 or os.getenv("INFLUX_BUCKET", "process").strip()
             ),
+            opcua_write_enabled=_env_bool("CONTROLLER_OPCUA_WRITE_ENABLED"),
             experiment_root=os.getenv("EXPERIMENT_ROOT", "").strip() or None,
             influx_token=(
                 os.getenv("CONTROLLER_INFLUX_TOKEN", "").strip()
@@ -141,6 +149,8 @@ class ControllerSettings:
         return {
             "opcua": {
                 "enabled": self.opcua_enabled,
+                "write_enabled": self.opcua_write_enabled,
+                "shadow_mode": self.opcua_enabled and not self.opcua_write_enabled,
                 "configured": bool(self.opcua_endpoint),
                 "endpoint": self.opcua_endpoint,
                 "connected": False,

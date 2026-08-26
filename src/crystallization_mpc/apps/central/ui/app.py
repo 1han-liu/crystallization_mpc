@@ -1098,10 +1098,22 @@ class CentralService:
         # configuration changes and experiment switching remain locked.
         self.operation_state["experiment_active"] = True
         try:
+            controller_runtime = {
+                **params_snapshot["controller"],
+                "mode": self.run_configuration.controller_mode,
+                "exp_sim": self.run_configuration.run_type,
+                "target": self.run_configuration.control_target,
+                "adaptive_mode": self.run_configuration.adaptation_mode,
+                "exp_sim_G": {
+                    "live_gsensor": "experiment",
+                    "simulated": "simulation",
+                    "presaved_images": "experiment_with_presaved",
+                }[self.run_configuration.growth_rate_source],
+            }
             parameter_messages = self.publisher.publish_params(
                 params_snapshot["shared"],
                 params_snapshot["gsensor"],
-                params_snapshot["controller"],
+                controller_runtime,
                 int(params_snapshot["version"]),
             )
             commands = self.publisher.publish_experiment_start_command(

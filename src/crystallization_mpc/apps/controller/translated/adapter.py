@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from crystallization_mpc.apps.controller.adapter import ControllerAdapter
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.result import ControllerStepResult
+from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.apps.controller.translated.matlab_controller import (
     MatlabController,
 )
@@ -37,38 +38,29 @@ class MatlabControllerAdapter(ControllerAdapter):
         # refresh_adaptive 的时刻。真正的 MATLAB 转译内容写在
         # matlab_controller.py 的 start()，不写在这里。
         self.controller.start()
-        self.controller.running = True
 
     def step(
         self,
-        sample: GrowthRateSamplePayload,
+        sample: GrowthRateSamplePayload | ControllerTickInput,
         process_state: ProcessState | None = None,
     ) -> ControllerStepResult | None:
         # 对应 controller_for_gui.m 中 while true 主循环的一轮。
         # 真正的 MATLAB 转译计算写在 matlab_controller.py 的 step()。
-        if process_state is None:
-            raise RuntimeError(
-                "MatlabControllerAdapter 需要真实过程状态。"
-                "使用仿真模式前，需要另外提供明确的仿真输入 Adapter。"
+        if isinstance(sample, ControllerTickInput):
+            tick = sample
+        else:
+            # Backward-compatible bridge for the pre-scheduler service. The
+            # dedicated scheduler sends ControllerTickInput directly.
+            controller_dt = float(self.controller.params.get("dt", sample.dt_s))
+            tick = ControllerTickInput(
+                tick_seq=self.controller.frame_index + 1,
+                controller_dt_s=controller_dt,
+                elapsed_s=(self.controller.frame_index + 1) * controller_dt,
+                growth_sample=sample,
+                growth_sample_age_s=0.0,
+                process_state=process_state,
             )
-
-        # sample 取代 MATLAB read_growth_rate.m：里面已有四个 G 值。
-        # process_state 取代 measure_controller_data.m 里的设备读取代码：
-        # 里面已有 OPC UA 62552 读到的 T、T_j、c、count_middle、T_j_set。
-        # 这里把它们拆开，交给 matlab_controller.py 完成一轮计算。
-        output = self.controller.step(
-            G_u=sample.G_u,
-            G_u_KF=sample.G_u_KF,
-            G_v=sample.G_v,
-            G_v_KF=sample.G_v_KF,
-            T=process_state.T,
-            T_j=process_state.T_j,
-            c=process_state.c,
-            count_middle=process_state.count_middle,
-            current_T_j_set=process_state.T_j_set,
-            dt_s=sample.dt_s,
-            frame_seq=sample.frame_seq,
-        )
+        output = self.controller.step(tick)
 
         # MATLAB 算法还没产生真实结果时，不生成假的 Controller 输出。
         if output is None:

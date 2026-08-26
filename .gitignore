@@ -28,8 +28,7 @@ references_local/
 # Local Gsensor Hough/DSCGR comparison outputs
 /dscgr_runs*/
 
-# Local verification suite; release commits contain runtime code only
-/tests/
+# Verification suites and golden fixtures are release artifacts and are tracked.
 
 # Local development notes and experiment plans
 /agent.md

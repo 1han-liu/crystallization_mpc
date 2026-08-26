@@ -8,8 +8,8 @@ from typing import Any
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.process import ProcessState, ProcessWriteResult
+from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
-from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 CONTROLLER_MEASUREMENT = "controller_measurement"
 CONTROLLER_SERVICE_TAG = "controller"
@@ -17,7 +17,8 @@ CONTROLLER_SERVICE_TAG = "controller"
 
 @dataclass(frozen=True)
 class ControllerMeasurementRecord:
-    sample: GrowthRateSamplePayload
+    run_id: str
+    tick: ControllerTickInput
     result: ControllerStepResult
     computed_at: str
     adaptation_enabled: bool
@@ -28,8 +29,10 @@ class ControllerMeasurementRecord:
     process_write_error: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.sample.valid:
-            raise ValueError("Controller measurement requires a valid Gsensor sample.")
+        if not str(self.run_id).strip():
+            raise ValueError("run_id is required.")
+        if self.tick.growth_sample is not None and not self.tick.growth_sample.valid:
+            raise ValueError("Controller measurement cannot use an invalid Gsensor sample.")
         if not str(self.computed_at).strip():
             raise ValueError("computed_at is required.")
         if not isinstance(self.adaptation_enabled, bool):
@@ -49,7 +52,7 @@ class ControllerMeasurementRecord:
     def tags(self) -> dict[str, str]:
         return {
             "service": CONTROLLER_SERVICE_TAG,
-            "run_id": self.sample.run_id,
+            "run_id": self.run_id,
             "status": "calculated" if self.result.valid else "invalid",
             "adaptation_enabled": str(self.adaptation_enabled).lower(),
             "adaptation_mode": self.adaptation_mode,
@@ -57,15 +60,27 @@ class ControllerMeasurementRecord:
 
     def fields(self) -> dict[str, Any]:
         fields: dict[str, Any] = {
-            "frame_seq": int(self.sample.frame_seq),
-            "image_name": self.sample.image_name,
-            "sample_processed_at": self.sample.processed_at,
+            "tick_seq": int(self.tick.tick_seq),
+            "controller_dt_s": float(self.tick.controller_dt_s),
+            "elapsed_s": float(self.tick.elapsed_s),
             "computed_at": self.computed_at,
-            "input_G_u": float(self.sample.G_u),
-            "input_G_u_KF": float(self.sample.G_u_KF),
-            "input_G_v": float(self.sample.G_v),
-            "input_G_v_KF": float(self.sample.G_v_KF),
         }
+        sample = self.tick.growth_sample
+        if self.tick.growth_sample_age_s is not None:
+            fields["growth_sample_age_s"] = float(self.tick.growth_sample_age_s)
+        if sample is not None:
+            fields.update(
+                {
+                    "growth_frame_seq": int(sample.frame_seq),
+                    "growth_sample_dt_s": float(sample.dt_s),
+                    "image_name": sample.image_name,
+                    "sample_processed_at": sample.processed_at,
+                    "input_G_u": float(sample.G_u),
+                    "input_G_u_KF": float(sample.G_u_KF),
+                    "input_G_v": float(sample.G_v),
+                    "input_G_v_KF": float(sample.G_v_KF),
+                }
+            )
         fields.update(self.result.fields())
         if self.process_state is not None:
             fields.update(

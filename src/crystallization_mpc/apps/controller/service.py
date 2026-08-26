@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import threading
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -28,6 +30,7 @@ from crystallization_mpc.apps.controller.process import (
     ProcessWriteResult,
 )
 from crystallization_mpc.apps.controller.result import ControllerStepResult
+from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.apps.controller.telemetry import (
     ControllerMeasurementRecord,
     write_controller_measurement,
@@ -79,6 +82,7 @@ class ControllerService:
         consumer_runner: ConsumerRunner = start_consumer,
         measurement_writer: InfluxWriter | None = None,
         process_adapter: ProcessAdapter | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings or ControllerSettings.from_env()
         self.adapter = adapter or load_controller_adapter(self.settings.adapter_spec)
@@ -86,6 +90,10 @@ class ControllerService:
         self._consumer_runner = consumer_runner
         self._consumer_thread: threading.Thread | None = None
         self._consumer_stop = threading.Event()
+        self._control_thread: threading.Thread | None = None
+        self._control_stop = threading.Event()
+        self._control_wakeup = threading.Event()
+        self._monotonic_clock = monotonic_clock
         self._lock = threading.RLock()
 
         self.state = ControllerState.IDLE
@@ -97,6 +105,13 @@ class ControllerService:
         self.stopped_at: str | None = None
         self.last_frame_seq: int | None = None
         self.last_sample: dict[str, Any] | None = None
+        self.last_valid_sample: GrowthRateSamplePayload | None = None
+        self.last_valid_sample_received_monotonic: float | None = None
+        self.control_tick_count = 0
+        self.control_tick_error_count = 0
+        self.last_growth_sample_age_s: float | None = None
+        self._run_started_monotonic: float | None = None
+        self._next_tick_monotonic: float | None = None
         self.last_message: dict[str, Any] | None = None
         self.last_message_result: dict[str, Any] | None = None
         self.last_error: str | None = None
@@ -200,6 +215,11 @@ class ControllerService:
             "stopped_at": self.stopped_at,
             "last_frame_seq": self.last_frame_seq,
             "last_sample": copy.deepcopy(self.last_sample),
+            "last_valid_sample": (
+                self.last_valid_sample.to_dict()
+                if self.last_valid_sample is not None
+                else None
+            ),
             "last_message": copy.deepcopy(self.last_message),
             "last_message_result": copy.deepcopy(self.last_message_result),
             "last_error": self.last_error,
@@ -213,6 +233,8 @@ class ControllerService:
                 "missing": self.missing_frame_count,
                 "adapter_error": self.adapter_error_count,
                 "process_error": self.process_error_count,
+                "control_tick": self.control_tick_count,
+                "control_tick_error": self.control_tick_error_count,
             },
             "control_output": {
                 "count": self.control_output_count,
@@ -252,6 +274,9 @@ class ControllerService:
                 "last_error": self.last_process_error,
                 "last_state": copy.deepcopy(self.last_process_state),
                 "last_write": copy.deepcopy(self.last_process_write),
+            },
+            "scheduler": {
+                "last_growth_sample_age_s": self.last_growth_sample_age_s,
             },
         }
 
@@ -326,6 +351,15 @@ class ControllerService:
                 int(last_frame_seq) if last_frame_seq is not None else None
             )
             self.last_sample = copy.deepcopy(document.get("last_sample"))
+            last_valid_sample = document.get("last_valid_sample")
+            self.last_valid_sample = (
+                GrowthRateSamplePayload.from_mapping(last_valid_sample)
+                if isinstance(last_valid_sample, Mapping)
+                else None
+            )
+            # Monotonic timestamps cannot survive a process restart. A restored
+            # sample starts stale and must be replaced before adaptation.
+            self.last_valid_sample_received_monotonic = None
             self.last_message = copy.deepcopy(document.get("last_message"))
             self.last_message_result = copy.deepcopy(
                 document.get("last_message_result")
@@ -340,6 +374,15 @@ class ControllerService:
             self.missing_frame_count = int(counts.get("missing", 0))
             self.adapter_error_count = int(counts.get("adapter_error", 0))
             self.process_error_count = int(counts.get("process_error", 0))
+            self.control_tick_count = int(counts.get("control_tick", 0))
+            self.control_tick_error_count = int(counts.get("control_tick_error", 0))
+            scheduler = document.get("scheduler") or {}
+            if not isinstance(scheduler, dict):
+                raise ValueError("Controller recovery scheduler must be an object.")
+            saved_age = scheduler.get("last_growth_sample_age_s")
+            self.last_growth_sample_age_s = (
+                float(saved_age) if saved_age is not None else None
+            )
             process_io = document.get("process_io") or {}
             if not isinstance(process_io, dict):
                 raise ValueError("Controller recovery process_io must be an object.")
@@ -460,6 +503,13 @@ class ControllerService:
                 )
                 if self.settings.opcua_enabled:
                     self.process_adapter.connect()
+                now = self._monotonic_clock()
+                self._run_started_monotonic = now - self.control_tick_count * float(
+                    self.parameters.get("dt", 5.0)
+                )
+                self._next_tick_monotonic = now + float(
+                    self.parameters.get("dt", 5.0)
+                )
             self.recovery_status = "restored"
             self.recovery_error = None
         except Exception as exc:
@@ -470,6 +520,14 @@ class ControllerService:
             logger.exception("Could not restore Controller runtime state.")
 
     def start(self) -> None:
+        if not self._control_thread or not self._control_thread.is_alive():
+            self._control_stop.clear()
+            self._control_thread = threading.Thread(
+                target=self._control_forever,
+                name="controller-control-clock",
+                daemon=True,
+            )
+            self._control_thread.start()
         with self._lock:
             if self._consumer_thread and self._consumer_thread.is_alive():
                 return
@@ -484,6 +542,8 @@ class ControllerService:
 
     def stop(self) -> None:
         self._consumer_stop.set()
+        self._control_stop.set()
+        self._control_wakeup.set()
         with self._lock:
             if self.state == ControllerState.RUNNING:
                 # Capture the live adapter before asking it to release resources.
@@ -511,6 +571,29 @@ class ControllerService:
                 except Exception:
                     logger.exception("Controller InfluxDB writer failed during shutdown.")
             self._measurement_writer_closed = True
+
+    def _control_forever(self) -> None:
+        """Run control ticks from a monotonic clock, never from G frame arrival."""
+
+        while not self._control_stop.is_set():
+            with self._lock:
+                deadline = (
+                    self._next_tick_monotonic
+                    if self.state == ControllerState.RUNNING
+                    else None
+                )
+            if deadline is None:
+                self._control_wakeup.wait(0.25)
+                self._control_wakeup.clear()
+                continue
+            delay = max(0.0, deadline - self._monotonic_clock())
+            if self._control_wakeup.wait(delay):
+                self._control_wakeup.clear()
+                continue
+            try:
+                self._control_tick_once(now=self._monotonic_clock())
+            except Exception:
+                logger.exception("Controller control tick failed.")
 
     def _consume_forever(self) -> None:
         while not self._consumer_stop.is_set():
@@ -645,12 +728,24 @@ class ControllerService:
                     raise ValueError("A stopped experiment cannot be restarted.")
             if self.current_run_id and self.state == ControllerState.RUNNING:
                 raise ValueError("Controller is already running another experiment.")
+            run_type = str(
+                self.parameters.get("run_type", self.parameters.get("exp_sim", "experiment"))
+            )
+            if run_type == "experiment" and not self.settings.opcua_enabled:
+                raise ValueError(
+                    "Experiment mode requires CONTROLLER_OPCUA_ENABLED=true for process reads."
+                )
 
             self.current_run_id = command.run_id
             self.started_at = command.started_at
             self.stopped_at = None
             self.last_frame_seq = None
             self.last_sample = None
+            self.last_valid_sample = None
+            self.last_valid_sample_received_monotonic = None
+            self.control_tick_count = 0
+            self.control_tick_error_count = 0
+            self.last_growth_sample_age_s = None
             self.valid_sample_count = 0
             self.invalid_sample_count = 0
             self.duplicate_sample_count = 0
@@ -707,6 +802,10 @@ class ControllerService:
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter start failed: {exc}") from exc
             self.state = ControllerState.RUNNING
+            now = self._monotonic_clock()
+            self._run_started_monotonic = now
+            self._next_tick_monotonic = now + float(self.parameters.get("dt", 5.0))
+            self._control_wakeup.set()
 
         return {"accepted": True, "kind": "start", "run_id": command.run_id}
 
@@ -729,6 +828,8 @@ class ControllerService:
                 self.process_adapter.disconnect()
             self.state = ControllerState.STOPPED
             self.stopped_at = command.stopped_at
+            self._next_tick_monotonic = None
+            self._control_wakeup.set()
 
         return {"accepted": True, "kind": "stop", "run_id": command.run_id}
 
@@ -858,6 +959,43 @@ class ControllerService:
                     "frame_seq": sample.frame_seq,
                     "adapter_called": False,
                 }
+            self.last_valid_sample = sample
+            self.last_valid_sample_received_monotonic = self._monotonic_clock()
+            self.valid_sample_count += 1
+
+        result = {
+            "accepted": True,
+            "kind": "sample",
+            "valid": True,
+            "frame_seq": sample.frame_seq,
+            "adapter_called": False,
+            "cached": True,
+        }
+        return result
+
+    def _control_tick_once(self, *, now: float | None = None) -> dict[str, Any]:
+        """Execute one scheduler tick; exposed for deterministic integration tests."""
+
+        with self._lock:
+            if self.state != ControllerState.RUNNING:
+                return {"executed": False, "reason": "not_running"}
+            now_value = self._monotonic_clock() if now is None else float(now)
+            dt = float(self.parameters.get("dt", 5.0))
+            if not math.isfinite(dt) or dt <= 0:
+                self.state = ControllerState.ERROR
+                raise RuntimeError("Controller parameter dt must be finite and positive.")
+            self.control_tick_count += 1
+            tick_seq = self.control_tick_count
+            elapsed = tick_seq * dt
+            sample = self.last_valid_sample
+            age: float | None = None
+            if sample is not None:
+                if self.last_valid_sample_received_monotonic is None:
+                    # Do not reuse a pre-restart sample for numerical adaptation.
+                    sample = None
+                else:
+                    age = max(0.0, now_value - self.last_valid_sample_received_monotonic)
+            self.last_growth_sample_age_s = age
 
             process_state: ProcessState | None = None
             if self.settings.opcua_enabled:
@@ -865,34 +1003,43 @@ class ControllerService:
                     process_state = self.process_adapter.read_state()
                 except Exception as exc:
                     self.process_error_count += 1
+                    self.control_tick_error_count += 1
                     self.last_process_error = str(exc)
                     self.state = ControllerState.ERROR
+                    self._next_tick_monotonic = None
                     self.process_adapter.disconnect()
                     raise RuntimeError(f"Controller process read failed: {exc}") from exc
                 self.last_process_state = process_state.to_dict()
                 self.last_process_error = None
 
+            tick = ControllerTickInput(
+                tick_seq=tick_seq,
+                controller_dt_s=dt,
+                elapsed_s=elapsed,
+                growth_sample=sample,
+                growth_sample_age_s=age,
+                process_state=process_state,
+            )
             try:
-                output = self.adapter.step(sample, process_state)
-                if output is not None and not isinstance(
-                    output, ControllerStepResult
-                ):
+                output = self.adapter.step(tick)
+                if output is not None and not isinstance(output, ControllerStepResult):
                     raise TypeError(
-                        "Controller adapter step() must return "
-                        "ControllerStepResult or None."
+                        "Controller adapter step() must return ControllerStepResult or None."
                     )
             except Exception as exc:
                 self.adapter_error_count += 1
+                self.control_tick_error_count += 1
                 self.state = ControllerState.ERROR
+                self._next_tick_monotonic = None
                 self.process_adapter.disconnect()
                 raise RuntimeError(f"Controller adapter step failed: {exc}") from exc
-            self.valid_sample_count += 1
 
             output_status: dict[str, Any] | None = None
             if output is not None:
                 process_write: ProcessWriteResult | None = None
                 process_write_attempted = bool(
                     self.settings.opcua_enabled
+                    and self.settings.opcua_write_enabled
                     and output.valid
                     and output.T_j_set is not None
                 )
@@ -904,15 +1051,17 @@ class ControllerService:
                         )
                     except Exception as exc:
                         self.process_error_count += 1
+                        self.control_tick_error_count += 1
                         self.last_process_error = str(exc)
                         process_write_error = str(exc)
                         self.state = ControllerState.ERROR
+                        self._next_tick_monotonic = None
                         self.process_adapter.disconnect()
                     else:
                         self.last_process_write = process_write.to_dict()
                         self.last_process_error = None
                 output_status = self._record_control_output_locked(
-                    sample,
+                    tick,
                     output,
                     process_state=process_state,
                     process_write=process_write,
@@ -920,24 +1069,25 @@ class ControllerService:
                     process_write_error=process_write_error,
                 )
                 if process_write_error is not None:
-                    raise RuntimeError(
-                        f"Controller process write failed: {process_write_error}"
-                    )
-
-        result = {
-            "accepted": True,
-            "kind": "sample",
-            "valid": True,
-            "frame_seq": sample.frame_seq,
-            "adapter_called": True,
-        }
-        if output_status is not None:
-            result.update(output_status)
-        return result
+                    raise RuntimeError(f"Controller process write failed: {process_write_error}")
+            if self.state == ControllerState.RUNNING:
+                previous_deadline = self._next_tick_monotonic or now_value
+                self._next_tick_monotonic = max(previous_deadline + dt, now_value + dt)
+            self._try_persist_state_locked()
+            result = {
+                "executed": True,
+                "tick_seq": tick_seq,
+                "growth_frame_seq": sample.frame_seq if sample is not None else None,
+                "growth_sample_age_s": age,
+                "output_generated": output is not None,
+            }
+            if output_status is not None:
+                result.update(output_status)
+            return result
 
     def _record_control_output_locked(
         self,
-        sample: GrowthRateSamplePayload,
+        tick: ControllerTickInput,
         output: ControllerStepResult,
         *,
         process_state: ProcessState | None = None,
@@ -948,7 +1098,8 @@ class ControllerService:
         computed_at = utc_ts()
         written: bool | None = None
         record = ControllerMeasurementRecord(
-            sample=sample,
+            run_id=str(self.current_run_id),
+            tick=tick,
             result=output,
             computed_at=computed_at,
             adaptation_enabled=self.adaptation_enabled,
@@ -967,8 +1118,8 @@ class ControllerService:
                 self.last_influx_error = str(exc)
                 logger.warning(
                     "Could not persist Controller measurement for %s frame %s: %s",
-                    sample.run_id,
-                    sample.frame_seq,
+                    self.current_run_id,
+                    tick.tick_seq,
                     exc,
                 )
             else:
@@ -988,10 +1139,16 @@ class ControllerService:
         if not output.valid:
             self.invalid_control_output_count += 1
         self.last_control_output = {
-            "run_id": sample.run_id,
-            "frame_seq": sample.frame_seq,
-            "image_name": sample.image_name,
-            "sample_processed_at": sample.processed_at,
+            "run_id": self.current_run_id,
+            "tick_seq": tick.tick_seq,
+            "controller_dt_s": tick.controller_dt_s,
+            "elapsed_s": tick.elapsed_s,
+            "growth_frame_seq": (
+                tick.growth_sample.frame_seq
+                if tick.growth_sample is not None
+                else None
+            ),
+            "growth_sample_age_s": tick.growth_sample_age_s,
             "computed_at": computed_at,
             "result": output.to_dict(),
             "process_state": (
@@ -1021,6 +1178,11 @@ class ControllerService:
         opcua.update(
             {
                 "enabled": self.settings.opcua_enabled,
+                "write_enabled": self.settings.opcua_write_enabled,
+                "shadow_mode": (
+                    self.settings.opcua_enabled
+                    and not self.settings.opcua_write_enabled
+                ),
                 "configured": bool(self.settings.opcua_endpoint),
                 "service_error_count": self.process_error_count,
                 "service_last_error": self.last_process_error,
@@ -1060,6 +1222,21 @@ class ControllerService:
                 "stopped_at": self.stopped_at,
                 "last_frame_seq": self.last_frame_seq,
                 "last_sample": copy.deepcopy(self.last_sample),
+                "last_valid_sample": (
+                    self.last_valid_sample.to_dict()
+                    if self.last_valid_sample is not None
+                    else None
+                ),
+                "scheduler": {
+                    "thread_alive": bool(
+                        self._control_thread and self._control_thread.is_alive()
+                    ),
+                    "tick_count": self.control_tick_count,
+                    "tick_error_count": self.control_tick_error_count,
+                    "controller_dt_s": float(self.parameters.get("dt", 5.0)),
+                    "growth_dt_s": float(self.parameters.get("dt_G", 15.0)),
+                    "last_growth_sample_age_s": self.last_growth_sample_age_s,
+                },
                 "sample_counts": {
                     "valid": self.valid_sample_count,
                     "invalid": self.invalid_sample_count,
