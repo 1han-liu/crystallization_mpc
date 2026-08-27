@@ -39,8 +39,11 @@ class ControllerStepResult:
     T_j_set: float | None = None
     objective: float | None = None
     E_A: float | None = None
+    E_A_KF: float | None = None
     k_0: float | None = None
+    k_0_KF: float | None = None
     n: float | None = None
+    n_KF: float | None = None
 
     NUMERIC_FIELDS: ClassVar[tuple[str, ...]] = (
         "T",
@@ -63,8 +66,11 @@ class ControllerStepResult:
         "T_j_set",
         "objective",
         "E_A",
+        "E_A_KF",
         "k_0",
+        "k_0_KF",
         "n",
+        "n_KF",
     )
 
     def __post_init__(self) -> None:

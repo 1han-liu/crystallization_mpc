@@ -9,7 +9,10 @@ from typing import Any
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.process import ProcessState, ProcessWriteResult
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
-from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
+from crystallization_mpc.messaging.contracts import (
+    CONTROLLER_CONTROL_TARGETS,
+    GrowthRateSamplePayload,
+)
 
 CONTROLLER_MEASUREMENT = "controller_measurement"
 CONTROLLER_SERVICE_TAG = "controller"
@@ -20,6 +23,7 @@ class ControllerMeasurementRecord:
     sample: GrowthRateSamplePayload
     result: ControllerStepResult
     computed_at: str
+    control_target: str
     adaptation_enabled: bool
     adaptation_mode: str
     process_state: ProcessState | None = None
@@ -32,6 +36,9 @@ class ControllerMeasurementRecord:
             raise ValueError("Controller measurement requires a valid Gsensor sample.")
         if not str(self.computed_at).strip():
             raise ValueError("computed_at is required.")
+        if self.control_target not in CONTROLLER_CONTROL_TARGETS:
+            allowed = ", ".join(CONTROLLER_CONTROL_TARGETS)
+            raise ValueError(f"control_target must be one of: {allowed}.")
         if not isinstance(self.adaptation_enabled, bool):
             raise ValueError("adaptation_enabled must be a boolean.")
         if not str(self.adaptation_mode).strip():
@@ -51,6 +58,7 @@ class ControllerMeasurementRecord:
             "service": CONTROLLER_SERVICE_TAG,
             "run_id": self.sample.run_id,
             "status": "calculated" if self.result.valid else "invalid",
+            "target": self.control_target,
             "adaptation_enabled": str(self.adaptation_enabled).lower(),
             "adaptation_mode": self.adaptation_mode,
         }

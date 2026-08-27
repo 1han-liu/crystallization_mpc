@@ -245,6 +245,7 @@ class CentralApp:
         experiment: Dict[str, Any],
         *,
         dst: str,
+        control_target: str = "sigma",
         adaptation_enabled: bool = False,
         adaptation_mode: str = "E_A",
         seq: Optional[int] = None,
@@ -255,6 +256,7 @@ class CentralApp:
             started_at=str(experiment["started_at"]),
             image_directory=str(experiment.get("image_directory", "images")),
             mode=EXPERIMENT_MODE_LIVE,
+            control_target=control_target,
             adaptation_enabled=adaptation_enabled,
             adaptation_mode=adaptation_mode,
         )
@@ -271,6 +273,7 @@ class CentralApp:
         self,
         experiment: Dict[str, Any],
         *,
+        control_target: str = "sigma",
         adaptation_enabled: bool = False,
         adaptation_mode: str = "E_A",
     ) -> Dict[str, Dict[str, Any]]:
@@ -280,6 +283,7 @@ class CentralApp:
             env = self.build_experiment_start_command(
                 experiment,
                 dst=dst,
+                control_target=control_target,
                 adaptation_enabled=adaptation_enabled,
                 adaptation_mode=adaptation_mode,
                 seq=seq,
@@ -1106,6 +1110,7 @@ class CentralService:
             )
             commands = self.publisher.publish_experiment_start_command(
                 experiment,
+                control_target=self.run_configuration.control_target,
                 adaptation_enabled=self.run_configuration.adaptation_enabled,
                 adaptation_mode=self.run_configuration.adaptation_mode,
             )

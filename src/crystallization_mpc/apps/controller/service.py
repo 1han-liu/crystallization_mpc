@@ -44,6 +44,7 @@ from crystallization_mpc.messaging.commands import (
     PARAMS_UPDATE_MESSAGE,
 )
 from crystallization_mpc.messaging.contracts import (
+    CONTROLLER_CONTROL_TARGETS,
     ControllerAddSeedPayload,
     ControllerAdaptationPayload,
     ExperimentStartPayload,
@@ -93,6 +94,7 @@ class ControllerService:
         self.parameters: dict[str, Any] = {}
         self.parameter_version: int | None = None
         self.current_run_id: str | None = None
+        self.control_target = "sigma"
         self.started_at: str | None = None
         self.stopped_at: str | None = None
         self.last_frame_seq: int | None = None
@@ -196,6 +198,7 @@ class ControllerService:
             "parameters": copy.deepcopy(self.parameters),
             "parameter_version": self.parameter_version,
             "current_run_id": self.current_run_id,
+            "control_target": self.control_target,
             "started_at": self.started_at,
             "stopped_at": self.stopped_at,
             "last_frame_seq": self.last_frame_seq,
@@ -319,6 +322,9 @@ class ControllerService:
                 int(parameter_version) if parameter_version is not None else None
             )
             self.current_run_id = document.get("current_run_id")
+            self.control_target = str(document.get("control_target", "sigma"))
+            if self.control_target not in CONTROLLER_CONTROL_TARGETS:
+                raise ValueError("Controller recovery control_target must be sigma or G.")
             self.started_at = document.get("started_at")
             self.stopped_at = document.get("stopped_at")
             last_frame_seq = document.get("last_frame_seq")
@@ -647,6 +653,7 @@ class ControllerService:
                 raise ValueError("Controller is already running another experiment.")
 
             self.current_run_id = command.run_id
+            self.control_target = command.control_target
             self.started_at = command.started_at
             self.stopped_at = None
             self.last_frame_seq = None
@@ -951,6 +958,7 @@ class ControllerService:
             sample=sample,
             result=output,
             computed_at=computed_at,
+            control_target=self.control_target,
             adaptation_enabled=self.adaptation_enabled,
             adaptation_mode=self.adaptation_mode,
             process_state=process_state,
@@ -1053,6 +1061,7 @@ class ControllerService:
                 "status": self.state.value,
                 "active": self.state == ControllerState.RUNNING,
                 "current_run_id": self.current_run_id,
+                "control_target": self.control_target,
                 "parameter_version": self.parameter_version,
                 "parameter_count": len(self.parameters),
                 "parameters": copy.deepcopy(self.parameters),

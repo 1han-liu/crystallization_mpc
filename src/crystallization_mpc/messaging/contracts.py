@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from crystallization_mpc.messaging.commands import EXPERIMENT_MODE_LIVE
 
 GROWTH_RATE_UNIT = "m/s"
+CONTROLLER_CONTROL_TARGETS = ("sigma", "G")
 CONTROLLER_ADAPTATION_MODES = (
     "E_A",
     "k_0",
@@ -39,6 +40,7 @@ class ExperimentStartPayload:
     started_at: str
     image_directory: str = "images"
     mode: str = EXPERIMENT_MODE_LIVE
+    control_target: str = "sigma"
     adaptation_enabled: bool = False
     adaptation_mode: str = "E_A"
 
@@ -51,6 +53,9 @@ class ExperimentStartPayload:
             raise ValueError("image_directory must be 'images'.")
         if self.mode != EXPERIMENT_MODE_LIVE:
             raise ValueError(f"mode must be {EXPERIMENT_MODE_LIVE!r}.")
+        if self.control_target not in CONTROLLER_CONTROL_TARGETS:
+            allowed = ", ".join(CONTROLLER_CONTROL_TARGETS)
+            raise ValueError(f"control_target must be one of: {allowed}.")
         if not isinstance(self.adaptation_enabled, bool):
             raise ValueError("adaptation_enabled must be a boolean.")
         if self.adaptation_mode not in CONTROLLER_ADAPTATION_MODES:
@@ -64,6 +69,7 @@ class ExperimentStartPayload:
             "started_at": self.started_at,
             "image_directory": self.image_directory,
             "mode": self.mode,
+            "control_target": self.control_target,
             "adaptation_enabled": self.adaptation_enabled,
             "adaptation_mode": self.adaptation_mode,
         }
@@ -76,6 +82,7 @@ class ExperimentStartPayload:
             started_at=_mapping_text(payload, "started_at"),
             image_directory=str(payload.get("image_directory", "images")),
             mode=str(payload.get("mode", EXPERIMENT_MODE_LIVE)),
+            control_target=str(payload.get("control_target", "sigma")),
             adaptation_enabled=(
                 _mapping_bool(payload, "adaptation_enabled")
                 if "adaptation_enabled" in payload
@@ -366,6 +373,7 @@ def _optional_float(value: Any) -> float | None:
 
 __all__ = [
     "CONTROLLER_ADAPTATION_MODES",
+    "CONTROLLER_CONTROL_TARGETS",
     "GROWTH_RATE_UNIT",
     "ControllerAddSeedPayload",
     "ControllerAdaptationPayload",

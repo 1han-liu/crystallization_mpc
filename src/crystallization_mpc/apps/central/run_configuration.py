@@ -10,14 +10,17 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from crystallization_mpc.messaging.contracts import CONTROLLER_ADAPTATION_MODES
+from crystallization_mpc.messaging.contracts import (
+    CONTROLLER_ADAPTATION_MODES,
+    CONTROLLER_CONTROL_TARGETS,
+)
 
 RUN_CONFIGURATION_SCHEMA_VERSION = 1
 RUN_CONFIGURATION_FILENAME = ".central_run_configuration.json"
 
 RUN_TYPES = ("experiment", "simulation")
 CONTROLLER_MODES = ("MPC", "PI")
-CONTROL_TARGETS = ("sigma", "G")
+CONTROL_TARGETS = CONTROLLER_CONTROL_TARGETS
 ADAPTATION_MODES = CONTROLLER_ADAPTATION_MODES
 GROWTH_RATE_SOURCES = ("live_gsensor", "simulated", "presaved_images")
 

@@ -1,0 +1,1462 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "celsius"},
+              {"id": "decimals", "value": 2},
+              {"id": "custom.axisLabel", "value": "T [°C]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "T"},
+            "properties": [
+              {"id": "displayName", "value": "T"},
+              {"id": "color", "value": {"fixedColor": "#DC143C", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "T_KF"},
+            "properties": [
+              {"id": "displayName", "value": "T_KF"},
+              {"id": "color", "value": {"fixedColor": "#DC143C", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "T_j"},
+            "properties": [
+              {"id": "displayName", "value": "T_j"},
+              {"id": "color", "value": {"fixedColor": "#7CFC00", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "T_j_set"},
+            "properties": [
+              {"id": "displayName", "value": "T_j,set"},
+              {"id": "color", "value": {"fixedColor": "#7CFC00", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [8, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"T\" or r[\"_field\"] == \"T_KF\" or r[\"_field\"] == \"T_j\" or r[\"_field\"] == \"T_j_set\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: r._value - 273.15}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Reactor & jacket temperature",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "celsius"},
+              {"id": "decimals", "value": 2},
+              {"id": "custom.axisLabel", "value": "T [°C]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "T"},
+            "properties": [
+              {"id": "displayName", "value": "T"},
+              {"id": "color", "value": {"fixedColor": "#DC143C", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "T_KF"},
+            "properties": [
+              {"id": "displayName", "value": "T_KF"},
+              {"id": "color", "value": {"fixedColor": "#DC143C", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"T\" or r[\"_field\"] == \"T_KF\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: r._value - 273.15}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Reactor temperature",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "suffix:K/s"},
+              {"id": "decimals", "value": 4},
+              {"id": "custom.axisLabel", "value": "dT/dt [K/s]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "dT_dt"},
+            "properties": [
+              {"id": "displayName", "value": "dT/dt"},
+              {"id": "color", "value": {"fixedColor": "#FF8C00", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "dT_dt_KF"},
+            "properties": [
+              {"id": "displayName", "value": "dT_KF/dt"},
+              {"id": "color", "value": {"fixedColor": "#FF8C00", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "dT_dt_set"},
+            "properties": [
+              {"id": "displayName", "value": "dT_set/dt"},
+              {"id": "color", "value": {"fixedColor": "#FFD700", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [8, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"dT_dt\" or r[\"_field\"] == \"dT_dt_KF\" or r[\"_field\"] == \"dT_dt_set\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Temperature gradient",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "suffix:g/gH₂O"},
+              {"id": "decimals", "value": 4},
+              {"id": "custom.axisLabel", "value": "c [g/gH₂O]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "c"},
+            "properties": [
+              {"id": "displayName", "value": "c"},
+              {"id": "color", "value": {"fixedColor": "#4682B4", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "c_KF"},
+            "properties": [
+              {"id": "displayName", "value": "c_KF"},
+              {"id": "color", "value": {"fixedColor": "#4682B4", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"c\" or r[\"_field\"] == \"c_KF\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Concentration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "suffix:(g/gH₂O)/s"},
+              {"id": "decimals", "value": 8},
+              {"id": "custom.axisLabel", "value": "dc/dt [(g/gH₂O)/s]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "dc_dt"},
+            "properties": [
+              {"id": "displayName", "value": "dc/dt"},
+              {"id": "color", "value": {"fixedColor": "#40E0D0", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "dc_dt_KF"},
+            "properties": [
+              {"id": "displayName", "value": "dc_KF/dt"},
+              {"id": "color", "value": {"fixedColor": "#40E0D0", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"dc_dt\" or r[\"_field\"] == \"dc_dt_KF\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Concentration gradient",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "none"},
+              {"id": "decimals", "value": 4},
+              {"id": "custom.axisLabel", "value": "σ [-]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "target_value"},
+            "properties": [
+              {"id": "displayName", "value": "σ"},
+              {"id": "color", "value": {"fixedColor": "#4B0082", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "target_set"},
+            "properties": [
+              {"id": "displayName", "value": "σ_set"},
+              {"id": "color", "value": {"fixedColor": "#FF0000", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [8, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "objective"},
+            "properties": [
+              {"id": "displayName", "value": "f_val"},
+              {"id": "color", "value": {"fixedColor": "#1E90FF", "mode": "fixed"}},
+              {"id": "custom.axisPlacement", "value": "right"},
+              {"id": "custom.axisLabel", "value": "f_val [-]"}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 8
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"target\"] == \"sigma\")\n  |> filter(fn: (r) => r[\"_field\"] == \"target_value\" or r[\"_field\"] == \"target_set\" or r[\"_field\"] == \"objective\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Target & obj. fun (sigma)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "suffix:m/s"},
+              {"id": "decimals", "value": 10},
+              {"id": "custom.axisLabel", "value": "G [m/s]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "target_value"},
+            "properties": [
+              {"id": "displayName", "value": "G"},
+              {"id": "color", "value": {"fixedColor": "#2E8B57", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "target_set"},
+            "properties": [
+              {"id": "displayName", "value": "G_set"},
+              {"id": "color", "value": {"fixedColor": "#FF0000", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [8, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "objective"},
+            "properties": [
+              {"id": "displayName", "value": "f_val"},
+              {"id": "color", "value": {"fixedColor": "#1E90FF", "mode": "fixed"}},
+              {"id": "unit", "value": "none"},
+              {"id": "decimals", "value": 4},
+              {"id": "custom.axisPlacement", "value": "right"},
+              {"id": "custom.axisLabel", "value": "f_val [-]"}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"target\"] == \"G\")\n  |> filter(fn: (r) => r[\"_field\"] == \"target_value\" or r[\"_field\"] == \"target_set\" or r[\"_field\"] == \"objective\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Target & obj. fun (G)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "none"},
+              {"id": "decimals", "value": 4},
+              {"id": "custom.axisLabel", "value": "σ [-]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "sigma"},
+            "properties": [
+              {"id": "displayName", "value": "σ"},
+              {"id": "color", "value": {"fixedColor": "#4B0082", "mode": "fixed"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"sigma\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Relative supersaturation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "suffix:m/s"},
+              {"id": "decimals", "value": 10},
+              {"id": "custom.axisLabel", "value": "G [m/s]"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_model"},
+            "properties": [
+              {"id": "displayName", "value": "G"},
+              {"id": "color", "value": {"fixedColor": "#2E8B57", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_u"},
+            "properties": [
+              {"id": "displayName", "value": "G_u"},
+              {"id": "color", "value": {"fixedColor": "#FFD700", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_u_KF"},
+            "properties": [
+              {"id": "displayName", "value": "G_u,KF"},
+              {"id": "color", "value": {"fixedColor": "#FFD700", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_v"},
+            "properties": [
+              {"id": "displayName", "value": "G_v"},
+              {"id": "color", "value": {"fixedColor": "#00FFFF", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_v_KF"},
+            "properties": [
+              {"id": "displayName", "value": "G_v,KF"},
+              {"id": "color", "value": {"fixedColor": "#00FFFF", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_measure"},
+            "properties": [
+              {"id": "displayName", "value": "G_measure"},
+              {"id": "color", "value": {"fixedColor": "#4B0082", "mode": "fixed"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "G_measure_KF"},
+            "properties": [
+              {"id": "displayName", "value": "G_measure,KF"},
+              {"id": "color", "value": {"fixedColor": "#4B0082", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"G_model\" or r[\"_field\"] == \"G_measure\" or r[\"_field\"] == \"G_measure_KF\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"gsensor_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"G_u\" or r[\"_field\"] == \"G_u_KF\" or r[\"_field\"] == \"G_v\" or r[\"_field\"] == \"G_v_KF\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "B"
+        }
+      ],
+      "title": "Growth rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 16
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [],
+      "title": "Count",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/.*/"},
+            "properties": [
+              {"id": "unit", "value": "none"},
+              {"id": "decimals", "value": 4},
+              {"id": "custom.axisLabel", "value": "Scaled parameter value"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "n"},
+            "properties": [
+              {"id": "displayName", "value": "n [10⁻²]"},
+              {"id": "color", "value": {"fixedColor": "#4B0082", "mode": "fixed"}},
+              {"id": "custom.lineWidth", "value": 2}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "n_KF"},
+            "properties": [
+              {"id": "displayName", "value": "n_KF [10⁻²]"},
+              {"id": "color", "value": {"fixedColor": "#4B0082", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "k_0"},
+            "properties": [
+              {"id": "displayName", "value": "k₀ [10¹⁴ m/s]"},
+              {"id": "color", "value": {"fixedColor": "#2E8B57", "mode": "fixed"}},
+              {"id": "custom.lineWidth", "value": 2}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "k_0_KF"},
+            "properties": [
+              {"id": "displayName", "value": "k₀_KF [10¹⁴ m/s]"},
+              {"id": "color", "value": {"fixedColor": "#2E8B57", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "E_A"},
+            "properties": [
+              {"id": "displayName", "value": "E_A [kJ/mol]"},
+              {"id": "color", "value": {"fixedColor": "#FF8C00", "mode": "fixed"}},
+              {"id": "custom.lineWidth", "value": 2}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "E_A_KF"},
+            "properties": [
+              {"id": "displayName", "value": "E_A,KF [kJ/mol]"},
+              {"id": "color", "value": {"fixedColor": "#FF8C00", "mode": "fixed"}},
+              {"id": "custom.lineStyle", "value": {"dash": [4, 4], "fill": "dash"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 16
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"controller_measurement\")\n  |> filter(fn: (r) => r[\"run_id\"] =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r[\"_field\"] == \"n\" or r[\"_field\"] == \"n_KF\" or r[\"_field\"] == \"k_0\" or r[\"_field\"] == \"k_0_KF\" or r[\"_field\"] == \"E_A\" or r[\"_field\"] == \"E_A_KF\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: if r[\"_field\"] == \"n\" or r[\"_field\"] == \"n_KF\" then r[\"_value\"] * 100.0 else if r[\"_field\"] == \"k_0\" or r[\"_field\"] == \"k_0_KF\" then r[\"_value\"] / 100000000000000.0 else r[\"_value\"] / 1000.0}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Growth parameters",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 16
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [],
+      "title": "Lag time, percentage & ratio",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "crystallization",
+    "mpc"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "crystallization-influxdb"
+        },
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"run_id\", predicate: (r) => r._measurement == \"controller_measurement\" or r._measurement == \"gsensor_measurement\", start: v.timeRangeStart, stop: v.timeRangeStop)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Run",
+        "multi": false,
+        "name": "run_id",
+        "options": [],
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"run_id\", predicate: (r) => r._measurement == \"controller_measurement\" or r._measurement == \"gsensor_measurement\", start: v.timeRangeStart, stop: v.timeRangeStop)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 3,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Crystallization MPC Analysis",
+  "uid": "crystallization-mpc-analysis",
+  "version": 1,
+  "weekStart": ""
+}

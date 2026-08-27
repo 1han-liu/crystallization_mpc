@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: Crystallization MPC
+    orgId: 1
+    folder: Crystallization MPC
+    folderUid: crystallization-mpc
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
