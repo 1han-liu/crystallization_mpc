@@ -1,0 +1,24 @@
+{
+    "parameter_on_target_change":
+    [
+    "target_set",
+    "sigma_set",
+    "G_set",
+    "params.K_P_T_sigma:  params.K_P_T = params.K_P_T_sigma",
+    "params.K_I_T_sigma:  params.K_I_T = params.K_I_T_sigma",
+    "params.K_P_T_G:  params.K_P_T = params.K_P_T_G",
+    "params.K_I_T_G: params.K_I_T = params.K_I_T_G",
+    "t_lag_threshold_perc_sigma: t_lag_threshold_perc = t_lag_threshold_perc_sigma",
+    "t_lag_threshold_perc_G: t_lag_threshold_perc = t_lag_threshold_perc_G",
+    "dT_dt_min_sigma:  dT_dt_min = dT_dt_min_sigma",
+    "dT_dt_max_sigma:  dT_dt_max = dT_dt_max_sigma",
+    "dT_dt_min_G: dT_dt_min = dT_dt_min_G",
+    "dT_dt_max_G: dT_dt_max = dT_dt_max_G",
+    "T_init_sigma: T_init = T_init_sigma",
+    "T_init_G: T_init = T_init_G",
+    "steps_sigma: steps = steps_sigma",
+    "steps_G: steps = steps_G",
+    "seed_time_sigma: seed_time = seed_time_sigma",
+    "seed_time_G: seed_time = seed_time_G"
+]
+}

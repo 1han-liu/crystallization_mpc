@@ -1,0 +1,155 @@
+x-mpc-image: &mpc-image crystallization-mpc-app:local
+
+services:
+  central:
+    image: *mpc-image
+    build:
+      context: .
+      dockerfile: services/mpc/Dockerfile
+    command: ["uvicorn", "crystallization_mpc.apps.central.ui.app:web_app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - UI_MODE=${UI_MODE:-production}
+      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
+      - RABBIT_EXCHANGE=idp.bus
+      - RABBIT_QUEUE=central.in
+      - RABBIT_HEARTBEAT_SEC=0
+      - CONTROLLER_STATUS_URL=http://controller:8002/api/status
+      - PARAMS_DEFAULT_FILE=/app/params_default.yaml
+      - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
+      - PARAM_META_FILE=/app/param_meta.yaml
+      - EXPERIMENT_ROOT=/data/experiments
+      - EXPERIMENT_HOST_ROOT_DISPLAY=${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+    volumes:
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
+    depends_on:
+      - rabbitmq
+      - controller
+    restart: unless-stopped
+
+  gsensor:
+    # Central builds the shared application image once; Gsensor runs the same
+    # image with a different command instead of triggering a duplicate build.
+    image: *mpc-image
+    command: ["uvicorn", "crystallization_mpc.apps.gsensor.app:web_app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    env_file:
+      - config/influxdb.env
+    environment:
+      - UI_MODE=${UI_MODE:-production}
+      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
+      - RABBIT_EXCHANGE=idp.bus
+      - PARAMS_DEFAULT_FILE=/app/params_default.yaml
+      - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
+      - PARAM_META_FILE=/app/param_meta.yaml
+      - EXPERIMENT_ROOT=/data/experiments
+      - GSENSOR_IMAGE_POLL_INTERVAL_S=${GSENSOR_IMAGE_POLL_INTERVAL_S:-1.0}
+      - GSENSOR_HOUGH_DEBUG_ENABLED=${GSENSOR_HOUGH_DEBUG_ENABLED:-false}
+      - GSENSOR_STATUS_PUBLISH_ENABLED=true
+      - GSENSOR_SAMPLE_PUBLISH_ENABLED=true
+      - GSENSOR_INFLUX_ENABLED=true
+      - INFLUX_URL=http://influxdb:8086
+    volumes:
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
+    depends_on:
+      - rabbitmq
+      - influxdb
+    restart: unless-stopped
+
+  controller:
+    image: *mpc-image
+    command: ["uvicorn", "crystallization_mpc.apps.controller.app:web_app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    env_file:
+      - config/influxdb.env
+    environment:
+      - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
+      - RABBIT_EXCHANGE=idp.bus
+      - RABBIT_QUEUE=controller.in
+      - EXPERIMENT_ROOT=/data/experiments
+      - CONTROLLER_ADAPTER=${CONTROLLER_ADAPTER:-}
+      - CONTROLLER_OPCUA_ENABLED=${CONTROLLER_OPCUA_ENABLED:-false}
+      - CONTROLLER_OPCUA_WRITE_ENABLED=${CONTROLLER_OPCUA_WRITE_ENABLED:-false}
+      - CONTROLLER_OPCUA_ENDPOINT=${CONTROLLER_OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:62552}
+      - CONTROLLER_OPCUA_NAMESPACE_INDEX=${CONTROLLER_OPCUA_NAMESPACE_INDEX:-2}
+      - CONTROLLER_OPCUA_T_J_SET_NODE=${CONTROLLER_OPCUA_T_J_SET_NODE:-iCache.Temperature1}
+      - CONTROLLER_OPCUA_T_NODE=${CONTROLLER_OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
+      - CONTROLLER_OPCUA_T_J_NODE=${CONTROLLER_OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
+      - CONTROLLER_OPCUA_C_NODE=${CONTROLLER_OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
+      - CONTROLLER_OPCUA_COUNT_MIDDLE_NODE=${CONTROLLER_OPCUA_COUNT_MIDDLE_NODE:-Local.iControl.Experiment1.Trends.count.Value}
+      - CONTROLLER_OPCUA_TIMEOUT_S=${CONTROLLER_OPCUA_TIMEOUT_S:-5.0}
+      - CONTROLLER_OPCUA_JACKET_MIN_K=${CONTROLLER_OPCUA_JACKET_MIN_K:-253.15}
+      - CONTROLLER_OPCUA_JACKET_MAX_K=${CONTROLLER_OPCUA_JACKET_MAX_K:-453.15}
+      - CONTROLLER_OPCUA_VERIFY_WRITE=${CONTROLLER_OPCUA_VERIFY_WRITE:-true}
+      - CONTROLLER_OPCUA_VERIFY_TOLERANCE_K=${CONTROLLER_OPCUA_VERIFY_TOLERANCE_K:-0.05}
+      - CONTROLLER_INFLUX_ENABLED=${CONTROLLER_INFLUX_ENABLED:-true}
+      - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
+    volumes:
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
+    depends_on:
+      - rabbitmq
+      - influxdb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/api/status', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "8087:8086"
+    env_file:
+      - config/influxdb.env
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "influx", "ping", "-host", "http://localhost:8086"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+
+volumes:
+  influxdb_data:
+  grafana_data:

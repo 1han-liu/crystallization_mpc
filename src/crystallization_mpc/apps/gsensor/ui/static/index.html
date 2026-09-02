@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en" data-ui-mode="production">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gsensor UI</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260820-init-actions">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" id="parameter-drawer">
+        <div class="sidebar-top">
+          <div class="brand">
+            <p class="eyebrow">Crystallization MPC</p>
+            <h1>Gsensor UI</h1>
+          </div>
+          <button id="toggle-parameters" class="nav-link">Parameters</button>
+        </div>
+
+        <div class="drawer-body">
+          <div class="panel drawer-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Parameter Drawer</p>
+                <h2>Gsensor Values</h2>
+              </div>
+              <div class="actions">
+                <button id="reset-params" class="ghost" type="button">Reset to Defaults</button>
+                <button id="save-params" class="primary" type="button">Save Parameters</button>
+              </div>
+            </div>
+            <div id="parameter-status" class="parameter-status loading" role="status" aria-live="polite">
+              <span id="parameter-status-text">Loading parameters…</span>
+            </div>
+            <form id="params-form" class="param-form"></form>
+          </div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section class="panel hero">
+          <div>
+            <p class="eyebrow">Crystallization MPC</p>
+            <h1>Gsensor UI</h1>
+            <p class="muted">Initialization and growth-rate measurement service shell.</p>
+          </div>
+          <div class="actions">
+            <span id="status-text" class="status idle">idle</span>
+            <span id="initialized-text" class="status idle">not initialized</span>
+          </div>
+        </section>
+
+        <section class="panel initialization-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Initialization</p>
+              <h2>Image Marking</h2>
+            </div>
+          </div>
+
+          <div class="experiment-source">
+            <div class="experiment-source-facts">
+              <div>
+                <span>Current Run</span>
+                <code id="current-run-id">No experiment selected</code>
+              </div>
+              <div>
+                <span>Mounted Image Directory</span>
+                <code id="current-image-directory">—</code>
+              </div>
+              <div>
+                <span>Supported Images</span>
+                <strong id="current-image-count">0</strong>
+              </div>
+            </div>
+            <div class="experiment-source-actions">
+              <button id="refresh-images" class="ghost">Refresh Images</button>
+            </div>
+            <p id="image-source-status" class="save-status muted">Waiting for experiment selection</p>
+          </div>
+
+          <div class="image-monitor">
+            <div class="image-monitor-head">
+              <div>
+                <p class="eyebrow">Live Image Monitor</p>
+                <h3>Directory Polling</h3>
+              </div>
+              <span id="image-scan-status" class="status idle">stopped</span>
+            </div>
+            <div class="image-monitor-facts">
+              <div>
+                <span>Processed</span>
+                <strong id="scan-processed-count">0</strong>
+              </div>
+              <div>
+                <span>Pending Retry</span>
+                <strong id="scan-pending-count">0</strong>
+              </div>
+              <div class="wide">
+                <span>Last Detected Image</span>
+                <code id="scan-last-image">—</code>
+              </div>
+              <div>
+                <span>File Modified At</span>
+                <code id="scan-file-modified-at">—</code>
+              </div>
+              <div>
+                <span>Detected At</span>
+                <code id="scan-detected-at">—</code>
+              </div>
+            </div>
+            <p id="scan-last-error" class="save-status muted" hidden></p>
+          </div>
+
+          <div class="baseline-monitor">
+            <div class="image-monitor-head">
+              <div>
+                <p class="eyebrow">Measurement Baseline</p>
+                <h3>Frame 0</h3>
+              </div>
+              <span id="baseline-status" class="status idle">not ready</span>
+            </div>
+            <div class="baseline-monitor-facts">
+              <div><span>Frame</span><strong id="baseline-frame-seq">—</strong></div>
+              <div class="wide"><span>Image</span><code id="baseline-image">—</code></div>
+              <div><span>u Distance</span><strong id="baseline-u-distance">—</strong></div>
+              <div><span>v Distance</span><strong id="baseline-v-distance">—</strong></div>
+              <div><span>Established At</span><code id="baseline-established-at">—</code></div>
+            </div>
+          </div>
+
+          <div class="init-layout">
+            <div class="init-main">
+              <div class="image-stage">
+                <canvas id="init-canvas"></canvas>
+                <div class="corner-reference-inset" id="corner-reference-inset" hidden>
+                  <img id="corner-reference-image" alt="">
+                </div>
+                <p id="canvas-empty" class="canvas-empty muted">No image loaded</p>
+              </div>
+
+              <div class="three-d-preview" id="three-d-preview" hidden>
+                <div class="three-d-preview-head">
+                  <div>
+                    <p class="eyebrow">3D Preview</p>
+                    <h3 id="three-d-preview-title">Selected candidate</h3>
+                  </div>
+                  <button id="reset-3d-view" class="ghost">Reset View</button>
+                </div>
+                <canvas id="three-d-canvas"></canvas>
+                <div
+                  class="three-d-snapshots"
+                  id="three-d-snapshots"
+                  data-ui-visibility="development-only"
+                  hidden
+                >
+                  <div class="three-d-snapshots-head">
+                    <p class="eyebrow">Snapshots</p>
+                    <button id="clear-3d-snapshots" class="ghost">Clear</button>
+                  </div>
+                  <div class="three-d-snapshot-grid" id="three-d-snapshot-grid"></div>
+                </div>
+              </div>
+            </div>
+
+            <aside class="init-side">
+              <div class="init-status">
+                <p class="eyebrow">Step</p>
+                <h3 id="init-step-title">Not started</h3>
+                <p id="init-step-prompt" class="muted">Select an experiment and begin initialization.</p>
+                <div class="initialization-actions">
+                  <button id="undo-init" class="ghost" disabled>Undo</button>
+                  <button id="reset-init" class="ghost" disabled>Reset</button>
+                </div>
+              </div>
+
+              <div class="segmented" id="full-mode-controls">
+                <button data-full-mode="true" class="ghost" disabled>Yes</button>
+                <button data-full-mode="false" class="ghost" disabled>No</button>
+              </div>
+
+              <div class="segmented" id="corner-controls">
+                <button data-corner="A" class="ghost" disabled>A</button>
+                <button data-corner="B" class="ghost" disabled>B</button>
+                <button data-corner="C" class="ghost" disabled>C</button>
+              </div>
+
+              <div class="candidate-controls-wrap" id="candidate-controls-wrap" hidden>
+                <p class="eyebrow">3D Choice</p>
+                <div class="candidate-grid" id="candidate-controls"></div>
+                <button id="confirm-3d-choice" class="primary" disabled>
+                  Confirm selected candidate
+                </button>
+              </div>
+
+              <div class="point-list-wrap">
+                <p class="eyebrow">Points</p>
+                <ol id="point-list" class="point-list"></ol>
+              </div>
+            </aside>
+          </div>
+
+          <p id="init-save-status" class="save-status muted">idle</p>
+        </section>
+
+        <section class="panel online-measurement-panel" aria-labelledby="online-measurement-heading">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Online Growth Rate</p>
+              <h2 id="online-measurement-heading">Latest Processed Frame</h2>
+            </div>
+            <div class="actions">
+              <span id="measurement-validity" class="status idle">no sample</span>
+              <button id="refresh-overlay" class="ghost" type="button">Refresh Preview</button>
+            </div>
+          </div>
+          <div class="online-measurement-layout">
+            <div class="measurement-summary">
+              <div class="measurement-facts">
+                <div><span>Frame</span><strong id="measurement-frame">—</strong></div>
+                <div class="wide"><span>Image</span><code id="measurement-image">—</code></div>
+                <div><span>G_u</span><strong id="measurement-g-u">—</strong></div>
+                <div><span>G_u_KF</span><strong id="measurement-g-u-kf">—</strong></div>
+                <div><span>G_v</span><strong id="measurement-g-v">—</strong></div>
+                <div><span>G_v_KF</span><strong id="measurement-g-v-kf">—</strong></div>
+                <div><span>Valid Frames</span><strong id="measurement-valid-count">0</strong></div>
+                <div><span>Invalid Frames</span><strong id="measurement-invalid-count">0</strong></div>
+                <div><span>Controller Publishes</span><strong id="measurement-publish-count">0</strong></div>
+                <div><span>InfluxDB Writes</span><strong id="measurement-influx-count">0</strong></div>
+              </div>
+              <p id="measurement-error" class="save-status muted">Waiting for the first post-baseline image.</p>
+            </div>
+            <figure class="overlay-preview">
+              <img id="measurement-overlay" alt="Latest Gsensor Hough detection overlay" hidden>
+              <figcaption id="measurement-overlay-caption">Preview updates at most once every three seconds.</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section
+          class="panel development-tools-panel"
+          data-ui-visibility="development-only"
+          aria-labelledby="development-tools-heading"
+        >
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Development Mode</p>
+              <h2 id="development-tools-heading">Development Tools</h2>
+            </div>
+            <span class="status idle">development only</span>
+          </div>
+
+          <div class="development-tools-grid">
+            <div class="dscgr-controls">
+              <h3>DSCGR Offline Run</h3>
+              <p class="muted">Process the selected image directory as an offline diagnostic run.</p>
+              <button id="run-dscgr" class="primary" disabled>Run DSCGR</button>
+              <p id="dscgr-status" class="save-status muted">idle</p>
+            </div>
+
+            <details class="panel diagnostic-panel">
+              <summary class="diagnostic-summary">
+                <span>Active Parameters</span>
+              </summary>
+              <pre id="params-block" class="code-block"></pre>
+            </details>
+
+            <details class="panel diagnostic-panel">
+              <summary class="diagnostic-summary">
+                <span>Last Message</span>
+              </summary>
+              <pre id="message-block" class="code-block"></pre>
+            </details>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="param-field-template">
+      <div class="field">
+        <div class="field-heading">
+          <span class="field-key"></span>
+          <div class="field-actions">
+            <span class="field-modified" hidden>Modified</span>
+            <button class="field-reset ghost" type="button" hidden>Reset</button>
+          </div>
+        </div>
+        <div class="field-badges"></div>
+        <p class="field-description"></p>
+        <textarea rows="1" class="field-input"></textarea>
+      </div>
+    </template>
+
+    <script src="/static/app.js?v=20260820-remove-refresh"></script>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+version: 1
+sections:
+  - title: "Operation modes"
+    items:
+      - label: "Controller mode"
+        key: "mode"
+        kind: "list"
+        options: ["MPC", "PI"]
+        default: "MPC"
+      - label: "Controller: experiment or simulation"
+        key: "exp_sim"
+        kind: "list"
+        options: ["experiment", "simulation"]
+        default: "experiment"
+      - label: "Control target"
+        key: "target"
+        kind: "list"
+        options: ["sigma", "G"]
+        default: "sigma"
+      - label: "Adaptive mode"
+        key: "adaptive_mode"
+        kind: "list"
+        options: ["E_A", "k_0", "n", "E_A_and_k_0", "E_A_and_n", "k_0_and_n", "all"]
+        default: "E_A"
+      - label: "Growth rate sensor: experiment or simulation"
+        key: "exp_sim_G"
+        kind: "list"
+        options: ["simulation", "experiment", "experiment_with_presaved"]
+        default: "simulation"
+  - title: "Actions"
+    items:
+      - label: "Experiment lifecycle"
+        key: "experiment_active"
+        kind: "action_toggle"
+        labels: ["Start experiment", "Stop experiment"]
+        default: false

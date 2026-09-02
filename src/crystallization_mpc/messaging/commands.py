@@ -1,0 +1,28 @@
+"""Shared message names used across Central, Gsensor, and Controller."""
+
+EXPERIMENT_MODE_LIVE = "live"
+
+PARAMS_UPDATE_MESSAGE = "params.update"
+
+EXPERIMENT_SELECT_COMMAND = "experiment.select"
+EXPERIMENT_START_COMMAND = "experiment.start"
+EXPERIMENT_STOP_COMMAND = "experiment.stop"
+CONTROLLER_ADD_SEED_COMMAND = "controller.add_seed"
+CONTROLLER_ADAPTATION_SET_COMMAND = "controller.adaptation.set"
+
+GROWTH_RATE_SAMPLE_MESSAGE = "growth_rate.sample"
+GROWTH_RATE_STATUS_MESSAGE = "growth_rate.status"
+GROWTH_RATE_COMPLETED_MESSAGE = "growth_rate.completed"
+
+__all__ = [
+    "EXPERIMENT_MODE_LIVE",
+    "EXPERIMENT_SELECT_COMMAND",
+    "EXPERIMENT_START_COMMAND",
+    "EXPERIMENT_STOP_COMMAND",
+    "CONTROLLER_ADD_SEED_COMMAND",
+    "CONTROLLER_ADAPTATION_SET_COMMAND",
+    "GROWTH_RATE_COMPLETED_MESSAGE",
+    "GROWTH_RATE_SAMPLE_MESSAGE",
+    "GROWTH_RATE_STATUS_MESSAGE",
+    "PARAMS_UPDATE_MESSAGE",
+]
