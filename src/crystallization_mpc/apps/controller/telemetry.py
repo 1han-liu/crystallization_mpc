@@ -1,4 +1,4 @@
-"""InfluxDB record format for translated Controller calculation results."""
+"""InfluxDB record format for Controller calculation results."""
 
 from __future__ import annotations
 

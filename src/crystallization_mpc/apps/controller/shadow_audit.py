@@ -68,7 +68,7 @@ def _shadow_state(status: Mapping[str, Any]) -> tuple[Mapping[str, Any], int, in
 
     adapter = _mapping(status.get("adapter"), "adapter")
     if adapter.get("safe_noop") is True:
-        raise ShadowAuditError("Translated Controller adapter is not enabled.")
+        raise ShadowAuditError("Controller algorithm adapter is not enabled.")
 
     scheduler = _mapping(status.get("scheduler"), "scheduler")
     tick_count = _nonnegative_int(scheduler.get("tick_count"), "scheduler.tick_count")

@@ -5,11 +5,11 @@ import time
 import numpy as np
 
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
-from crystallization_mpc.apps.controller.translated.matlab_controller import MatlabController
+from crystallization_mpc.apps.controller.algorithm.controller import CrystallizationController
 
 
 def test_algorithm_tick_performance_on_frozen_environment() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated"},
         "performance",

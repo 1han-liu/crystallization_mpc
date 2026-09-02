@@ -1,4 +1,4 @@
-"""Stateful Python translation of the frozen MATLAB Controller loop."""
+"""Stateful crystallization control algorithm."""
 
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-class MatlabController:
-    """Own the MATLAB workspace variables for one configured experiment."""
+class CrystallizationController:
+    """Own the numerical state for one configured experiment."""
 
     def __init__(
         self,
@@ -213,9 +213,9 @@ class MatlabController:
             self.params, float(self.params["m_solvent"]) * previous["c"],
             float(self.params["m_solvent"]), self.size_list, previous["T"], dt,
         )
-        matlab_index = tick_index + 1
-        T += self._noise_value("T_noise", tick_index, matlab_index * 456, 0.01)
-        c += self._noise_value("c_noise", tick_index, matlab_index * 789, 0.0002)
+        reference_index = tick_index + 1
+        T += self._noise_value("T_noise", tick_index, reference_index * 456, 0.01)
+        c += self._noise_value("c_noise", tick_index, reference_index * 789, 0.0002)
         self.simulation_state.update({"T": T, "T_j": T_j, "c": c})
         return dict(self.simulation_state)
 
@@ -305,7 +305,7 @@ class MatlabController:
 
     def step(self, tick_input: ControllerTickInput) -> ControllerStepResult | None:
         if not self.running:
-            raise RuntimeError("MatlabController is not running.")
+            raise RuntimeError("CrystallizationController is not running.")
         if not isinstance(tick_input, ControllerTickInput):
             raise TypeError("step() requires ControllerTickInput.")
         dt = float(tick_input.controller_dt_s)
@@ -336,8 +336,8 @@ class MatlabController:
             if T <= 0 or T_j <= 0 or current_T_j_set <= 0 or c < 0 or count_middle < 0:
                 return ControllerStepResult(valid=False, error="Process input violates physical bounds.")
 
-            # MATLAB initializes the experiment EKF from the live T/c values
-            # read during Controller activation. In Python the first tick is
+            # The reference controller initializes the experiment EKF from the
+            # live T/c values read during activation. The first Python tick is
             # the first safe point at which that complete snapshot exists.
             if self.ekf is None:
                 self._initialize_filters(T, c)
@@ -384,8 +384,8 @@ class MatlabController:
             projected = filtered + np.array([filtered[1], 0.0, filtered[3], 0.0]) * lag
             if abs(float(calc_relative_sigma(projected[2], projected[0]))) < float(self.params["sigma_threshold"]):
                 if not self.history["T_j_set"] or self.history["T_j_set"][-1] is None:
-                    # The frozen script indexes ii-1 here. At ii=1 MATLAB's
-                    # outer try/catch produces no control result. Keep every
+                    # The frozen reference indexes ii-1 here. At ii=1 its outer
+                    # try/catch produces no control result. Keep every
                     # history aligned while representing that warm-up as None.
                     for key in ("dT_dt_set", "T_j_set", "objective", "objective_sigma", "objective_G"):
                         self.history[key].append(None)
@@ -608,4 +608,4 @@ class MatlabController:
             return False
 
 
-__all__ = ["ALGORITHM_STATE_SCHEMA_VERSION", "BASELINE_COMMIT", "MatlabController"]
+__all__ = ["ALGORITHM_STATE_SCHEMA_VERSION", "BASELINE_COMMIT", "CrystallizationController"]

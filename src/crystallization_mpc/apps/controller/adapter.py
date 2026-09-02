@@ -1,4 +1,4 @@
-"""Stable integration boundary for the translated Controller algorithm."""
+"""Stable integration boundary for a Controller algorithm."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class ControllerAdapter(ABC):
         ``T_j_set``, using kelvin for temperatures. It is ``None`` when real
         equipment I/O is disabled.
 
-        Returning ``None`` means that the translated algorithm has not
+        Returning ``None`` means that the configured algorithm has not
         produced an output for this frame. The service will not persist a
         placeholder record in that case.
         """
@@ -48,7 +48,7 @@ class ControllerAdapter(ABC):
     def add_seed(self, event: Mapping[str, Any]) -> None:
         """Apply or record one operator-confirmed seed-addition event.
 
-        The default is intentionally a no-op. A translated Controller can
+        The default is intentionally a no-op. A Controller implementation can
         override this hook without having to change the RabbitMQ service.
         """
 
@@ -62,7 +62,7 @@ class ControllerAdapter(ABC):
     ) -> None:
         """Enable or disable runtime growth-parameter adaptation.
 
-        ``mode`` identifies the MATLAB-compatible parameter combination. The
+        ``mode`` identifies the configured growth-parameter combination. The
         optional event is present for an operator-requested runtime change and
         is ``None`` when applying the experiment's initial configuration.
         """
@@ -86,7 +86,7 @@ class ControllerAdapter(ABC):
 
 
 class NoOpControllerAdapter(ControllerAdapter):
-    """Safe default used until the translated Controller is connected."""
+    """Safe default used until a Controller implementation is configured."""
 
     def configure(self, params: Mapping[str, Any], run_id: str) -> None:
         return None

@@ -8,7 +8,7 @@ from scipy.io import loadmat
 
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
-from crystallization_mpc.apps.controller.translated.matlab_controller import MatlabController
+from crystallization_mpc.apps.controller.algorithm.controller import CrystallizationController
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 
@@ -38,7 +38,7 @@ def _sample(frame: int) -> GrowthRateSamplePayload:
 @pytest.mark.parametrize("case_index", range(4))
 def test_finite_experiment_replay_matches_matlab_r2021a(case_index: int) -> None:
     case = GOLDEN["replay"][case_index]
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {
             "mode": case["mode"],

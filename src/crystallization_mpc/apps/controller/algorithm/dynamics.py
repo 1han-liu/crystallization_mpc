@@ -1,4 +1,4 @@
-"""MATLAB Controller process dynamics and RK45 state transitions."""
+"""Crystallization process dynamics and RK45 state transitions."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def calc_mode() -> str:
 def state_transition_matrices_model(
     n: float, E_A: float, R: float, x: np.ndarray, dt: float
 ) -> tuple[np.ndarray, np.ndarray]:
-    del dt  # MATLAB signature retains dt but the matrix does not use it.
+    del dt  # The reference signature retains dt but the matrix does not use it.
     T, _dT_dt, c, dc_dt = np.asarray(x, dtype=float).reshape(4)
     c_sat = float(calc_c_sat(T))
     dc_sat_dT = float(calc_dc_sat_dT(T))

@@ -13,7 +13,9 @@ from crystallization_mpc.apps.controller.process import (
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.service import ControllerService, ControllerState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
-from crystallization_mpc.apps.controller.translated.adapter import MatlabControllerAdapter
+from crystallization_mpc.apps.controller.algorithm.integration import (
+    CrystallizationControllerAdapter,
+)
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 
@@ -343,12 +345,12 @@ def test_write_gate_cannot_be_enabled_without_read_gate() -> None:
         raise AssertionError("Expected invalid OPC write-only configuration")
 
 
-def test_translated_controller_shadow_window_reads_eight_times_and_never_writes() -> None:
+def test_algorithm_controller_shadow_window_reads_eight_times_and_never_writes() -> None:
     clock = FakeClock()
     process = RecordingProcess()
     service = ControllerService(
         settings(opcua=True, write=False),
-        adapter=MatlabControllerAdapter(),
+        adapter=CrystallizationControllerAdapter(),
         process_adapter=process,
         monotonic_clock=clock,
     )

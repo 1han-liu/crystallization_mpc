@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from crystallization_mpc.apps.central.params import apply_derived_params
-from crystallization_mpc.apps.controller.translated.parameters import build_parameters
+from crystallization_mpc.apps.controller.algorithm.parameters import build_parameters
 
 
 def _sections() -> tuple[dict[str, object], dict[str, object]]:
@@ -21,8 +21,8 @@ def _sections() -> tuple[dict[str, object], dict[str, object]]:
 def test_central_derivations_equal_controller_contract(target: str) -> None:
     shared, controller = _sections()
     _shared, central, _derived = apply_derived_params(shared, controller, target=target)
-    translated = build_parameters({**shared, **central, "target": target})
-    for central_key, translated_key in {
+    normalized = build_parameters({**shared, **central, "target": target})
+    for central_key, algorithm_key in {
         "area_1": "area_1",
         "area_2": "area_2",
         "params.tau_1": "tau_1",
@@ -42,7 +42,7 @@ def test_central_derivations_equal_controller_contract(target: str) -> None:
         "steps": "steps",
         "seed_time": "seed_time",
     }.items():
-        assert central[central_key] == pytest.approx(translated[translated_key], rel=1e-14)
+        assert central[central_key] == pytest.approx(normalized[algorithm_key], rel=1e-14)
 
 
 @pytest.mark.parametrize(

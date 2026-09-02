@@ -1,4 +1,4 @@
-"""Validated return contract for one translated Controller algorithm step."""
+"""Validated return contract for one Controller algorithm step."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from typing import Any, ClassVar, Mapping
 class ControllerStepResult:
     """One optional result returned by ``ControllerAdapter.step``.
 
-    The field names follow the values calculated by the MATLAB Controller.
-    A translated adapter returns ``None`` until it has a real result; the
+    The field names follow the values calculated by the control algorithm.
+    An algorithm adapter returns ``None`` until it has a real result; the
     framework never manufactures a control output for the no-op adapter.
     """
 

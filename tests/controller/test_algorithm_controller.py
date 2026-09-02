@@ -4,11 +4,11 @@ import json
 
 import pytest
 
-from crystallization_mpc.apps.controller.translated.thermodynamics import calc_c_sat
+from crystallization_mpc.apps.controller.algorithm.thermodynamics import calc_c_sat
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
-from crystallization_mpc.apps.controller.translated.matlab_controller import (
-    MatlabController,
+from crystallization_mpc.apps.controller.algorithm.controller import (
+    CrystallizationController,
 )
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
@@ -33,7 +33,7 @@ def growth_sample(
 
 
 def test_simulation_runs_without_process_state_and_uses_controller_clock() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
     )
@@ -49,7 +49,7 @@ def test_simulation_runs_without_process_state_and_uses_controller_clock() -> No
 
 
 def test_growth_staleness_pauses_adaptation_but_not_control() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "live_gsensor"}, "run-1"
     )
@@ -68,7 +68,7 @@ def test_growth_staleness_pauses_adaptation_but_not_control() -> None:
 
 
 def test_seed_event_changes_simulation_population_on_next_tick() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
     )
@@ -83,7 +83,7 @@ def test_seed_event_changes_simulation_population_on_next_tick() -> None:
 
 
 def test_stop_forbids_further_calculation() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
     )
@@ -95,7 +95,7 @@ def test_stop_forbids_further_calculation() -> None:
 
 def test_state_export_is_json_safe_and_restore_is_continuous() -> None:
     params = {"run_type": "simulation", "growth_rate_source": "simulated"}
-    original = MatlabController()
+    original = CrystallizationController()
     original.configure(params, "run-1")
     original.start()
     for index in range(1, 4):
@@ -104,7 +104,7 @@ def test_state_export_is_json_safe_and_restore_is_continuous() -> None:
     assert state is not None
     json.dumps(state, allow_nan=False)
 
-    restored = MatlabController()
+    restored = CrystallizationController()
     assert restored.restore_state(params, "run-1", state)
     original_next = original.step(ControllerTickInput(4, 5.0, 20.0))
     restored_next = restored.step(ControllerTickInput(4, 5.0, 20.0))
@@ -125,12 +125,12 @@ def test_state_export_is_json_safe_and_restore_is_continuous() -> None:
 )
 def test_restore_rejects_incompatible_state(field: str, value: object) -> None:
     params = {"run_type": "simulation", "growth_rate_source": "simulated"}
-    source = MatlabController()
+    source = CrystallizationController()
     source.configure(params, "run-1")
     source.start()
     state = dict(source.export_state() or {})
     state[field] = value
-    target = MatlabController()
+    target = CrystallizationController()
     assert target.restore_state(params, "run-1", state) is False
     assert target.running is False
 
@@ -138,7 +138,7 @@ def test_restore_rejects_incompatible_state(field: str, value: object) -> None:
 def test_invalid_physical_process_input_returns_invalid_result() -> None:
     # The tick dataclass validates time. Numerical/physical process failures
     # are represented by an invalid result rather than an exception.
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated", "c_init": -1.0},
         "run-1",
@@ -150,7 +150,7 @@ def test_invalid_physical_process_input_returns_invalid_result() -> None:
 
 
 def test_abnormal_simulation_temperature_returns_invalid_result() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {
             "run_type": "simulation",
@@ -172,19 +172,19 @@ def test_zero_supersaturation_first_tick_is_recoverable_warmup_none() -> None:
         "growth_rate_source": "simulated",
         "c_init": c_sat,
     }
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(params, "run-1")
     controller.start()
     assert controller.step(ControllerTickInput(1, 5.0, 5.0)) is None
     assert {len(values) for values in controller.history.values()} == {1}
     state = controller.export_state()
     assert state is not None
-    restored = MatlabController()
+    restored = CrystallizationController()
     assert restored.restore_state(params, "run-1", state)
 
 
 def test_expected_optimizer_failure_returns_invalid_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    from crystallization_mpc.apps.controller.translated import control
+    from crystallization_mpc.apps.controller.algorithm import control
 
     class Failed:
         success = False
@@ -192,7 +192,7 @@ def test_expected_optimizer_failure_returns_invalid_result(monkeypatch: pytest.M
         message = "forced failure"
 
     monkeypatch.setattr(control, "minimize_scalar", lambda *args, **kwargs: Failed())
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
     )
@@ -208,7 +208,7 @@ def test_expected_optimizer_failure_returns_invalid_result(monkeypatch: pytest.M
 
 
 def test_infeasible_mpc_bounds_return_invalid_result() -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {
             "run_type": "simulation",
@@ -226,7 +226,7 @@ def test_infeasible_mpc_bounds_return_invalid_result() -> None:
 
 
 def test_mpc_timeout_returns_invalid_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    from crystallization_mpc.apps.controller.translated import control
+    from crystallization_mpc.apps.controller.algorithm import control
 
     timestamps = iter([0.0, control.MPC_OPTIMIZER_TIMEOUT_S])
     monkeypatch.setattr(control.time, "monotonic", lambda: next(timestamps))
@@ -235,7 +235,7 @@ def test_mpc_timeout_returns_invalid_result(monkeypatch: pytest.MonkeyPatch) -> 
         "minimize_scalar",
         lambda objective, **_kwargs: objective(0.0),
     )
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": "simulated"}, "run-1"
     )
@@ -253,7 +253,7 @@ def test_restore_rebuilds_ekf_closures_from_adapted_parameters() -> None:
         "min_num_adapt": 1,
         "c_init": 0.4,
     }
-    original = MatlabController()
+    original = CrystallizationController()
     original.configure(params, "run-1")
     original.set_adaptation(True, "E_A")
     original.start()
@@ -269,7 +269,7 @@ def test_restore_rebuilds_ekf_closures_from_adapted_parameters() -> None:
         )
     state = original.export_state()
     assert state is not None
-    restored = MatlabController()
+    restored = CrystallizationController()
     assert restored.restore_state(params, "run-1", state)
     assert restored.params["E_A"] == pytest.approx(original.params["E_A"])
     expected = original.step(
@@ -287,7 +287,7 @@ def test_restore_rebuilds_ekf_closures_from_adapted_parameters() -> None:
 def test_temporary_missing_experiment_state_does_not_break_next_tick() -> None:
     from crystallization_mpc.apps.controller.process import ProcessState
 
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "experiment", "growth_rate_source": "live_gsensor"}, "run-1"
     )
@@ -316,7 +316,7 @@ def test_temporary_missing_experiment_state_does_not_break_next_tick() -> None:
 def test_simulation_external_growth_sources_use_cached_sample_without_process(
     source: str,
 ) -> None:
-    controller = MatlabController()
+    controller = CrystallizationController()
     controller.configure(
         {"run_type": "simulation", "growth_rate_source": source}, "run-1"
     )
@@ -335,16 +335,16 @@ def test_simulation_external_growth_sources_use_cached_sample_without_process(
     assert controller.history["t"] == [5.0]
 
 
-def test_controller_consumes_matlab_rng_and_seed_fixture_arrays() -> None:
+def test_controller_consumes_reference_rng_and_seed_fixture_arrays() -> None:
     from pathlib import Path
 
     import numpy as np
     from scipy.io import loadmat
 
-    from crystallization_mpc.apps.controller.translated.dynamics import (
+    from crystallization_mpc.apps.controller.algorithm.dynamics import (
         state_transition_function_T,
     )
-    from crystallization_mpc.apps.controller.translated.thermodynamics import calc_G
+    from crystallization_mpc.apps.controller.algorithm.thermodynamics import calc_G
 
     fixture = loadmat(
         Path(__file__).parent / "fixtures/matlab_r2021a_golden.mat",
@@ -360,7 +360,7 @@ def test_controller_consumes_matlab_rng_and_seed_fixture_arrays() -> None:
         "G_v_KF_noise": rng["G_noise"][:, 3],
     }
     seed_sizes = fixture["seed_population"]["sizes"]
-    controller = MatlabController(
+    controller = CrystallizationController(
         simulation_noise=noise,
         simulation_seed_sizes=seed_sizes,
     )

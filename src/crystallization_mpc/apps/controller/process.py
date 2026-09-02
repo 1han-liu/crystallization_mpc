@@ -29,7 +29,7 @@ class ProcessSafetyError(ProcessAdapterError):
 
 @dataclass(frozen=True)
 class ProcessState:
-    """One real-equipment snapshot using the MATLAB Controller units.
+    """One real-equipment snapshot using the Controller contract units.
 
     ``T``, ``T_j`` and ``T_j_set`` are kelvin. ``c`` and ``count_middle``
     retain the scalar units exposed by the equipment OPC UA server.
@@ -198,7 +198,7 @@ ClientFactory = Callable[[str, float], Any]
 
 
 class OpcUaProcessAdapter(ProcessAdapter):
-    """Synchronous OPC UA client for the MATLAB port-62552 equipment nodes."""
+    """Synchronous OPC UA client for the port-62552 equipment nodes."""
 
     def __init__(
         self,

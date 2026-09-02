@@ -1,4 +1,4 @@
-"""Explicit EKF implementations matching MATLAB R2021a predict/correct order."""
+"""Extended Kalman filters with explicit predict/correct state."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def measurement_function(params: Mapping[str, Any], x: np.ndarray) -> np.ndarray
 
 
 def _forward_jacobian(function: ArrayFunction, state: np.ndarray) -> np.ndarray:
-    """Numerical Jacobian compatible with the MATLAB EKF's finite differences."""
+    """Compute a forward finite-difference numerical Jacobian."""
 
     state = np.asarray(state, dtype=float)
     base = np.asarray(function(state), dtype=float)

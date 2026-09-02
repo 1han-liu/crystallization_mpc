@@ -1,4 +1,4 @@
-"""MATLAB-compatible bound-only growth-parameter adaptation."""
+"""Bound-constrained growth-parameter adaptation."""
 
 from __future__ import annotations
 

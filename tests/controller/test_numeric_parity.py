@@ -6,10 +6,10 @@ import numpy as np
 import pytest
 from scipy.io import loadmat
 
-from crystallization_mpc.apps.controller.translated.adaptation import (
+from crystallization_mpc.apps.controller.algorithm.adaptation import (
     adapt_growth_parameters,
 )
-from crystallization_mpc.apps.controller.translated.control import (
+from crystallization_mpc.apps.controller.algorithm.control import (
     calc_T_j,
     calc_T_j_set,
     calc_T_with_zero_dT_dt,
@@ -23,13 +23,13 @@ from crystallization_mpc.apps.controller.translated.control import (
     objective_function,
     update_T_j,
 )
-from crystallization_mpc.apps.controller.translated.dynamics import (
+from crystallization_mpc.apps.controller.algorithm.dynamics import (
     state_transition_function,
     state_transition_function_T,
     state_transition_matrices,
     state_transition_ode,
 )
-from crystallization_mpc.apps.controller.translated.ekf import (
+from crystallization_mpc.apps.controller.algorithm.ekf import (
     calc_Q,
     calc_R,
     construct_EKF,
@@ -38,14 +38,14 @@ from crystallization_mpc.apps.controller.translated.ekf import (
     measurement_matrices,
     smooth_EKF_general,
 )
-from crystallization_mpc.apps.controller.translated.mass_balance import (
+from crystallization_mpc.apps.controller.algorithm.mass_balance import (
     calc_next_crystallization_mass_balance,
     calc_size_from_volume,
     calc_surface_area,
     calc_volume,
 )
-from crystallization_mpc.apps.controller.translated.parameters import build_parameters
-from crystallization_mpc.apps.controller.translated.thermodynamics import (
+from crystallization_mpc.apps.controller.algorithm.parameters import build_parameters
+from crystallization_mpc.apps.controller.algorithm.thermodynamics import (
     calc_G,
     calc_c_meta,
     calc_c_sat,
@@ -323,7 +323,7 @@ def test_eight_tick_simulation_state_and_seed_replay_match_r2021a(golden: dict) 
         actual_c.append(c)
         if index < 7:
             T = state_transition_function_T(params, T, T_j, params["dt"])
-            from crystallization_mpc.apps.controller.translated.control import update_T_j
+            from crystallization_mpc.apps.controller.algorithm.control import update_T_j
 
             T_j = update_T_j(
                 expected["T_j_set"][index],

@@ -1,4 +1,4 @@
-"""Frozen MATLAB Controller parameter contract and normalization."""
+"""Controller parameter contract and normalization."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def _flatten_key(key: str) -> str:
 
 
 def build_parameters(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Return validated canonical parameters while preserving MATLAB defaults."""
+    """Return validated canonical parameters with reference-compatible defaults."""
 
     if not isinstance(raw, Mapping):
         raise TypeError("Controller parameters must be a mapping.")
