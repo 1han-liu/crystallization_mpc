@@ -62,6 +62,11 @@ const measurementGV = document.querySelector("#measurement-g-v");
 const measurementGVKf = document.querySelector("#measurement-g-v-kf");
 const measurementValidCount = document.querySelector("#measurement-valid-count");
 const measurementInvalidCount = document.querySelector("#measurement-invalid-count");
+const alignmentMethod = document.querySelector("#alignment-method");
+const alignmentStatus = document.querySelector("#alignment-status");
+const alignmentTranslation = document.querySelector("#alignment-translation");
+const alignmentRotation = document.querySelector("#alignment-rotation");
+const alignmentRuntime = document.querySelector("#alignment-runtime");
 const measurementPublishCount = document.querySelector("#measurement-publish-count");
 const measurementInfluxCount = document.querySelector("#measurement-influx-count");
 const measurementError = document.querySelector("#measurement-error");
@@ -110,6 +115,7 @@ const state = {
   dscgrInFlight: false,
   latestOverlayFrame: null,
   lastOverlayRefreshAt: 0,
+  alignmentCapabilities: {},
 };
 
 function applyUiMode(mode) {
@@ -231,7 +237,7 @@ function renderForm(params) {
       const label = field.querySelector(".field-key");
       const badges = field.querySelector(".field-badges");
       const description = field.querySelector(".field-description");
-      const input = field.querySelector(".field-input");
+      let input = field.querySelector(".field-input");
       const modifiedBadge = field.querySelector(".field-modified");
       const resetButton = field.querySelector(".field-reset");
       const defaultValue = state.params?.defaults?.params?.[key];
@@ -250,6 +256,25 @@ function renderForm(params) {
       badges.innerHTML = badgeItems.map((item) => `<span class="field-badge">${item}</span>`).join("");
       badges.classList.toggle("is-empty", badgeItems.length === 0);
 
+      if (Array.isArray(meta.choices) && meta.choices.length > 0) {
+        const select = document.createElement("select");
+        select.className = input.className;
+        meta.choices.forEach((choice) => {
+          const option = document.createElement("option");
+          const capability = state.alignmentCapabilities[choice];
+          option.value = choice;
+          option.textContent = capability?.available === false
+            ? `${choice} (unavailable)`
+            : choice;
+          option.disabled = capability?.available === false;
+          if (capability?.reason) {
+            option.title = capability.reason;
+          }
+          select.appendChild(option);
+        });
+        input.replaceWith(select);
+        input = select;
+      }
       input.dataset.key = key;
       input.setAttribute("aria-label", meta.label || key);
       input.value = formatFieldValue(value);
@@ -443,10 +468,29 @@ function renderOnlineMeasurement(payload) {
   measurementGVKf.textContent = formatGrowthRate(result?.v?.G_KF, result?.unit);
   measurementValidCount.textContent = String(processing.valid_frame_count || 0);
   measurementInvalidCount.textContent = String(processing.invalid_frame_count || 0);
+  const alignment = result?.alignment || null;
+  alignmentMethod.textContent = alignment?.method || "—";
+  alignmentStatus.textContent = alignment
+    ? (alignment.success ? (alignment.fallback_used ? "fallback" : "success") : "failed")
+    : "—";
+  alignmentTranslation.textContent = alignment
+    ? `${Number(alignment.tx_px || 0).toFixed(2)}, ${Number(alignment.ty_px || 0).toFixed(2)} px`
+    : "—";
+  alignmentRotation.textContent = alignment
+    ? `${Number(alignment.rotation_deg || 0).toFixed(3)}°`
+    : "—";
+  alignmentRuntime.textContent = alignment
+    ? `${Number(alignment.runtime_ms || 0).toFixed(1)} ms`
+    : "—";
   measurementPublishCount.textContent = String(publishing.success_count || 0);
   measurementInfluxCount.textContent = String(influx.success_count || 0);
 
-  const errors = [result?.error, publishing.last_error, influx.last_error].filter(Boolean);
+  const errors = [
+    result?.error,
+    alignment?.error,
+    publishing.last_error,
+    influx.last_error,
+  ].filter(Boolean);
   measurementError.textContent = errors.length
     ? errors.join(" · ")
     : (hasResult ? `Processed at ${result.processed_at}` : "Waiting for the first post-baseline image.");
@@ -547,7 +591,14 @@ async function refreshLiveStatus() {
 }
 
 async function loadParams() {
-  state.params = await fetchJson("/api/params");
+  const [params, capabilities] = await Promise.all([
+    fetchJson("/api/params"),
+    fetchJson("/api/alignment/capabilities"),
+  ]);
+  state.params = params;
+  state.alignmentCapabilities = Object.fromEntries(
+    (capabilities.methods || []).map((item) => [item.method, item]),
+  );
   state.paramsVersion = state.params.version || 1;
   state.paramMeta = state.params.meta || {};
   state.parameterError = null;

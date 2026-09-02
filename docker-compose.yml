@@ -33,9 +33,10 @@ services:
     restart: unless-stopped
 
   gsensor:
-    # Central builds the shared application image once; Gsensor runs the same
-    # image with a different command instead of triggering a duplicate build.
-    image: *mpc-image
+    image: crystallization-mpc-gsensor:local
+    build:
+      context: .
+      dockerfile: services/gsensor/Dockerfile
     command: ["uvicorn", "crystallization_mpc.apps.gsensor.app:web_app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
       - "8001:8001"

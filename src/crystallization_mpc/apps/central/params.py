@@ -220,6 +220,18 @@ def _normalize_parameter_value(
     if isinstance(expected, str):
         if not isinstance(value, str):
             raise ParameterValidationError(f"Parameter {key} must be text.")
+        choices = meta.get("choices")
+        if choices is not None:
+            if not isinstance(choices, list) or not all(
+                isinstance(choice, str) for choice in choices
+            ):
+                raise ParameterValidationError(
+                    f"Parameter metadata choices for {key} are invalid."
+                )
+            if value not in choices:
+                raise ParameterValidationError(
+                    f"Parameter {key} must be one of: {', '.join(choices)}."
+                )
         return value
 
     if isinstance(expected, list):

@@ -16,6 +16,8 @@ def update_uv_struct(
     *,
     debug_dir=None,
     debug_label: str | None = None,
+    original_image=None,
+    edge_mask=None,
 ):
     uv_struct.line, uv_struct.dist, I_orig = update_line(
         image_file,
@@ -29,6 +31,8 @@ def update_uv_struct(
         kernel,
         debug_dir=debug_dir,
         debug_label=debug_label,
+        original_image=original_image,
+        edge_mask=edge_mask,
     )
     _set_matlab_indexed_value(uv_struct, "dist_array", ii, uv_struct.dist)
     return uv_struct, I_orig

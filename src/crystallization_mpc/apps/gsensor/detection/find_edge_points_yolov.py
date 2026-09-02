@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -25,6 +26,14 @@ logger = logging.getLogger(__name__)
 class YoloV8SegRunner(Protocol):
     def run(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         ...
+
+
+@dataclass(frozen=True)
+class CrystalSegmentation:
+    """Reusable result of the one YOLO segmentation allowed per frame."""
+
+    raw_mask: np.ndarray
+    measurement_mask: np.ndarray
 
 
 class OnnxRuntimeYoloV8Seg:
@@ -66,6 +75,15 @@ def get_default_runner() -> OnnxRuntimeYoloV8Seg:
 
 
 def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
+    """Compatibility wrapper preserving the original segmentation-to-edge result."""
+
+    segmentation = segment_crystal_yolov(I, runner=runner)
+    return edge_points_from_measurement_mask(segmentation.measurement_mask, kernel)
+
+
+def segment_crystal_yolov(I, runner: YoloV8SegRunner | None = None) -> CrystalSegmentation:
+    """Run YOLO once and return both raw and postprocessed measurement masks."""
+
     runner = runner or get_default_runner()
 
     I0 = np.asarray(I)
@@ -118,7 +136,8 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
         coeffs = coeffs[selected, :]
 
     if score.size == 0:
-        return np.zeros((H0, W0), dtype=bool)
+        empty = np.zeros((H0, W0), dtype=bool)
+        return CrystalSegmentation(empty, empty.copy())
 
     xyxy = np.column_stack(
         [
@@ -178,13 +197,13 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
     mask_big = largest_component(mask_union)
     if not np.any(mask_big):
         logger.warning("find_edge_points_yolov done: no largest component")
-        return np.zeros((H0, W0), dtype=bool)
+        return CrystalSegmentation(mask_union, np.zeros((H0, W0), dtype=bool))
 
     boundary = bwperim(mask_big)
     y, x = np.nonzero(boundary)
     if x.size < 3:
         logger.warning("find_edge_points_yolov done: boundary too small")
-        return np.zeros((H0, W0), dtype=bool)
+        return CrystalSegmentation(mask_union, np.zeros((H0, W0), dtype=bool))
 
     logger.warning("find_edge_points_yolov convex hull start: points=%s", x.size)
     points = np.column_stack([x, y])
@@ -192,6 +211,18 @@ def find_edge_points_yolov(I, kernel, runner: YoloV8SegRunner | None = None):
     hull_points = points[hull.vertices]
     hull_mask = poly2mask(hull_points[:, 0], hull_points[:, 1], H0, W0)
     logger.warning("find_edge_points_yolov convex hull done: vertices=%s", len(hull.vertices))
+
+    return CrystalSegmentation(mask_union.astype(bool), hull_mask.astype(bool))
+
+
+def edge_points_from_measurement_mask(measurement_mask, kernel):
+    """Build the legacy Hough edge input from an aligned measurement mask."""
+
+    hull_mask = np.asarray(measurement_mask, dtype=bool)
+    if hull_mask.ndim != 2:
+        raise ValueError("measurement_mask must be a two-dimensional mask")
+    if not np.any(hull_mask):
+        return np.zeros_like(hull_mask, dtype=bool)
 
     logger.warning("find_edge_points_yolov post hull perimeter start")
     edge_mask = bwperim(hull_mask)

@@ -72,6 +72,20 @@ params:
       visible: true
       order: 120
 
+  alignment_method:
+    section: "Image alignment"
+    label: "Alignment method"
+    description: "Frame registration method applied after segmentation and before growth-line detection."
+    unit: "-"
+    kind: "basic"
+    derived: false
+    choices: [none, centroid, fft, kalman, loftr, sift, optical_flow, ecc]
+    publish_to: [gsensor]
+    ui:
+      visible: true
+      control: "select"
+      order: 105
+
   params_G.width:
     section: "Growth line detection"
     label: "Search window width"

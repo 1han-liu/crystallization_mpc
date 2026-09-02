@@ -327,7 +327,7 @@ function renderForm(form, params, sectionName) {
       const description = field.querySelector(".field-description");
       const expression = field.querySelector(".field-expression");
       const depends = field.querySelector(".field-depends");
-      const input = field.querySelector(".field-input");
+      let input = field.querySelector(".field-input");
       const modifiedBadge = field.querySelector(".field-modified");
       const resetButton = field.querySelector(".field-reset");
       const defaultValue = state.params?.defaults?.[sectionName]?.[key];
@@ -359,6 +359,18 @@ function renderForm(form, params, sectionName) {
       badges.innerHTML = badgeItems.map((item) => `<span class="field-badge">${item}</span>`).join("");
       badges.classList.toggle("is-empty", badgeItems.length === 0);
 
+      if (Array.isArray(meta.choices) && meta.choices.length > 0) {
+        const select = document.createElement("select");
+        select.className = input.className;
+        meta.choices.forEach((choice) => {
+          const option = document.createElement("option");
+          option.value = choice;
+          option.textContent = choice;
+          select.appendChild(option);
+        });
+        input.replaceWith(select);
+        input = select;
+      }
       input.dataset.key = key;
       input.dataset.section = sectionName;
       input.setAttribute("aria-label", meta.label || key);

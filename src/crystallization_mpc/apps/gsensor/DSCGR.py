@@ -33,6 +33,15 @@ CSV_FIELDS = (
     "distance_KF",
     "G",
     "G_KF",
+    "alignment_method",
+    "alignment_success",
+    "alignment_error",
+    "alignment_tx_px",
+    "alignment_ty_px",
+    "alignment_rotation_deg",
+    "alignment_runtime_ms",
+    "alignment_residual_before",
+    "alignment_residual_after",
 )
 
 
@@ -83,6 +92,7 @@ def DSCGR(
         kernel=kernel,
         overlay_directory=overlay_dir,
         debug_directory=hough_debug_dir,
+        initial_image_path=initial_image_file,
     )
 
     records: list[dict[str, Any]] = []
@@ -102,8 +112,24 @@ def DSCGR(
 
         frame_result = processor.process(next_image_file)
         frame_records = [
-            _record(frame_result.u, "u", next_image_file, ptr, ii, frame_result.overlay_path),
-            _record(frame_result.v, "v", next_image_file, ptr, ii, frame_result.overlay_path),
+            _record(
+                frame_result.u,
+                "u",
+                next_image_file,
+                ptr,
+                ii,
+                frame_result.overlay_path,
+                frame_result.alignment,
+            ),
+            _record(
+                frame_result.v,
+                "v",
+                next_image_file,
+                ptr,
+                ii,
+                frame_result.overlay_path,
+                frame_result.alignment,
+            ),
         ]
         records.extend(frame_records)
         log_parts = [f"{ptr}: "]
@@ -160,6 +186,7 @@ def _record(
     ptr: int,
     ii: int,
     overlay_path: str | None,
+    alignment,
 ) -> dict[str, Any]:
     return {
         "ii": int(ii),
@@ -172,6 +199,19 @@ def _record(
         "distance_KF": None if measurement is None else measurement.distance_KF_m,
         "G": None if measurement is None else measurement.G,
         "G_KF": None if measurement is None else measurement.G_KF,
+        "alignment_method": None if alignment is None else alignment.method,
+        "alignment_success": None if alignment is None else alignment.success,
+        "alignment_error": None if alignment is None else alignment.error,
+        "alignment_tx_px": None if alignment is None else alignment.tx_px,
+        "alignment_ty_px": None if alignment is None else alignment.ty_px,
+        "alignment_rotation_deg": None if alignment is None else alignment.rotation_deg,
+        "alignment_runtime_ms": None if alignment is None else alignment.runtime_ms,
+        "alignment_residual_before": (
+            None if alignment is None else alignment.residual_before
+        ),
+        "alignment_residual_after": (
+            None if alignment is None else alignment.residual_after
+        ),
     }
 
 

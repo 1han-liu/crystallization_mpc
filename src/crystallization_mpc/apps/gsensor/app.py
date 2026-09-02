@@ -22,6 +22,7 @@ from crystallization_mpc.apps.central.params import (
     save_params_document,
     validate_params_section,
 )
+from crystallization_mpc.apps.gsensor.alignment import alignment_capabilities
 from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.gsensor.DSCGR import DSCGR
 from crystallization_mpc.apps.gsensor.detection.initialize_DSCGR import initialize_DSCGR
@@ -504,7 +505,7 @@ class GsensorService:
         if initialization_payload.get("session_id") is None:
             initialization_payload = None
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": self.current_experiment["run_id"],
             "updated_at": utc_ts(),
             "lifecycle_status": self.experiment_lifecycle_status,
@@ -539,6 +540,11 @@ class GsensorService:
         if state is None:
             self.recovery_status = "not_available"
             return
+        schema_version = int(state.get("schema_version", 1))
+        if schema_version not in {1, 2}:
+            raise ValueError(
+                f"Unsupported persisted Gsensor processing schema: {schema_version}."
+            )
 
         lifecycle_status = str(state.get("lifecycle_status") or "selected")
         allowed_statuses = {
@@ -634,6 +640,7 @@ class GsensorService:
                 latest_overlay_path=latest_overlay_path,
                 final_overlay_path=final_overlay_path,
                 debug_directory=debug_directory,
+                initial_image_path=initialization_payload["selected_image"],
             )
             restore_state = getattr(processor, "restore_state", None)
             if not callable(restore_state):
@@ -1626,6 +1633,7 @@ class GsensorService:
                 latest_overlay_path=latest_overlay_path,
                 final_overlay_path=final_overlay_path,
                 debug_directory=debug_directory,
+                initial_image_path=payload["selected_image"],
             )
             snapshot = {
                 "schema_version": 1,
@@ -1788,6 +1796,11 @@ def get_measurement_overlay(kind: str) -> FileResponse:
 @web_app.get("/api/params")
 def get_params() -> Dict[str, Any]:
     return service.params_payload()
+
+
+@web_app.get("/api/alignment/capabilities")
+def get_alignment_capabilities() -> Dict[str, Any]:
+    return {"methods": [item.to_dict() for item in alignment_capabilities()]}
 
 
 @web_app.post("/api/params")

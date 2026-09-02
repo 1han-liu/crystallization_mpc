@@ -31,12 +31,14 @@ def update_line(
     *,
     debug_dir: str | Path | None = None,
     debug_label: str | None = None,
+    original_image=None,
+    edge_mask=None,
 ):
     old_line = line
     path = _image_file_path(image_file)
     debug_label = debug_label or path.stem
     logger.warning("update_line start: image=%s", path)
-    I_orig = imread(path)
+    I_orig = imread(path) if original_image is None else np.asarray(original_image)
     logger.warning(
         "update_line image loaded: image=%s shape=%s dtype=%s",
         path,
@@ -53,10 +55,16 @@ def update_line(
         line_fill=(255, 215, 0),
     )
 
-    logger.warning("update_line YOLO edge detection start: image=%s", path)
-    I = find_edge_points_yolov(I, kernel)
+    logger.warning("update_line edge detection start: image=%s", path)
+    I = (
+        find_edge_points_yolov(I, kernel)
+        if edge_mask is None
+        else np.asarray(edge_mask, dtype=bool).copy()
+    )
+    if I.shape != I_orig.shape[:2]:
+        raise ValueError("edge_mask must match the original image size")
     logger.warning(
-        "update_line YOLO edge detection done: image=%s edge_pixels=%s",
+        "update_line edge detection done: image=%s edge_pixels=%s",
         path,
         int(np.count_nonzero(I)),
     )

@@ -16,6 +16,20 @@ from uuid import uuid4
 
 import numpy as np
 
+from crystallization_mpc.apps.gsensor.alignment import (
+    ALIGNMENT_STATE_VERSION,
+    AlignmentDiagnostics,
+    AlignmentInput,
+    create_aligner,
+    load_alignment_state,
+    parse_alignment_method,
+    save_alignment_state,
+)
+from crystallization_mpc.apps.gsensor.detection.find_edge_points_yolov import (
+    YoloV8SegRunner,
+    edge_points_from_measurement_mask,
+    segment_crystal_yolov,
+)
 from crystallization_mpc.apps.gsensor.detection.initial_uv_struct import (
     initialize_uv_struct,
 )
@@ -23,6 +37,7 @@ from crystallization_mpc.apps.gsensor.detection.params import build_params_G
 from crystallization_mpc.apps.gsensor.detection.update_EKF_G import update_EKF_G
 from crystallization_mpc.apps.gsensor.detection.update_figure import update_figure
 from crystallization_mpc.apps.gsensor.detection.update_uv_struct import update_uv_struct
+from crystallization_mpc.apps.gsensor.detection.update_line import imread
 from crystallization_mpc.messaging.schema import utc_ts
 
 LATEST_OVERLAY_FILENAME = "gsensor_detection_latest.jpg"
@@ -57,6 +72,7 @@ class GrowthRateFrameResult:
     overlay_path: str | None
     u: EdgeMeasurement | None
     v: EdgeMeasurement | None
+    alignment: AlignmentDiagnostics | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +92,10 @@ class GrowthRateProcessor:
         final_overlay_path: str | Path | None = None,
         overlay_directory: str | Path | None = None,
         debug_directory: str | Path | None = None,
+        initial_image_path: str | Path | None = None,
+        alignment_method: str | None = None,
+        segmentation_runner: YoloV8SegRunner | None = None,
+        alignment_state_path: str | Path | None = None,
     ) -> None:
         if len(uv_struct_list) != 2:
             raise ValueError("uv_struct_list must contain u and v structures.")
@@ -105,6 +125,30 @@ class GrowthRateProcessor:
         self.debug_directory = (
             Path(debug_directory) if debug_directory is not None else None
         )
+        self.initial_image_path = (
+            Path(initial_image_path) if initial_image_path is not None else None
+        )
+        configured_method = (
+            alignment_method
+            if alignment_method is not None
+            else str(params.get("alignment_method", "none"))
+        )
+        self.alignment_method = parse_alignment_method(configured_method).value
+        if self.alignment_method != "none" and self.initial_image_path is None:
+            raise ValueError(
+                "initial_image_path is required when alignment_method is not 'none'."
+            )
+        self.aligner = create_aligner(self.alignment_method)
+        self.aligner_initialized = False
+        self.segmentation_runner = segmentation_runner
+        if alignment_state_path is not None:
+            self.alignment_state_path = Path(alignment_state_path)
+        elif self.latest_overlay_path is not None:
+            self.alignment_state_path = self.latest_overlay_path.parent / "alignment_state.npz"
+        elif self.overlay_directory is not None:
+            self.alignment_state_path = self.overlay_directory.parent / "alignment_state.npz"
+        else:
+            self.alignment_state_path = None
         self.frame_seq = 0
         self.algorithm_step = 0
         self.valid_frame_count = 0
@@ -134,11 +178,72 @@ class GrowthRateProcessor:
         overlay_path: Path | None = None
         u_measurement: EdgeMeasurement | None = None
         v_measurement: EdgeMeasurement | None = None
+        alignment_diagnostics: AlignmentDiagnostics | None = None
+        alignment_checkpoint: dict[str, Any] | None = None
 
         try:
+            original_image = imread(image_path)
+            segmentation = segment_crystal_yolov(
+                original_image,
+                runner=self.segmentation_runner,
+            )
+            current_frame = AlignmentInput(
+                image_gray=_to_gray(original_image),
+                raw_mask=np.asarray(segmentation.raw_mask, dtype=np.uint8) * 255,
+                measurement_mask=(
+                    np.asarray(segmentation.measurement_mask, dtype=np.uint8) * 255
+                ),
+            )
+            if (
+                self.alignment_method != "none"
+                and not np.any(current_frame.measurement_mask)
+            ):
+                alignment_diagnostics = AlignmentDiagnostics(
+                    method=self.alignment_method,
+                    success=False,
+                    error="current segmentation mask is empty",
+                )
+                raise RuntimeError(alignment_diagnostics.error)
+            if not self.aligner_initialized:
+                baseline_frame = self._alignment_baseline(current_frame, image_path)
+                if (
+                    self.alignment_method != "none"
+                    and not np.any(baseline_frame.measurement_mask)
+                ):
+                    alignment_diagnostics = AlignmentDiagnostics(
+                        method=self.alignment_method,
+                        success=False,
+                        error="baseline segmentation mask is empty",
+                    )
+                    raise RuntimeError(alignment_diagnostics.error)
+                initial_result = self.aligner.initialize(baseline_frame)
+                if not initial_result.diagnostics.success:
+                    alignment_diagnostics = initial_result.diagnostics
+                    raise RuntimeError(
+                        "alignment initialization failed: "
+                        f"{initial_result.diagnostics.error or 'unknown error'}"
+                    )
+                self.aligner_initialized = True
+
+            alignment_checkpoint = self.aligner.export_state()
+            try:
+                alignment_result = self.aligner.align(current_frame)
+                alignment_diagnostics = alignment_result.diagnostics
+                if not alignment_diagnostics.success:
+                    raise RuntimeError(
+                        "alignment failed: "
+                        f"{alignment_diagnostics.error or 'unknown error'}"
+                    )
+            except Exception:
+                self.aligner.restore_state(alignment_checkpoint)
+                raise
+
+            shared_edge_mask = edge_points_from_measurement_mask(
+                alignment_result.aligned_measurement_mask,
+                self.kernel,
+            )
             algorithm_step = self.algorithm_step + 1
             working_structs = deepcopy(self.uv_structs)
-            original_image = None
             for index, edge_name in enumerate(("u", "v")):
                 debug_label = f"frame{frame_seq:05d}_{edge_name}"
                 working_structs[index], original_image = update_uv_struct(
@@ -149,6 +254,8 @@ class GrowthRateProcessor:
                     self.kernel,
                     debug_dir=self.debug_directory,
                     debug_label=debug_label,
+                    original_image=alignment_result.aligned_gray,
+                    edge_mask=shared_edge_mask,
                 )
                 working_structs[index] = update_EKF_G(
                     working_structs[index],
@@ -191,10 +298,14 @@ class GrowthRateProcessor:
                 v_measurement = None
             else:
                 error = None
-            if finite:
+            if valid and finite:
                 self.uv_structs = working_structs
                 self.algorithm_step = algorithm_step
+            elif alignment_checkpoint is not None:
+                self.aligner.restore_state(alignment_checkpoint)
         except Exception as exc:
+            if alignment_checkpoint is not None:
+                self.aligner.restore_state(alignment_checkpoint)
             valid = False
             error = f"{type(exc).__name__}: {exc}"
             logger.exception(
@@ -225,9 +336,30 @@ class GrowthRateProcessor:
             overlay_path=str(overlay_path) if overlay_path is not None else None,
             u=u_measurement,
             v=v_measurement,
+            alignment=alignment_diagnostics,
         )
         self.last_result = result
         return result
+
+    def _alignment_baseline(
+        self,
+        current_frame: AlignmentInput,
+        current_path: Path,
+    ) -> AlignmentInput:
+        if self.initial_image_path is None or self.initial_image_path == current_path:
+            return current_frame
+        baseline_image = imread(self.initial_image_path)
+        segmentation = segment_crystal_yolov(
+            baseline_image,
+            runner=self.segmentation_runner,
+        )
+        return AlignmentInput(
+            image_gray=_to_gray(baseline_image),
+            raw_mask=np.asarray(segmentation.raw_mask, dtype=np.uint8) * 255,
+            measurement_mask=(
+                np.asarray(segmentation.measurement_mask, dtype=np.uint8) * 255
+            ),
+        )
 
     def finalize(self) -> Path | None:
         """Freeze the most recent live overlay when Central stops the experiment."""
@@ -253,20 +385,37 @@ class GrowthRateProcessor:
     def export_state(self) -> dict[str, Any]:
         """Export only the numerical state required to continue the next frame."""
 
+        alignment = {
+            "version": ALIGNMENT_STATE_VERSION,
+            "method": self.alignment_method,
+            "initialized": self.aligner_initialized,
+            "sidecar": None,
+        }
+        if self.aligner_initialized:
+            if self.alignment_state_path is None:
+                raise ValueError("alignment_state_path is required to persist alignment state.")
+            alignment["sidecar"] = save_alignment_state(
+                self.alignment_state_path,
+                method=self.alignment_method,
+                frame_sequence=self.frame_seq,
+                state=self.aligner.export_state(),
+            )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": self.run_id,
             "frame_seq": self.frame_seq,
             "algorithm_step": self.algorithm_step,
             "valid_frame_count": self.valid_frame_count,
             "invalid_frame_count": self.invalid_frame_count,
             "edges": [self._export_edge_state(item) for item in self.uv_structs],
+            "alignment": alignment,
         }
 
     def restore_state(self, state: Mapping[str, Any]) -> None:
         """Restore a state produced by :meth:`export_state`."""
 
-        if int(state.get("schema_version", 0)) != 1:
+        schema_version = int(state.get("schema_version", 0))
+        if schema_version not in {1, 2}:
             raise ValueError("Unsupported growth-rate processor state schema.")
         if str(state.get("run_id") or "") != self.run_id:
             raise ValueError("Growth-rate processor state run_id does not match.")
@@ -280,6 +429,37 @@ class GrowthRateProcessor:
         )
         if algorithm_step > frame_seq:
             raise ValueError("algorithm_step cannot exceed frame_seq.")
+
+        if schema_version == 1:
+            if self.alignment_method != "none":
+                raise ValueError(
+                    "Legacy processor state can only be restored with alignment_method='none'."
+                )
+            self.aligner_initialized = False
+        else:
+            alignment = state.get("alignment")
+            if not isinstance(alignment, Mapping):
+                raise ValueError("Growth-rate alignment state is missing.")
+            if alignment.get("method") != self.alignment_method:
+                raise ValueError("Growth-rate alignment method does not match configuration.")
+            initialized = bool(alignment.get("initialized", False))
+            sidecar = alignment.get("sidecar")
+            if initialized:
+                if self.alignment_state_path is None or not isinstance(sidecar, Mapping):
+                    raise ValueError("Growth-rate alignment sidecar metadata is missing.")
+                sidecar_name = str(sidecar.get("path") or "")
+                if sidecar_name != self.alignment_state_path.name:
+                    raise ValueError("Growth-rate alignment sidecar path does not match.")
+                _sequence, aligner_state = load_alignment_state(
+                    self.alignment_state_path,
+                    expected_method=self.alignment_method,
+                    expected_frame_sequence=frame_seq,
+                    expected_sha256=str(sidecar.get("sha256") or ""),
+                )
+                self.aligner.restore_state(aligner_state)
+            elif sidecar is not None:
+                raise ValueError("Uninitialized alignment state must not contain a sidecar.")
+            self.aligner_initialized = initialized
 
         for uv_struct, edge_state in zip(self.uv_structs, edges):
             self._restore_edge_state(uv_struct, edge_state, algorithm_step)
@@ -440,6 +620,22 @@ def _non_negative_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer.")
     return value
+
+
+def _to_gray(image: Any) -> np.ndarray:
+    array = np.asarray(image)
+    if array.ndim == 2:
+        return np.clip(array, 0, 255).astype(np.uint8)
+    if array.ndim == 3 and array.shape[2] >= 3:
+        # PIL-backed ``imread`` returns RGB data.
+        return np.clip(
+            0.299 * array[:, :, 0]
+            + 0.587 * array[:, :, 1]
+            + 0.114 * array[:, :, 2],
+            0,
+            255,
+        ).astype(np.uint8)
+    raise ValueError(f"Unsupported alignment image shape: {array.shape}")
 
 
 __all__ = [
