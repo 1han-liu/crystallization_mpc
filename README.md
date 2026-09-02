@@ -6,6 +6,7 @@ Minimal service skeleton for the crystallization system, focused on message-base
 - Service scaffolding for central / gsensor / controller apps
 - RabbitMQ message bus integration
 - InfluxDB and Grafana for telemetry storage and dashboards
+- Selectable GSensor frame alignment (`none`, centroid, FFT, Kalman, LoFTR, SIFT, optical flow, or ECC)
 
 ## Delivery Notes
 - Do not deliver the local `.venv` directory. Each recipient should create their own virtual environment.
@@ -61,7 +62,7 @@ python -m pip install -e .
 ## Notes
 - Keep generated Python bytecode files out of commits and release packages.
 - `.dockerignore` excludes local environments and caches from Docker build context.
-- Central, Gsensor, and Controller run as separate services from one shared application image.
+- Central and Controller use the shared application image. GSensor uses its own image so Torch/Kornia and the pinned LoFTR checkpoint do not enlarge the other services.
 - The Controller keeps the safe no-op adapter as its default. The
   reference-validated algorithm is enabled explicitly with
   `CONTROLLER_ADAPTER=crystallization_mpc.apps.controller.algorithm.integration:CrystallizationControllerAdapter`.
@@ -72,6 +73,7 @@ python -m pip install -e .
 - Central, Gsensor, and Controller share the configured `EXPERIMENT_HOST_ROOT` bind mount. Gsensor writes `gsensor_processing_state.json` inside the active experiment, while Controller writes `.controller_runtime_state.json` at the shared root so container restarts preserve the active run.
 - Image revisions are identified by filename, nanosecond modification time, and file size. A camera may therefore overwrite a fixed filename and still produce a new measurement frame.
 - `GSENSOR_HOUGH_DEBUG_ENABLED` defaults to `false`; normal experiments keep only the latest/final detection overlays and restart state. Enable it only for local Hough diagnosis.
+- GSensor frame-alignment architecture, failure behavior, recovery, and offline evaluation are documented in `docs/gsensor-alignment.md`. `alignment_method: none` remains the default.
 - A Controller algorithm adapter should implement `export_state()` and
   `restore_state()` before restart recovery is accepted for real control. An
   adapter without recovery support fails closed instead of resuming with lost
