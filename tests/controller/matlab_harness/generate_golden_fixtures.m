@@ -7,7 +7,7 @@ if nargin < 1
     output_file = fullfile(harness_dir, '..', 'fixtures', 'matlab_r2021a_golden.mat');
 end
 
-reference_root = '/home/laniakea/Desktop/iiot-enabled-sensorized-control-platform-for-seeded-crystallization/MPCrystal-main-reference';
+reference_root = '/home/laniakea/Desktop/iiot-enabled-sensorized-control-platform-for-seeded-crystallization/MPCrystal_original';
 source_root = fullfile(reference_root, 'source_codes');
 assert(exist(source_root, 'dir') == 7, 'Frozen MATLAB reference worktree not found.');
 addpath(genpath(source_root));

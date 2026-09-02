@@ -4,7 +4,7 @@
     "repository": "https://github.com/HuitianYu/MPCrystal",
     "branch": "main",
     "commit": "ce885a13e0a3e95ac0509e06eebf9d7cd1d418b0",
-    "reference_worktree": "/home/laniakea/Desktop/iiot-enabled-sensorized-control-platform-for-seeded-crystallization/MPCrystal-main-reference",
+    "reference_worktree": "/home/laniakea/Desktop/iiot-enabled-sensorized-control-platform-for-seeded-crystallization/MPCrystal_original",
     "matlab_release": "R2021a Update 8",
     "required_functions": ["extendedKalmanFilter", "fmincon", "ode45"],
     "excluded_function": "opcua"

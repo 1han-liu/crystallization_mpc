@@ -5,7 +5,7 @@
 The only numerical oracle for this conversion is
 `HuitianYu/MPCrystal` `main@ce885a13e0a3e95ac0509e06eebf9d7cd1d418b0`.
 It is inspected through the detached, clean worktree
-`/home/laniakea/Desktop/iiot-enabled-sensorized-control-platform-for-seeded-crystallization/MPCrystal-main-reference`.
+`/home/laniakea/Desktop/iiot-enabled-sensorized-control-platform-for-seeded-crystallization/MPCrystal_original`.
 The original and locally merged `integration` branches, stashes, and uncommitted
 Gsensor work are deliberately excluded.
 
