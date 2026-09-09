@@ -29,6 +29,8 @@ from crystallization_mpc.apps.gsensor.detection.initialize_DSCGR import initiali
 from crystallization_mpc.apps.gsensor.experiments import (
     ExperimentNotSelectedError,
     GsensorExperimentManager,
+    GSENSOR_PROCESSING_SCHEMA_VERSION,
+    validate_processing_schema_version,
 )
 from crystallization_mpc.apps.gsensor.growth_rate_processor import (
     FINAL_OVERLAY_FILENAME,
@@ -505,7 +507,7 @@ class GsensorService:
         if initialization_payload.get("session_id") is None:
             initialization_payload = None
         return {
-            "schema_version": 2,
+            "schema_version": GSENSOR_PROCESSING_SCHEMA_VERSION,
             "run_id": self.current_experiment["run_id"],
             "updated_at": utc_ts(),
             "lifecycle_status": self.experiment_lifecycle_status,
@@ -540,11 +542,7 @@ class GsensorService:
         if state is None:
             self.recovery_status = "not_available"
             return
-        schema_version = int(state.get("schema_version", 1))
-        if schema_version not in {1, 2}:
-            raise ValueError(
-                f"Unsupported persisted Gsensor processing schema: {schema_version}."
-            )
+        validate_processing_schema_version(state.get("schema_version"))
 
         lifecycle_status = str(state.get("lifecycle_status") or "selected")
         allowed_statuses = {

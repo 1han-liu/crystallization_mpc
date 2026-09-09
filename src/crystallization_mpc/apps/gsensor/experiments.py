@@ -15,7 +15,27 @@ from crystallization_mpc.messaging.commands import EXPERIMENT_MODE_LIVE
 
 GSENSOR_STATE_FILENAME = ".gsensor_experiment_state.json"
 GSENSOR_PROCESSING_STATE_FILENAME = "gsensor_processing_state.json"
+# Unified extended v1 retains alignment metadata; v2 requires explicit migration.
+# The experiment-selection document has its own independent version-1 contract.
+GSENSOR_PROCESSING_SCHEMA_VERSION = 1
 IMAGE_DIRECTORY_NAME = "images"
+
+
+def validate_processing_schema_version(version: Any) -> None:
+    if type(version) is not int or version != GSENSOR_PROCESSING_SCHEMA_VERSION:
+        raise ValueError(
+            "Gsensor processing state schema_version must be 1. "
+            "Convert version-2 snapshots with scripts/migrate_gsensor_state_v1.py."
+        )
+
+
+def _validate_processing_document_versions(document: Mapping[str, Any]) -> None:
+    validate_processing_schema_version(document.get("schema_version"))
+    processor = document.get("processor")
+    if processor is not None:
+        if not isinstance(processor, Mapping):
+            raise ValueError("Gsensor processor state must be an object.")
+        validate_processing_schema_version(processor.get("schema_version"))
 
 
 class InvalidExperimentSelectionError(ValueError):
@@ -129,10 +149,12 @@ class GsensorExperimentManager:
         if not path.is_file():
             return None
         document = _read_json_object(path, "Gsensor processing state")
-        if int(document.get("schema_version", 0)) != 1:
+        try:
+            _validate_processing_document_versions(document)
+        except ValueError as exc:
             raise InvalidExperimentSelectionError(
-                f"Unsupported Gsensor processing-state schema: {path}"
-            )
+                f"Invalid Gsensor processing-state schema at {path}: {exc}"
+            ) from exc
         if str(document.get("run_id") or "") != run_id:
             raise InvalidExperimentSelectionError(
                 "Gsensor processing-state run_id does not match its experiment."
@@ -146,8 +168,7 @@ class GsensorExperimentManager:
     ) -> Path:
         current = self.registry.get(run_id)
         document = dict(state)
-        if int(document.get("schema_version", 0)) != 1:
-            raise ValueError("Gsensor processing state schema_version must be 1.")
+        _validate_processing_document_versions(document)
         if str(document.get("run_id") or "") != current.run_id:
             raise ValueError("Gsensor processing state run_id does not match experiment.")
         path = self.processing_state_path(run_id)

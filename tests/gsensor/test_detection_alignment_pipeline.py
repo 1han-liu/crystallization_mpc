@@ -16,6 +16,8 @@ from crystallization_mpc.apps.gsensor.detection.find_edge_points_yolov import (
 )
 from crystallization_mpc.apps.gsensor.growth_rate_processor import GrowthRateProcessor
 from crystallization_mpc.apps.gsensor.alignment import (
+    ALIGNMENT_METHODS,
+    AlignmentInput,
     AlignmentDiagnostics,
     AlignmentResult,
 )
@@ -134,35 +136,61 @@ def test_processor_segments_once_and_reuses_edges_for_both_directions(
     assert calls == {"segment": 1, "edge": 1, "update": 2}
 
 
-def test_processor_alignment_state_round_trip(tmp_path: Path) -> None:
+@pytest.mark.parametrize("method", ALIGNMENT_METHODS)
+def test_processor_alignment_state_round_trip(tmp_path: Path, method: str) -> None:
     first = GrowthRateProcessor(
         run_id="test",
-        params=_params(),
+        params={**_params(), "alignment_method": method},
         uv_struct_list=[_uv(), _uv()],
         kernel=np.array([[0, 0], [1, 1]]),
         latest_overlay_path=tmp_path / "latest.jpg",
+        initial_image_path=tmp_path / "baseline.png",
     )
-    mask = np.full((8, 8), 255, dtype=np.uint8)
-    first.aligner.initialize(
-        __import__(
-            "crystallization_mpc.apps.gsensor.alignment", fromlist=["AlignmentInput"]
-        ).AlignmentInput(mask, mask, mask)
-    )
+    mask = np.zeros((512, 512), dtype=np.uint8)
+    mask[60:460, 60:460] = 255
+    first.aligner.initialize(AlignmentInput(mask, mask, mask))
     first.aligner_initialized = True
     state = first.export_state()
-    assert state["schema_version"] == 2
+    assert state["schema_version"] == 1
+    assert state["alignment"]["method"] == method
     assert (tmp_path / "alignment_state.npz").is_file()
 
     restored = GrowthRateProcessor(
         run_id="test",
-        params=_params(),
+        params={**_params(), "alignment_method": method},
         uv_struct_list=[_uv(), _uv()],
         kernel=np.array([[0, 0], [1, 1]]),
         latest_overlay_path=tmp_path / "latest.jpg",
+        initial_image_path=tmp_path / "baseline.png",
     )
     restored.restore_state(state)
     assert restored.aligner_initialized
-    assert restored.alignment_method == "none"
+    assert restored.alignment_method == method
+    # Persisted reference arrays and method-specific history survive the round trip.
+    def equal(left, right):
+        if isinstance(left, np.ndarray):
+            np.testing.assert_array_equal(left, right)
+        elif isinstance(left, dict):
+            assert left.keys() == right.keys()
+            for key in left:
+                equal(left[key], right[key])
+        elif isinstance(left, (list, tuple)):
+            assert len(left) == len(right)
+            for a, b in zip(left, right):
+                equal(a, b)
+        else:
+            assert left == right
+    equal(first.aligner.export_state(), restored.aligner.export_state())
+    # For non-neural methods, also compare the next actual alignment after restore.
+    if method != "loftr":
+        import cv2
+        cv2.setRNGSeed(0)
+        expected = first.aligner.align(AlignmentInput(mask, mask, mask))
+        cv2.setRNGSeed(0)
+        actual = restored.aligner.align(AlignmentInput(mask, mask, mask))
+        np.testing.assert_allclose(actual.transform, expected.transform)
+        np.testing.assert_array_equal(actual.aligned_measurement_mask, expected.aligned_measurement_mask)
+        assert actual.diagnostics.success == expected.diagnostics.success
 
 
 def test_alignment_failure_rolls_back_alignment_and_measurement_state(
@@ -256,3 +284,33 @@ def test_legacy_processor_state_is_accepted_only_for_none(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="Legacy processor state"):
         selected.restore_state(legacy)
+
+
+@pytest.mark.parametrize("case", ["version2", "missing_alignment", "null_alignment", "wrong_method", "missing_sidecar", "tampered_sidecar"])
+def test_unified_state_fails_closed_for_invalid_alignment(tmp_path: Path, case: str) -> None:
+    def make():
+        return GrowthRateProcessor(
+            run_id="state-safety", params={**_params(), "alignment_method": "fft"},
+            uv_struct_list=[_uv(), _uv()], kernel=SimpleNamespace(k_c_cell=[], k_o_cell=[]),
+            latest_overlay_path=tmp_path / "latest.jpg", initial_image_path=tmp_path / "baseline.png",
+        )
+    source = make()
+    mask = np.ones((32, 32), dtype=np.uint8) * 255
+    source.aligner.initialize(AlignmentInput(mask, mask, mask))
+    source.aligner_initialized = True
+    state = source.export_state()
+    if case == "version2":
+        state["schema_version"] = 2
+    elif case == "missing_alignment":
+        state.pop("alignment")
+    elif case == "null_alignment":
+        state["alignment"] = None
+    elif case == "wrong_method":
+        state["alignment"]["method"] = "loftr"
+    elif case == "missing_sidecar":
+        (tmp_path / "alignment_state.npz").unlink()
+    else:
+        path = tmp_path / "alignment_state.npz"
+        path.write_bytes(path.read_bytes() + b"tampered")
+    with pytest.raises((ValueError, OSError)):
+        make().restore_state(state)

@@ -41,7 +41,11 @@ The response identifies unavailable methods and supplies a reason. The GSensor p
 
 Every frame records method, success, fallback use, error, translation, rotation, runtime, image residuals, and method-specific match statistics. If selected alignment fails, the frame is invalid and the alignment, u/v, and EKF states are not advanced.
 
-Processor state schema v2 keeps JSON metadata plus an atomic compressed `alignment_state.npz` sidecar. The sidecar is verified by method, frame sequence, SHA-256 checksum, shapes, dtypes, and finite values. A missing or corrupt sidecar fails closed. Schema v1 is accepted only with `alignment_method: none`.
+GSensor runtime snapshots and nested processor snapshots now use **unified extended schema v1 only**. This is a project-specific extension of the original v1, not a promise that older program versions can read aligned snapshots. The `alignment` metadata (method, initialization flag, and sidecar descriptor) is retained, together with an atomic compressed `alignment_state.npz` sidecar. The sidecar is verified by method, frame sequence, SHA-256 checksum, shapes, dtypes, and finite values. A missing or corrupt sidecar fails closed. Old v1 records that lack the `alignment` field may still resume only with `alignment_method: none`; the reader never invents alignment history.
+
+Runtime save/load/restore reject schema v2, including a v2 nested processor. Before upgrading an existing run, stop GSensor and explicitly convert its snapshot with `scripts/migrate_gsensor_state_v1.py`. With an explicit path to `gsensor_processing_state.json`, the tool defaults to a dry-run; `--apply` creates a unique byte-for-byte `.bak` alongside the snapshot and atomically converts only the outer and nested processor version labels. All other data and sidecar references remain unchanged, and `alignment_state.npz` is not rewritten. Repeat execution is a no-op for an already-converted file. Do not convert Controller, experiment-selection, or unrelated report schemas.
+
+After conversion, restart GSensor and verify the same run, initialization session, processed-image identities, and alignment state are recovered. Keep the backup until recovery is verified. Rollback requires stopping the service and restoring both the prior code and its matching snapshot; changing a version label alone does not make old software understand the extended format.
 
 ## LoFTR deployment
 

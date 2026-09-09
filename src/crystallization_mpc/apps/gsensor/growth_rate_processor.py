@@ -39,6 +39,10 @@ from crystallization_mpc.apps.gsensor.detection.update_figure import update_figu
 from crystallization_mpc.apps.gsensor.detection.update_uv_struct import update_uv_struct
 from crystallization_mpc.apps.gsensor.detection.update_line import imread
 from crystallization_mpc.messaging.schema import utc_ts
+from crystallization_mpc.apps.gsensor.experiments import (
+    GSENSOR_PROCESSING_SCHEMA_VERSION,
+    validate_processing_schema_version,
+)
 
 LATEST_OVERLAY_FILENAME = "gsensor_detection_latest.jpg"
 FINAL_OVERLAY_FILENAME = "gsensor_detection_final.jpg"
@@ -401,7 +405,7 @@ class GrowthRateProcessor:
                 state=self.aligner.export_state(),
             )
         return {
-            "schema_version": 2,
+            "schema_version": GSENSOR_PROCESSING_SCHEMA_VERSION,
             "run_id": self.run_id,
             "frame_seq": self.frame_seq,
             "algorithm_step": self.algorithm_step,
@@ -414,9 +418,7 @@ class GrowthRateProcessor:
     def restore_state(self, state: Mapping[str, Any]) -> None:
         """Restore a state produced by :meth:`export_state`."""
 
-        schema_version = int(state.get("schema_version", 0))
-        if schema_version not in {1, 2}:
-            raise ValueError("Unsupported growth-rate processor state schema.")
+        validate_processing_schema_version(state.get("schema_version"))
         if str(state.get("run_id") or "") != self.run_id:
             raise ValueError("Growth-rate processor state run_id does not match.")
         edges = state.get("edges")
@@ -430,7 +432,9 @@ class GrowthRateProcessor:
         if algorithm_step > frame_seq:
             raise ValueError("algorithm_step cannot exceed frame_seq.")
 
-        if schema_version == 1:
+        # Only old, unaligned v1 records may omit alignment metadata. Extended
+        # v1 records restore alignment by field presence, not by another version.
+        if "alignment" not in state:
             if self.alignment_method != "none":
                 raise ValueError(
                     "Legacy processor state can only be restored with alignment_method='none'."
