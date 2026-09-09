@@ -1,0 +1,2175 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "T [°C]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^T(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "T · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#DC143C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^T_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "T_KF · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#DC143C",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^T_j(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "T_j · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#7CFC00",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^T_j_set(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "T_j,set · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#7CFC00",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"T\" or r._field == \"T_KF\" or r._field == \"T_j\" or r._field == \"T_j_set\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: r._value - 273.15}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Reactor & jacket temperature",
+      "type": "timeseries",
+      "description": "反应器温度、滤波温度、夹套温度和夹套设定值。温度由 K 换算为 °C。T_j_set 是计算设定值，不代表设备已执行。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "T [°C]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^T(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "T · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#DC143C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^T_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "T_KF · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#DC143C",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"T\" or r._field == \"T_KF\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: r._value - 273.15}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Reactor temperature",
+      "type": "timeseries",
+      "description": "反应器温度 T 与滤波值 T_KF，显示单位 °C。滤波曲线需要 Controller 实际输出。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:K/s"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "dT/dt [K/s]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^dT_dt(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "dT/dt · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF8C00",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^dT_dt_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "dT_KF/dt · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF8C00",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^dT_dt_set(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "dT_set/dt · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FFD700",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"dT_dt\" or r._field == \"dT_dt_KF\" or r._field == \"dT_dt_set\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Temperature gradient",
+      "type": "timeseries",
+      "description": "温度变化率及设定值，单位 K/s；这里的温差变化率不减 273.15。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:g/gH₂O"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "c [g/gH₂O]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^c(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "c · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#4682B4",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^c_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "c_KF · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#4682B4",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"c\" or r._field == \"c_KF\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Concentration",
+      "type": "timeseries",
+      "description": "浓度及滤波值，按项目约定显示 g/gH₂O；设备接入时需要保证传入值遵守这一单位。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:(g/gH₂O)/s"
+              },
+              {
+                "id": "decimals",
+                "value": 8
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "dc/dt [(g/gH₂O)/s]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^dc_dt(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "dc/dt · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#40E0D0",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^dc_dt_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "dc_KF/dt · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#40E0D0",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"dc_dt\" or r._field == \"dc_dt_KF\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Concentration gradient",
+      "type": "timeseries",
+      "description": "浓度变化率及滤波值，单位 (g/gH₂O)/s。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "σ [-]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^target_value(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "σ · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^target_set(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "σ_set · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF0000",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^objective(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "objective · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#1E90FF",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Optimization objective"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^target_error_abs(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Absolute target error · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    2,
+                    3
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 8
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"target_value\" or r._field == \"target_set\" or r._field == \"target_error_abs\" or r._field == \"objective\")\n  |> filter(fn: (r) => exists r.target and r.target == \"sigma\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Target & obj. fun (sigma)",
+      "type": "timeseries",
+      "description": "只显示明确标记为 sigma 目标的记录。左轴：实际目标、设定值与绝对误差；右轴：优化目标函数值 objective。没有目标类型标签的历史记录不在此图显示。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:μm/s"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "G [μm/s]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^target_value(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2E8B57",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^target_set(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_set · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF0000",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^objective(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "objective · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#1E90FF",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Optimization objective"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^target_error_abs(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Absolute target error · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    2,
+                    3
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"target_value\" or r._field == \"target_set\" or r._field == \"target_error_abs\" or r._field == \"objective\")\n  |> filter(fn: (r) => exists r.target and r.target == \"G\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: if r._field == \"objective\" then r._value else r._value * 1000000.0}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Target & obj. fun (G)",
+      "type": "timeseries",
+      "description": "只显示明确标记为 G 目标的记录。左轴由 m/s 换算为 μm/s；右轴为优化目标函数值 objective，保持原值。没有目标类型标签的历史记录不在此图显示。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "σ [-]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^sigma(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "σ · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"sigma\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Relative supersaturation",
+      "type": "timeseries",
+      "description": "相对过饱和度 sigma，无量纲。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:μm/s"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "G [μm/s]"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_model(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2E8B57",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_u(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_u · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FFD700",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_u_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_u,KF · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FFD700",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_v(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_v · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#00FFFF",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_v_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_v,KF · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#00FFFF",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_measure(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_measure · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G_measure_KF(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "G_measure,KF · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    4,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"G_model\" or r._field == \"G_measure\" or r._field == \"G_measure_KF\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: r._value * 1000000.0}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"gsensor_measurement\")\n  |> filter(fn: (r) => r.status == \"measured\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"G_u\" or r._field == \"G_u_KF\" or r._field == \"G_v\" or r._field == \"G_v_KF\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: r._value * 1000000.0}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Growth rate",
+      "type": "timeseries",
+      "description": "Controller 的模型与测量生长率，以及 GSensor 的 u/v 原始和滤波生长率，统一显示 μm/s。G_measure_KF 只在满足自适应条件时输出。两服务分别使用计算/处理时间，未强行对齐采样点。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "Device count · ${__field.labels.run_id}"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Device count (unit to confirm)"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 16
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"process_count_middle\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Count",
+      "type": "timeseries",
+      "description": "显示设备返回的 process_count_middle 原始计数；具体计数口径和单位待设备/算法负责人确认。只有启用过程读取且设备返回该值时才有数据。按窗口取最后值，不做累加。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "所选实验 / 时段暂无数据"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Scaled parameter value"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^n(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "n × 100 · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^k_0(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "k₀ / 10¹⁴ · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#2E8B57",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^E_A(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "E_A [kJ/mol] · ${__field.labels.run_id}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF8C00",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 16
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"n\" or r._field == \"k_0\" or r._field == \"E_A\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: if r._field == \"n\" then r._value * 100.0 else if r._field == \"k_0\" then r._value / 100000000000000.0 else r._value / 1000.0}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        }
+      ],
+      "title": "Growth parameters",
+      "type": "timeseries",
+      "description": "保留原图缩放：n × 100、k₀ / 10¹⁴、E_A / 1000（kJ/mol），用于同图比较。当前接口没有 n_KF、k_0_KF、E_A_KF，暂不绘制这三条滤波曲线。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "待 Controller 提供滞后时间 / 倍率输出"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 16
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [],
+      "title": "Lag time, percentage & ratio [待接入]",
+      "type": "timeseries",
+      "description": "待接入：Controller 尚未导出动态滞后时间和倍率，原图第三条 ratio 的含义也待确认。本图位置保留；不使用配置常量、旧正弦测试数据或零值代替实验结果。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "crystallization",
+    "mpc"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "crystallization-influxdb"
+        },
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"run_id\", predicate: (r) => r._measurement == \"controller_measurement\" or r._measurement == \"gsensor_measurement\", start: v.timeRangeStart, stop: v.timeRangeStop)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "有数据的实验",
+        "multi": true,
+        "name": "run_id",
+        "options": [],
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"run_id\", predicate: (r) => r._measurement == \"controller_measurement\" or r._measurement == \"gsensor_measurement\", start: v.timeRangeStart, stop: v.timeRangeStop)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 2,
+        "type": "query",
+        "description": "列出当前时间范围内已写入 Controller 或 GSensor 数据的实验；尚未产生数据的实验不会出现在列表中。"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Crystallization MPC Analysis",
+  "uid": "crystallization-mpc-analysis",
+  "version": 2,
+  "weekStart": "",
+  "description": "原 12 图实验看板。先选择有数据的实验，再调整右上角时间范围；图例保留实验编号。没有输出的曲线不补零。Lag 与参数 KF 的缺项详见对应图说明。"
+}

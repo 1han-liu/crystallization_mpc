@@ -1108,6 +1108,8 @@ class ControllerService:
             process_write=process_write,
             process_write_attempted=process_write_attempted,
             process_write_error=process_write_error,
+            # The tick, run ID, and its parameter snapshot share the service lock.
+            control_target=_configured_control_target(self.parameters),
         )
         if self.measurement_writer is not None:
             try:
@@ -1294,6 +1296,22 @@ class ControllerService:
                 "last_control_output": copy.deepcopy(self.last_control_output),
                 "integrations": self._integration_status_locked(),
             }
+
+
+def _configured_control_target(parameters: Mapping[str, Any]) -> str | None:
+    """Read the configured target type without inferring it from numeric results."""
+    values = [
+        parameters[key]
+        for key in ("target", "control_target")
+        if key in parameters
+    ]
+    if not values or any(
+        not isinstance(value, str) or value not in ("sigma", "G")
+        for value in values
+    ):
+        return None
+    # Legacy callers may use control_target; conflicting aliases are ambiguous.
+    return values[0] if all(value == values[0] for value in values) else None
 
 
 def _positive_int(value: Any, name: str) -> int:

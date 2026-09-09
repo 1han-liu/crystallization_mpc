@@ -1,0 +1,18 @@
+apiVersion: 1
+
+datasources:
+  - name: Crystallization InfluxDB
+    uid: crystallization-influxdb
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    editable: false
+    version: 2
+    jsonData:
+      version: Flux
+      organization: $INFLUX_ORG
+      defaultBucket: $INFLUX_BUCKET
+      timeInterval: 1s
+    secureJsonData:
+      token: $INFLUX_TOKEN

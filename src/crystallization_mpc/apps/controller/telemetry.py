@@ -27,6 +27,7 @@ class ControllerMeasurementRecord:
     process_write: ProcessWriteResult | None = None
     process_write_attempted: bool = False
     process_write_error: str | None = None
+    control_target: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.run_id).strip():
@@ -50,13 +51,16 @@ class ControllerMeasurementRecord:
                 raise ValueError("process_write_error cannot be empty.")
 
     def tags(self) -> dict[str, str]:
-        return {
+        tags = {
             "service": CONTROLLER_SERVICE_TAG,
             "run_id": self.run_id,
             "status": "calculated" if self.result.valid else "invalid",
             "adaptation_enabled": str(self.adaptation_enabled).lower(),
             "adaptation_mode": self.adaptation_mode,
         }
+        if self.control_target in ("sigma", "G"):
+            tags["target"] = self.control_target
+        return tags
 
     def fields(self) -> dict[str, Any]:
         fields: dict[str, Any] = {
