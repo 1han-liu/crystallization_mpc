@@ -15,10 +15,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.params import (
     ParameterValidationError,
     load_param_meta,
     load_params,
+    load_runtime_params,
     save_params_document,
     validate_params_section,
 )
@@ -56,6 +58,7 @@ from crystallization_mpc.apps.gsensor.telemetry import (
     write_gsensor_measurement,
 )
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
+from crystallization_mpc.experiments import ExperimentStatus
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
     EXPERIMENT_SELECT_COMMAND,
@@ -1235,7 +1238,18 @@ class GsensorService:
         return self.default_params_path
 
     def _load_persisted_params(self) -> tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
-        return load_params(str(self._active_params_path()))
+        with self._lock:
+            if self._experiment_in_progress_locked():
+                return load_params(str(self._active_params_path()))
+        # Central can have an immutable STARTING snapshot before GSensor has
+        # received experiment.start. Consult the shared manifest as well.
+        central = CentralExperimentManager(self.experiment_root_path)
+        run_id = central.current_run_id()
+        if run_id is not None and central.registry.get(run_id).status not in {
+            ExperimentStatus.CREATED, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR,
+        }:
+            return load_params(str(self._active_params_path()))
+        return load_runtime_params(str(self.params_path), str(self.default_params_path))
 
     def load_param_meta(self) -> Dict[str, Dict[str, Any]]:
         return load_param_meta(str(self.param_meta_path))

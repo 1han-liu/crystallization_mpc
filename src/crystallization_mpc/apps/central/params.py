@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import copy
+import errno
+import logging
 import math
 import os
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 ROLE = "central"
+logger = logging.getLogger(__name__)
 TARGET_SWITCH_KEYS = (
     ("target_set", "sigma_set", "G_set"),
     ("params.K_P_T", "params.K_P_T_sigma", "params.K_P_T_G"),
@@ -114,7 +120,6 @@ def save_params_document(
 ) -> None:
     if isinstance(version, bool) or int(version) < 1:
         raise ParameterValidationError("Parameter version must be a positive integer.")
-    yaml = _require_yaml()
     data = {
         "version": version,
         "params": {
@@ -123,7 +128,53 @@ def save_params_document(
             "controller": _dict_to_list(controller),
         },
     }
-    destination = Path(path)
+    with _parameter_file_lock(Path(path)):
+        _write_params_document(Path(path), data)
+
+
+@contextmanager
+def _parameter_file_lock(path: Path):
+    """Serialize writes to the shared draft across Central and GSensor."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a+b") as stream:
+        if stream.seek(0, os.SEEK_END) == 0:
+            stream.write(b"\0")
+            stream.flush()
+        deadline = time.monotonic() + 10
+        while True:
+            stream.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise ParameterValidationError(
+                        "The parameter draft is busy. Retry after the other operation finishes."
+                    ) from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _write_params_document(destination: Path, data: Dict[str, Any]) -> None:
+    yaml = _require_yaml()
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
     try:
@@ -133,6 +184,67 @@ def save_params_document(
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def load_runtime_params(
+    runtime_path: str,
+    default_path: str,
+) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
+    """Upgrade an editable draft, preserving saved values and an exact backup.
+
+    Callers must use the plain loader for locked experiments and snapshots.
+    A missing runtime file still uses defaults without creating a draft.
+    """
+
+    runtime = Path(runtime_path)
+    defaults = Path(default_path)
+    if not runtime.exists():
+        return load_params(default_path)
+    if runtime.resolve() == defaults.resolve() or not defaults.exists():
+        return load_params(runtime_path)
+
+    with _parameter_file_lock(runtime):
+        # Another service may already have upgraded the same mounted file.
+        original = runtime.read_bytes()
+        yaml = _require_yaml()
+        document = yaml.safe_load(original)
+        default_document = load_params_document(default_path)
+        if not isinstance(document, dict) or not isinstance(document.get("params"), dict):
+            raise ParameterValidationError("The runtime parameter file must contain a params mapping.")
+        upgraded = copy.deepcopy(document)
+        added = []
+        for section in ("shared", "gsensor", "controller"):
+            entries = upgraded["params"].get(section)
+            if entries is None:
+                entries = []
+            if not isinstance(entries, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("key"), str)
+                for item in entries
+            ):
+                raise ParameterValidationError(f"Invalid runtime parameter section: {section}.")
+            existing = {item["key"] for item in entries}
+            for item in default_document.get("params", {}).get(section, []) or []:
+                if item["key"] not in existing:
+                    entries.append(copy.deepcopy(item))
+                    existing.add(item["key"])
+                    added.append(f"{section}.{item['key']}")
+            upgraded["params"][section] = entries
+        if not added:
+            return load_params(runtime_path)
+
+        version = document.get("version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ParameterValidationError("Parameter version must be a positive integer.")
+        upgraded["version"] = version + 1
+        backup = runtime.with_name(f"{runtime.name}.pre-upgrade-v{version}-{uuid4().hex}.bak")
+        with backup.open("xb") as stream:
+            stream.write(original)
+        _write_params_document(runtime, upgraded)
+        logger.info(
+            "Upgraded parameter draft to version %s; added %s; backup: %s",
+            upgraded["version"], ", ".join(added), backup,
+        )
+        return load_params(runtime_path)
 
 
 def load_params(path: str) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:

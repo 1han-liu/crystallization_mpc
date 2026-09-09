@@ -26,6 +26,7 @@ from crystallization_mpc.apps.central.params import (
     load_operation_meta,
     load_param_meta,
     load_params,
+    load_runtime_params,
     save_params_document,
     validate_params_section,
 )
@@ -784,7 +785,12 @@ class CentralService:
         return path
 
     def load_params(self) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
-        return load_params(str(self._active_params_path()))
+        try:
+            self._require_parameter_draft_editable()
+        except InvalidExperimentStateError:
+            # STARTING retries must keep the already prepared snapshot/version.
+            return load_params(str(self._active_params_path()))
+        return load_runtime_params(str(self.params_path), str(self.default_params_path))
 
     def load_default_params(
         self,
@@ -954,6 +960,20 @@ class CentralService:
             raise ParameterValidationError(
                 "The parameter draft changed on the server. Reload it before saving."
             )
+        if not allow_changes:
+            # A STARTING retry resends the saved draft, which may predate new
+            # default fields. It must neither migrate nor validate against a
+            # newer schema; the immutable snapshot will be checked on start.
+            if (payload.shared, payload.gsensor, payload.controller) != (
+                current_shared, current_gsensor, current_controller,
+            ):
+                raise InvalidExperimentStateError(
+                    "This experiment has already started; its parameter snapshot is immutable."
+                )
+            result = self.params_payload()
+            result["saved"] = True
+            result["changed"] = False
+            return result
         default_shared, default_gsensor, default_controller, _ = self.load_default_params()
         meta = self.load_param_meta()
         shared = validate_params_section(
@@ -970,10 +990,6 @@ class CentralService:
             current_gsensor,
             current_controller,
         )
-        if changed and not allow_changes:
-            raise InvalidExperimentStateError(
-                "This experiment has already started; its parameter snapshot is immutable."
-            )
         if changed:
             version = current_version + 1
             save_params_document(
