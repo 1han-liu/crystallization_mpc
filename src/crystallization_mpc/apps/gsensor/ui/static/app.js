@@ -1,5 +1,6 @@
 const statusText = document.querySelector("#status-text");
 const initializedText = document.querySelector("#initialized-text");
+const connectionStatus = document.querySelector("#connection-status");
 const paramsBlock = document.querySelector("#params-block");
 const messageBlock = document.querySelector("#message-block");
 const shell = document.querySelector(".shell");
@@ -76,7 +77,7 @@ const refreshOverlayButton = document.querySelector("#refresh-overlay");
 
 const initContext = initCanvas.getContext("2d");
 const threeDContext = threeDCanvas.getContext("2d");
-const initImage = new Image();
+let initImage = null;
 const default3DView = { yaw: -0.65, pitch: 0.55 };
 
 const state = {
@@ -87,6 +88,7 @@ const state = {
   drawerOpen: false,
   parameterActionInFlight: false,
   parameterError: null,
+  parameterNotice: null,
   parameterUnsavedCount: 0,
   initialization: null,
   experimentSource: null,
@@ -94,6 +96,17 @@ const state = {
   experimentLifecycleStatus: "not_started",
   sourceActionInFlight: false,
   liveStatusInFlight: false,
+  statusAvailable: false,
+  runId: undefined,
+  contextRevision: 0,
+  statusRequest: 0,
+  sourceRequest: 0,
+  paramsRequest: 0,
+  initializationRevision: 0,
+  initializationAction: null,
+  initializationFeedback: null,
+  confirmedSessionId: null,
+  sourceError: null,
   currentImageKey: null,
   imageReady: false,
   threeDView: {
@@ -110,11 +123,11 @@ const state = {
     order: [],
     items: new Map(),
   },
-  cornerRequestInFlight: false,
-  confirm3DChoiceInFlight: false,
   dscgrInFlight: false,
   latestOverlayFrame: null,
   lastOverlayRefreshAt: 0,
+  overlayRequest: 0,
+  overlayImage: null,
   alignmentCapabilities: {},
 };
 
@@ -181,14 +194,27 @@ function cacheBustedUrl(url, options = {}) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(cacheBustedUrl(url, options), {
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    ...options,
-  });
-  const payload = await response.json();
+  let response;
+  try {
+    response = await fetch(cacheBustedUrl(url, options), {
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      ...options,
+    });
+  } catch (error) {
+    error.outcomeUnknown = true;
+    throw error;
+  }
+  const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(payload.detail || "Request failed");
+    const detail = payload?.detail;
+    const message = Array.isArray(detail) ? detail.map((item) => item.msg || String(item)).join("; ") : detail;
+    throw new Error(message || `Request failed (${response.status})`);
+  }
+  if (payload === null) {
+    const error = new Error("The server response could not be read. Refresh status before trying again.");
+    error.outcomeUnknown = true;
+    throw error;
   }
   return payload;
 }
@@ -280,11 +306,13 @@ function renderForm(params) {
       input.value = formatFieldValue(value);
       input.addEventListener("input", () => {
         state.parameterError = null;
+        state.parameterNotice = null;
         updateParameterDraftState();
       });
       resetButton.addEventListener("click", () => {
         input.value = formatFieldValue(defaultValue);
         state.parameterError = null;
+        state.parameterNotice = null;
         updateParameterDraftState();
         input.focus();
       });
@@ -315,7 +343,7 @@ function updateParameterDraftState() {
   }
   let unsavedCount = 0;
   let modifiedCount = 0;
-  const locked = parametersLocked();
+  const locked = parametersLocked() || !state.statusAvailable;
   paramsForm.querySelectorAll(".field-input").forEach((input) => {
     const key = input.dataset.key;
     const value = parseFieldValue(input.value);
@@ -352,6 +380,12 @@ function renderParameterStatus(unsavedCount = 0) {
   } else if (state.parameterError) {
     kind = "error";
     message = `Save/validation failed: ${state.parameterError}`;
+  } else if (state.parameterNotice) {
+    kind = "draft_saved";
+    message = state.parameterNotice;
+  } else if (!state.statusAvailable) {
+    kind = "error";
+    message = "Status unavailable · displayed parameter values may be outdated";
   } else if (parametersLocked()) {
     kind = "applied";
     const runId = state.experimentSource?.run_id;
@@ -377,7 +411,51 @@ function collectForm() {
   return data;
 }
 
-function renderStatus(payload) {
+function clearMeasurementOverlay() {
+  state.overlayRequest += 1;
+  state.overlayImage = null;
+  state.latestOverlayFrame = null;
+  state.lastOverlayRefreshAt = 0;
+  measurementOverlay.hidden = true;
+  measurementOverlay.removeAttribute("src");
+  measurementOverlayCaption.textContent = "No overlay for the current experiment.";
+  refreshOverlayButton.disabled = true;
+}
+
+function setStatusAvailable(available, message = "") {
+  state.statusAvailable = available;
+  connectionStatus.hidden = available;
+  connectionStatus.textContent = available ? "" : `Status connection lost. Measurements, images and parameters may be outdated. Editing is disabled until status refresh succeeds. ${message}`;
+  updateParameterDraftState();
+  renderInitialization(state.initialization);
+  refreshOverlayButton.disabled = !available || !state.latestOverlayFrame;
+}
+
+function adoptExperiment(payload) {
+  const runId = payload.current_run_id || payload.experiment?.run_id || null;
+  if (state.runId === runId) {
+    return;
+  }
+  state.runId = runId;
+  state.contextRevision += 1;
+  state.initializationRevision += 1;
+  state.initializationAction = null;
+  state.initializationFeedback = null;
+  state.confirmedSessionId = null;
+  state.parameterError = null;
+  state.parameterNotice = null;
+  state.sourceError = null;
+  clearMeasurementOverlay();
+  renderInitialization(null);
+  renderExperimentSource({
+    ...(payload.experiment || {}), selected: Boolean(runId), run_id: runId, image_count: 0,
+  });
+}
+
+function renderStatus(payload, { includeInitialization = true } = {}) {
+  adoptExperiment(payload);
+  state.statusAvailable = true;
+  connectionStatus.hidden = true;
   state.measurementActive = Boolean(payload.active);
   state.experimentLifecycleStatus = payload.experiment_lifecycle_status || "not_started";
   if (parametersLocked() && state.params && payload.params) {
@@ -422,35 +500,62 @@ function renderStatus(payload) {
   renderBaseline(payload.baseline || null);
   renderOnlineMeasurement(payload);
   renderExperimentSource(state.experimentSource);
-  renderInitialization(payload.initialization || null);
+  if (includeInitialization || payload.initialization?.session_id !== state.initialization?.session_id) {
+    if (payload.initialization?.session_id !== state.initialization?.session_id && state.initializationAction) {
+      state.initializationAction = null;
+      state.initializationRevision += 1;
+    }
+    renderInitialization(payload.initialization || null);
+  } else {
+    renderInitialization(state.initialization);
+  }
 }
 
 function formatGrowthRate(value, unit = "m/s") {
+  if (value == null || value === "") {
+    return "—";
+  }
   const numeric = Number(value);
   return Number.isFinite(numeric) ? `${numeric.toExponential(6)} ${unit}` : "—";
 }
 
-function refreshMeasurementOverlay(frameSeq, { force = false, final = false } = {}) {
-  if (!frameSeq) {
+function refreshMeasurementOverlay(frameSeq, { force = false, final = false, processedAt = "" } = {}) {
+  if (!frameSeq || !state.runId || !state.statusAvailable) {
     return;
   }
   const now = Date.now();
-  if (!force && (frameSeq === state.latestOverlayFrame || now - state.lastOverlayRefreshAt < 3000)) {
+  const kind = final ? "final" : "latest";
+  const key = `${state.runId}:${kind}:${frameSeq}:${processedAt}`;
+  if (!force && (key === state.latestOverlayFrame || (state.latestOverlayFrame?.startsWith(`${state.runId}:${kind}:`) && now - state.lastOverlayRefreshAt < 3000))) {
     return;
   }
-  const kind = final ? "final" : "latest";
-  measurementOverlay.src = `/api/measurement/overlay/${kind}?frame_seq=${encodeURIComponent(frameSeq)}&_=${now}`;
-  measurementOverlay.hidden = false;
-  measurementOverlayCaption.textContent = final
-    ? `Final overlay · frame ${frameSeq}`
-    : `Latest overlay · frame ${frameSeq}`;
-  state.latestOverlayFrame = frameSeq;
+  const runId = state.runId;
+  const revision = ++state.overlayRequest;
+  const image = new Image();
+  state.overlayImage = image;
+  image.onload = () => {
+    if (revision !== state.overlayRequest || runId !== state.runId) return;
+    measurementOverlay.src = image.src;
+    measurementOverlay.hidden = false;
+    measurementOverlayCaption.textContent = `${final ? "Final" : "Latest"} overlay · ${runId} · frame ${frameSeq}`;
+  };
+  image.onerror = () => {
+    if (revision !== state.overlayRequest || runId !== state.runId) return;
+    measurementOverlay.hidden = true;
+    measurementOverlay.removeAttribute("src");
+    measurementOverlayCaption.textContent = "Overlay is not available yet. Refresh Preview to try again.";
+    state.latestOverlayFrame = null;
+  };
+  image.src = `/api/measurement/overlay/${kind}?run_id=${encodeURIComponent(runId)}&frame_seq=${encodeURIComponent(frameSeq)}&_=${now}`;
+  state.latestOverlayFrame = key;
   state.lastOverlayRefreshAt = now;
+  refreshOverlayButton.disabled = false;
 }
 
 function renderOnlineMeasurement(payload) {
   const processing = payload.growth_rate_processing || {};
-  const result = processing.latest_result || null;
+  const candidateResult = processing.latest_result || null;
+  const result = candidateResult && (!candidateResult.run_id || candidateResult.run_id === state.runId) ? candidateResult : null;
   const publishing = payload.sample_publishing || {};
   const influx = payload.influx_persistence || {};
   const valid = Boolean(result?.valid);
@@ -499,7 +604,9 @@ function renderOnlineMeasurement(payload) {
   const final = ["stopped", "completed"].includes(payload.experiment_lifecycle_status)
     && Boolean(processing.final_overlay_path);
   if (hasResult) {
-    refreshMeasurementOverlay(result.frame_seq, { final });
+    refreshMeasurementOverlay(result.frame_seq, { final, processedAt: result.processed_at });
+  } else {
+    clearMeasurementOverlay();
   }
 }
 
@@ -534,12 +641,15 @@ function renderExperimentSource(payload) {
   const selected = Boolean(payload?.selected);
   const imageCount = Number(payload?.image_count || 0);
   currentRunId.textContent = selected ? payload.run_id : "No experiment selected";
-  currentImageDirectory.textContent = selected ? payload.container_image_path : "—";
+  currentImageDirectory.textContent = selected ? (payload.container_image_path || "—") : "—";
   currentImageCount.textContent = String(imageCount);
 
   refreshImagesButton.disabled = state.sourceActionInFlight;
 
-  if (!selected) {
+  imageSourceStatus.classList.toggle("error", Boolean(state.sourceError));
+  if (state.sourceError) {
+    imageSourceStatus.textContent = `Image list refresh failed: ${state.sourceError}`;
+  } else if (!selected) {
     imageSourceStatus.textContent = "Create or select an experiment in Central first.";
   } else if (state.experimentLifecycleStatus === "waiting_for_initial_image") {
     imageSourceStatus.textContent = "Waiting for the first readable camera image. Initialization will open automatically.";
@@ -555,19 +665,42 @@ function renderExperimentSource(payload) {
 }
 
 async function loadStatus() {
-  const payload = await fetchJson("/api/status");
-  renderStatus(payload);
-  return payload;
+  const request = ++state.statusRequest;
+  const initializationRevision = state.initializationRevision;
+  try {
+    const payload = await fetchJson("/api/status");
+    if (request !== state.statusRequest || initializationRevision !== state.initializationRevision) return null;
+    renderStatus(payload, { includeInitialization: !state.initializationAction });
+    return payload;
+  } catch (error) {
+    if (request !== state.statusRequest || initializationRevision !== state.initializationRevision) return null;
+    setStatusAvailable(false, error.message);
+    throw error;
+  }
 }
 
 async function loadExperimentSource() {
-  const payload = await fetchJson("/api/initialization/source");
+  const request = ++state.sourceRequest;
+  const context = state.contextRevision;
+  let payload;
+  try {
+    payload = await fetchJson("/api/initialization/source");
+  } catch (error) {
+    if (request !== state.sourceRequest || context !== state.contextRevision) return null;
+    state.sourceError = error.message;
+    renderExperimentSource(state.experimentSource);
+    throw error;
+  }
+  const runId = payload.selected ? payload.run_id : null;
+  if (request !== state.sourceRequest || context !== state.contextRevision || runId !== state.runId) return null;
+  state.sourceError = null;
   renderExperimentSource(payload);
   return payload;
 }
 
 async function refreshOverview() {
-  await Promise.all([loadStatus(), loadExperimentSource()]);
+  const payload = await loadStatus();
+  if (payload) await loadExperimentSource();
 }
 
 async function refreshLiveStatus() {
@@ -577,10 +710,11 @@ async function refreshLiveStatus() {
   state.liveStatusInFlight = true;
   try {
     const payload = await loadStatus();
+    if (!payload) return;
     const statusRunId = payload.current_run_id || payload.experiment?.run_id || null;
     const displayedRunId = state.experimentSource?.run_id || null;
-    if (statusRunId !== displayedRunId) {
-      await loadExperimentSource();
+    if (statusRunId !== displayedRunId || (statusRunId && state.experimentSource?.image_count === 0)) {
+      await loadExperimentSource().catch(() => {});
     }
   } catch (error) {
     statusText.textContent = error.message;
@@ -591,10 +725,13 @@ async function refreshLiveStatus() {
 }
 
 async function loadParams() {
+  const request = ++state.paramsRequest;
+  const context = state.contextRevision;
   const [params, capabilities] = await Promise.all([
     fetchJson("/api/params"),
     fetchJson("/api/alignment/capabilities"),
   ]);
+  if (request !== state.paramsRequest || context !== state.contextRevision || state.parameterActionInFlight || state.parameterUnsavedCount > 0) return state.params;
   state.params = params;
   state.alignmentCapabilities = Object.fromEntries(
     (capabilities.methods || []).map((item) => [item.method, item]),
@@ -602,62 +739,91 @@ async function loadParams() {
   state.paramsVersion = state.params.version || 1;
   state.paramMeta = state.params.meta || {};
   state.parameterError = null;
+  state.parameterNotice = null;
   renderForm(state.params.params || {});
   updateParameterDraftState();
   return state.params;
 }
 
 async function saveParams() {
+  return performParameterAction("/api/params", { version: state.paramsVersion, params: collectForm() });
+}
+
+async function performParameterAction(url, body) {
+  if (state.parameterActionInFlight || parametersLocked() || !state.statusAvailable) return;
+  ++state.paramsRequest;
+  const context = state.contextRevision;
   state.parameterActionInFlight = true;
   state.parameterError = null;
+  state.parameterNotice = null;
   updateParameterDraftState();
   try {
-    state.params = await fetchJson("/api/params", {
-      method: "POST",
-      body: JSON.stringify({
-        version: state.paramsVersion,
-        params: collectForm(),
-      }),
-    });
+    const payload = await fetchJson(url, { method: "POST", body: JSON.stringify(body) });
+    if (context !== state.contextRevision) return;
+    state.params = payload;
     state.paramsVersion = state.params.version || state.paramsVersion;
     state.paramMeta = state.params.meta || state.paramMeta;
     renderForm(state.params.params || {});
-    await loadStatus();
+    state.parameterNotice = "Parameters saved.";
+    try {
+      await loadStatus();
+    } catch (error) {
+      if (context === state.contextRevision) state.parameterNotice = "Parameters saved; status refresh failed. Wait for status to reconnect before further changes.";
+    }
   } catch (error) {
-    state.parameterError = error.message;
+    if (context === state.contextRevision) {
+      if (error.outcomeUnknown) {
+        state.parameterNotice = "Save outcome is unknown. Refresh status before trying again.";
+        setStatusAvailable(false, error.message);
+      } else {
+        state.parameterError = error.message;
+      }
+    }
   } finally {
     state.parameterActionInFlight = false;
     updateParameterDraftState();
   }
 }
 
+function initializationEditable() {
+  return state.statusAvailable && state.experimentLifecycleStatus === "initializing"
+    && !state.initializationAction && !state.dscgrInFlight
+    && (!state.confirmedSessionId || state.confirmedSessionId !== state.initialization?.session_id);
+}
+
 function renderInitialization(payload) {
+  if (state.initialization?.session_id !== payload?.session_id) {
+    state.initializationFeedback = null;
+    state.confirmedSessionId = null;
+  }
   ensure3DSnapshotScope(payload);
   state.initialization = payload;
   const hasSession = Boolean(payload?.session_id);
   const step = payload?.current_step || null;
   const selected3DChoice = payload?.selected_3d_choice;
-  const initializationEditable = state.experimentLifecycleStatus === "initializing";
+  const editable = initializationEditable();
   initStepTitle.textContent = hasSession ? payload.status : "Not started";
   initStepPrompt.textContent = step?.prompt || (selected3DChoice
-    ? (initializationEditable
+    ? (state.experimentLifecycleStatus === "initializing"
       ? `Previewing 3D choice ${selected3DChoice}. Compare other candidates or confirm this selection.`
       : `Confirmed 3D choice ${selected3DChoice}.`)
     : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when the first image arrives."));
-  initSaveStatus.textContent = hasSession
-    ? `${payload.selected_image || ""}`
-    : "idle";
+  const feedback = state.initializationFeedback;
+  initSaveStatus.textContent = feedback?.message || (hasSession ? `${payload.selected_image || ""}` : "idle");
+  initSaveStatus.classList.toggle("error", feedback?.kind === "error");
+  initSaveStatus.classList.toggle("pending", Boolean(state.initializationAction));
+  initCanvas.setAttribute("aria-busy", String(Boolean(state.initializationAction)));
+  initCanvas.setAttribute("aria-disabled", String(!editable || !state.imageReady || step?.type !== "point"));
 
-  undoInitButton.disabled = !initializationEditable || !payload?.can_undo;
-  resetInitButton.disabled = !initializationEditable || !hasSession;
-  confirm3DChoiceButton.disabled = !initializationEditable
+  undoInitButton.disabled = !editable || !payload?.can_undo;
+  resetInitButton.disabled = !editable || !hasSession;
+  confirm3DChoiceButton.disabled = !editable
     || payload?.status !== "ready_for_3d"
-    || selected3DChoice == null
-    || state.confirm3DChoiceInFlight;
-  runDscgrButton.disabled = payload?.status !== "ready_for_3d" || state.dscgrInFlight;
+    || selected3DChoice == null;
+  runDscgrButton.disabled = !state.statusAvailable || payload?.status !== "ready_for_3d" || state.dscgrInFlight || Boolean(state.initializationAction);
 
   fullModeControls.querySelectorAll("button").forEach((button) => {
-    button.disabled = !initializationEditable || !hasSession || step?.key !== "is_full";
+    button.disabled = !editable || !hasSession || step?.key !== "is_full";
     const selected = String(payload?.is_full) === button.dataset.fullMode;
     button.classList.toggle("selected", selected);
   });
@@ -682,7 +848,7 @@ function renderCandidateControls(payload) {
     button.className = "ghost";
     button.dataset.choice = String(candidate.choice);
     button.textContent = candidate.label || `Choice ${candidate.choice}`;
-    button.disabled = state.experimentLifecycleStatus !== "initializing"
+    button.disabled = !initializationEditable()
       || !["ready_for_3d_choice", "ready_for_3d"].includes(payload?.status);
     button.classList.toggle("selected", payload?.selected_3d_choice === candidate.choice);
     candidateControls.appendChild(button);
@@ -716,9 +882,8 @@ function activeCornerReference(payload) {
 }
 
 function renderCornerControls(payload) {
-  const enabled = state.experimentLifecycleStatus === "initializing"
-    && canCompareCorner(payload)
-    && !state.cornerRequestInFlight;
+  const enabled = initializationEditable()
+    && canCompareCorner(payload);
   const activeCorner = activeCornerReference(payload);
   cornerControls.querySelectorAll("button").forEach((button) => {
     button.disabled = !enabled;
@@ -749,37 +914,43 @@ function appendPointListItem(key, point, computed) {
 function maybeLoadInitializationImage(payload) {
   if (!payload?.session_id) {
     state.currentImageKey = null;
+    initImage = null;
     state.imageReady = false;
     initCanvas.width = 0;
     initCanvas.height = 0;
     canvasEmpty.hidden = false;
+    canvasEmpty.textContent = "No image loaded";
     return;
   }
-  const imageKey = `${payload.session_id}:${payload.selected_image}`;
+  const imageKey = `${state.runId}:${payload.session_id}:${payload.selected_image}`;
   if (state.currentImageKey === imageKey) {
     return;
   }
   state.currentImageKey = imageKey;
   state.imageReady = false;
+  initCanvas.width = 0;
+  initCanvas.height = 0;
   canvasEmpty.hidden = false;
-  initImage.src = `/api/initialization/image/${payload.session_id}?_=${Date.now()}`;
+  canvasEmpty.textContent = "Loading initialization image…";
+  const image = new Image();
+  initImage = image;
+  image.onload = () => {
+    if (state.currentImageKey !== imageKey || initImage !== image) return;
+    state.imageReady = true;
+    initCanvas.width = image.naturalWidth;
+    initCanvas.height = image.naturalHeight;
+    canvasEmpty.hidden = true;
+    renderInitialization(state.initialization);
+  };
+  image.onerror = () => {
+    if (state.currentImageKey !== imageKey || initImage !== image) return;
+    state.imageReady = false;
+    canvasEmpty.hidden = false;
+    canvasEmpty.textContent = "Image preview could not be loaded. Refresh Images to try again.";
+    initCanvas.setAttribute("aria-disabled", "true");
+  };
+  image.src = `/api/initialization/image/${encodeURIComponent(payload.session_id)}?_=${Date.now()}`;
 }
-
-initImage.addEventListener("load", () => {
-  state.imageReady = true;
-  initCanvas.width = initImage.naturalWidth;
-  initCanvas.height = initImage.naturalHeight;
-  canvasEmpty.hidden = true;
-  drawInitialization();
-  renderCornerReferenceInset(state.initialization);
-  drawSelected3DPreview();
-});
-
-initImage.addEventListener("error", () => {
-  state.imageReady = false;
-  canvasEmpty.hidden = false;
-  initSaveStatus.textContent = "image load failed";
-});
 
 function drawInitialization() {
   if (!state.imageReady || !initCanvas.width || !initCanvas.height) {
@@ -1322,41 +1493,82 @@ function drawPoint(overlay) {
 async function submitInitializationPoint(event) {
   const payload = state.initialization;
   const step = payload?.current_step;
-  if (!payload?.session_id || step?.type !== "point") {
+  if (!initializationEditable() || !state.imageReady || !payload?.session_id || step?.type !== "point") {
     return;
   }
   const rect = initCanvas.getBoundingClientRect();
   const x = (event.clientX - rect.left) * (initCanvas.width / rect.width);
   const y = (event.clientY - rect.top) * (initCanvas.height / rect.height);
-  initSaveStatus.textContent = `marking ${step.label || step.key}`;
-  const nextPayload = await fetchJson("/api/initialization/point", {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: payload.session_id,
-      x,
-      y,
-    }),
-  });
-  renderInitialization(nextPayload);
+  await performInitializationAction("point", { x, y }, `Saving ${step.label || step.key}…`, "Point saved.");
+}
+
+async function performInitializationAction(endpoint, fields, pendingMessage, successMessage, { refresh = false } = {}) {
+  if (!initializationEditable() || !state.initialization?.session_id) return;
+  const action = { context: state.contextRevision, sessionId: state.initialization.session_id };
+  state.initializationAction = action;
+  state.initializationRevision += 1;
+  state.initializationFeedback = { kind: "pending", message: pendingMessage };
+  renderInitialization(state.initialization);
+  const current = () => state.initializationAction === action && state.contextRevision === action.context
+    && state.initialization?.session_id === action.sessionId;
+  try {
+    const payload = await fetchJson(`/api/initialization/${endpoint}`, {
+      method: "POST", body: JSON.stringify({ session_id: action.sessionId, ...fields }),
+    });
+    if (!current()) return;
+    state.initializationRevision += 1;
+    renderInitialization(payload);
+    if (endpoint === "confirm") state.confirmedSessionId = action.sessionId;
+    state.initializationFeedback = { kind: "success", message: successMessage };
+    if (refresh) {
+      try {
+        await loadStatus();
+      } catch (error) {
+        if (state.contextRevision === action.context) {
+          state.initializationFeedback = { kind: "error", message: `${successMessage} Status refresh failed; the action succeeded. Wait for status to reconnect instead of submitting again.` };
+        }
+      }
+    }
+  } catch (error) {
+    if (current()) {
+      state.initializationFeedback = { kind: "error", message: error.outcomeUnknown
+        ? `Request outcome is unknown. Refresh status before trying again. ${error.message}` : error.message };
+      if (error.outcomeUnknown) setStatusAvailable(false, error.message);
+    }
+  } finally {
+    if (state.initializationAction === action) {
+      state.initializationAction = null;
+      state.initializationRevision += 1;
+      renderInitialization(state.initialization);
+    }
+  }
 }
 
 async function runDscgr() {
-  if (!state.initialization?.session_id || state.initialization.status !== "ready_for_3d") {
+  if (!state.statusAvailable || state.dscgrInFlight || state.initializationAction
+      || !state.initialization?.session_id || state.initialization.status !== "ready_for_3d") {
     return;
   }
   state.dscgrInFlight = true;
+  const context = state.contextRevision;
+  const sessionId = state.initialization.session_id;
   runDscgrButton.disabled = true;
   dscgrStatus.textContent = "running";
   try {
     const result = await fetchJson("/api/dscgr/run", {
       method: "POST",
-      body: JSON.stringify({ session_id: state.initialization.session_id }),
+      body: JSON.stringify({ session_id: sessionId }),
     });
+    if (context !== state.contextRevision || sessionId !== state.initialization?.session_id) return;
     const count = Array.isArray(result.processed_ptrs) ? result.processed_ptrs.length : 0;
     dscgrStatus.textContent = `done: ${count} frames, ${result.output_dir || ""}`;
-    await loadStatus();
+    try {
+      await loadStatus();
+    } catch (error) {
+      dscgrStatus.textContent = `Run completed: ${count} frames. Status refresh failed; wait for reconnection.`;
+    }
   } catch (error) {
-    dscgrStatus.textContent = error.message;
+    if (context === state.contextRevision && sessionId === state.initialization?.session_id) dscgrStatus.textContent = error.message;
   } finally {
     state.dscgrInFlight = false;
     renderInitialization(state.initialization);
@@ -1372,33 +1584,23 @@ saveParamsButton.addEventListener("click", async () => {
 });
 
 resetParamsButton.addEventListener("click", async () => {
-  state.parameterActionInFlight = true;
-  state.parameterError = null;
-  updateParameterDraftState();
-  try {
-    state.params = await fetchJson("/api/params/reset", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    state.paramsVersion = state.params.version || 1;
-    state.paramMeta = state.params.meta || {};
-    renderForm(state.params.params || {});
-    await loadStatus();
-  } catch (error) {
-    state.parameterError = error.message;
-  } finally {
-    state.parameterActionInFlight = false;
-    updateParameterDraftState();
-  }
+  await performParameterAction("/api/params/reset", {});
 });
 
 refreshImagesButton.addEventListener("click", async () => {
+  if (state.sourceActionInFlight) return;
   state.sourceActionInFlight = true;
+  const context = state.contextRevision;
+  state.sourceError = null;
   renderExperimentSource(state.experimentSource);
   try {
-    await loadExperimentSource();
+    await refreshOverview();
+    if (!state.imageReady && state.initialization?.session_id) {
+      state.currentImageKey = null;
+      maybeLoadInitializationImage(state.initialization);
+    }
   } catch (error) {
-    imageSourceStatus.textContent = error.message;
+    if (context === state.contextRevision) state.sourceError = error.message;
   } finally {
     state.sourceActionInFlight = false;
     renderExperimentSource(state.experimentSource);
@@ -1407,48 +1609,23 @@ refreshImagesButton.addEventListener("click", async () => {
 
 fullModeControls.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-full-mode]");
-  if (!button || !state.initialization?.session_id) {
+  if (!button || button.disabled || state.initialization?.current_step?.key !== "is_full") {
     return;
   }
-  const payload = await fetchJson("/api/initialization/is-full", {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: state.initialization.session_id,
-      is_full: button.dataset.fullMode === "true",
-    }),
-  });
-  renderInitialization(payload);
+  await performInitializationAction("is-full", { is_full: button.dataset.fullMode === "true" }, "Saving crystal selection…", "Crystal selection saved.");
 });
 
 cornerControls.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-corner]");
-  if (!button || !state.initialization?.session_id) {
+  if (!button || button.disabled || !canCompareCorner(state.initialization)) {
     return;
   }
-  const selectedCorner = button.dataset.corner;
-  state.cornerRequestInFlight = true;
-  renderCornerControls(state.initialization);
-  try {
-    const payload = await fetchJson("/api/initialization/corner", {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: state.initialization.session_id,
-        corner: selectedCorner,
-      }),
-    });
-    renderInitialization(payload);
-  } catch (error) {
-    initSaveStatus.textContent = error.message;
-  } finally {
-    state.cornerRequestInFlight = false;
-    renderCornerControls(state.initialization);
-    renderCornerReferenceInset(state.initialization);
-  }
+  await performInitializationAction("corner", { corner: button.dataset.corner }, "Updating corner…", "Corner selected.");
 });
 
 candidateControls.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-choice]");
-  if (!button || !state.initialization?.session_id) {
+  if (!button || button.disabled || !initializationEditable() || !state.initialization?.session_id) {
     return;
   }
   const nextChoice = Number(button.dataset.choice);
@@ -1456,40 +1633,17 @@ candidateControls.addEventListener("click", async (event) => {
       && state.initialization.selected_3d_choice !== nextChoice) {
     captureCurrent3DSnapshot();
   }
-  const payload = await fetchJson("/api/initialization/3d-choice", {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: state.initialization.session_id,
-      choice: nextChoice,
-    }),
-  });
-  renderInitialization(payload);
+  await performInitializationAction("3d-choice", { choice: nextChoice }, "Loading candidate preview…", `Previewing 3D choice ${nextChoice}.`);
 });
 
 confirm3DChoiceButton.addEventListener("click", async () => {
-  if (!state.initialization?.session_id
+  if (!initializationEditable() || !state.initialization?.session_id
       || state.initialization?.selected_3d_choice == null
       || state.initialization?.status !== "ready_for_3d") {
     return;
   }
-  state.confirm3DChoiceInFlight = true;
-  initSaveStatus.textContent = "confirming selected 3D candidate";
-  renderInitialization(state.initialization);
-  try {
-    captureCurrent3DSnapshot();
-    const payload = await fetchJson("/api/initialization/confirm", {
-      method: "POST",
-      body: JSON.stringify({ session_id: state.initialization.session_id }),
-    });
-    renderInitialization(payload);
-    initSaveStatus.textContent = "baseline established; online measurement started";
-    await loadStatus();
-  } catch (error) {
-    initSaveStatus.textContent = error.message;
-  } finally {
-    state.confirm3DChoiceInFlight = false;
-    renderInitialization(state.initialization);
-  }
+  captureCurrent3DSnapshot();
+  await performInitializationAction("confirm", {}, "Confirming selected 3D candidate…", "Candidate confirmed; baseline established.", { refresh: true });
 });
 
 runDscgrButton.addEventListener("click", async () => {
@@ -1546,23 +1700,14 @@ measurementOverlay.addEventListener("error", () => {
 });
 
 undoInitButton.addEventListener("click", async () => {
-  if (!state.initialization?.session_id) {
+  if (!state.initialization?.can_undo) {
     return;
   }
-  const payload = await fetchJson("/api/initialization/undo", {
-    method: "POST",
-    body: JSON.stringify({ session_id: state.initialization.session_id }),
-  });
-  renderInitialization(payload);
+  await performInitializationAction("undo", {}, "Undoing last marking…", "Last marking undone.");
 });
 
 resetInitButton.addEventListener("click", async () => {
-  const payload = await fetchJson("/api/initialization/reset", {
-    method: "POST",
-    body: JSON.stringify({ session_id: state.initialization?.session_id || null }),
-  });
-  renderInitialization(payload);
-  await loadStatus();
+  await performInitializationAction("reset", {}, "Resetting initialization…", "Initialization reset.", { refresh: true });
 });
 
 initCanvas.addEventListener("click", (event) => {
@@ -1577,12 +1722,24 @@ window.addEventListener("resize", () => {
   drawSelected3DPreview();
 });
 
-Promise.all([loadUiConfig(), loadParams(), refreshOverview()]).catch((error) => {
-  statusText.textContent = error.message;
-  statusText.className = "status error";
-  state.parameterError = error.message;
-  updateParameterDraftState();
-});
+async function initializePage() {
+  await loadUiConfig();
+  try {
+    await refreshOverview();
+  } catch (error) {
+    if (!state.statusAvailable) {
+      statusText.textContent = error.message;
+      statusText.className = "status error";
+    }
+  }
+  try {
+    await loadParams();
+  } catch (error) {
+    state.parameterError = error.message;
+    updateParameterDraftState();
+  }
+}
+initializePage();
 
 window.addEventListener("focus", () => {
   if (state.parameterActionInFlight) {

@@ -138,8 +138,8 @@ class Initialization3DChoiceRequest(InitializationSessionRequest):
     choice: int
 
 
-class InitializationResetRequest(BaseModel):
-    session_id: str | None = None
+class InitializationResetRequest(InitializationSessionRequest):
+    pass
 
 
 class DscgrRunRequest(BaseModel):
@@ -1436,12 +1436,12 @@ class GsensorService:
         }
 
     def status(self) -> Dict[str, Any]:
-        current_params = self.current_params()
-        initialization_payload = self.initialization.payload()
-        initialization_status = initialization_payload.get("status") or self.initialization_status
-        if initialization_status == "not_started":
-            initialization_status = self.initialization_status
         with self._lock:
+            current_params = self.current_params()
+            initialization_payload = self.initialization.payload()
+            initialization_status = initialization_payload.get("status") or self.initialization_status
+            if initialization_status == "not_started":
+                initialization_status = self.initialization_status
             return {
                 "role": ROLE,
                 "active": self.active,
@@ -1526,34 +1526,39 @@ class GsensorService:
             }
 
     def current_experiment_image_source(self) -> Dict[str, Any]:
-        selection = self.experiments.current()
-        if selection is None:
+        with self._lock:
+            selection = self.experiments.current()
+            if selection is None:
+                return {
+                    "selected": False,
+                    "run_id": None,
+                    "image_directory": None,
+                    "container_image_path": None,
+                    "image_count": 0,
+                    "first_image": None,
+                    "latest_image": None,
+                }
+
+            images = list_supported_images(selection["container_image_path"])
             return {
-                "selected": False,
-                "run_id": None,
-                "image_directory": None,
-                "container_image_path": None,
-                "image_count": 0,
-                "first_image": None,
-                "latest_image": None,
+                "selected": True,
+                "run_id": selection["run_id"],
+                "image_directory": selection["image_directory"],
+                "container_image_path": selection["container_image_path"],
+                "image_count": len(images),
+                "first_image": images[0].name if images else None,
+                "latest_image": images[-1].name if images else None,
             }
 
-        images = list_supported_images(selection["container_image_path"])
-        return {
-            "selected": True,
-            "run_id": selection["run_id"],
-            "image_directory": selection["image_directory"],
-            "container_image_path": selection["container_image_path"],
-            "image_count": len(images),
-            "first_image": images[0].name if images else None,
-            "latest_image": images[-1].name if images else None,
-        }
-
-    def measurement_overlay_path(self, kind: str) -> Path:
+    def measurement_overlay_path(self, kind: str, run_id: str | None = None) -> Path:
         if kind not in {"latest", "final"}:
             raise ValueError("Overlay kind must be 'latest' or 'final'.")
         with self._lock:
             selection = self.experiments.require_current()
+            if run_id is not None and run_id != selection["run_id"]:
+                raise ExperimentNotSelectedError(
+                    "The selected experiment changed. Refresh the image for the current experiment."
+                )
         experiment_directory = Path(selection["container_image_path"]).parent.resolve()
         filename = (
             LATEST_OVERLAY_FILENAME if kind == "latest" else FINAL_OVERLAY_FILENAME
@@ -1567,12 +1572,25 @@ class GsensorService:
             raise FileNotFoundError(f"{kind.capitalize()} overlay is not available yet.")
         return path
 
-    def require_active_initialization(self) -> None:
+    def require_active_initialization(self, session_id: str | None = None) -> None:
         with self._lock:
             if self.experiment_lifecycle_status != GrowthRateStatus.INITIALIZING.value:
                 raise ValueError(
                     "Initialization changes are only allowed while the experiment is initializing."
                 )
+            if not session_id or session_id != self.initialization.active_session_id:
+                raise ExperimentNotSelectedError(
+                    "The initialization session changed. Refresh the page before continuing."
+                )
+
+    def apply_initialization_action(
+        self,
+        session_id: str,
+        action: Callable[[], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        with self._lock:
+            self.require_active_initialization(session_id)
+            return self.persist_initialization_progress(action())
 
     def persist_initialization_progress(
         self,
@@ -1592,9 +1610,8 @@ class GsensorService:
     ) -> Dict[str, Any]:
         """Select one 3D candidate for preview without ending initialization."""
 
-        self.require_active_initialization()
-        return self.persist_initialization_progress(
-            self.initialization.select_3d_choice(session_id, choice)
+        return self.apply_initialization_action(
+            session_id, lambda: self.initialization.select_3d_choice(session_id, choice)
         )
 
     def confirm_initialization_3d_choice(
@@ -1604,6 +1621,7 @@ class GsensorService:
         """Freeze the previewed candidate, establish baseline, and measure."""
 
         with self._lock:
+            self.require_active_initialization(session_id)
             if self.experiment_lifecycle_status != GrowthRateStatus.INITIALIZING.value:
                 raise ValueError(
                     "The experiment must be initializing before confirming a 3D candidate."
@@ -1797,9 +1815,9 @@ def get_status() -> Dict[str, Any]:
 
 
 @web_app.get("/api/measurement/overlay/{kind}")
-def get_measurement_overlay(kind: str) -> FileResponse:
+def get_measurement_overlay(kind: str, run_id: str | None = Query(default=None)) -> FileResponse:
     try:
-        path = service.measurement_overlay_path(kind)
+        path = service.measurement_overlay_path(kind, run_id=run_id)
         return FileResponse(path, media_type="image/jpeg", filename=path.name)
     except Exception as exc:
         _raise_http_error(exc)
@@ -1875,9 +1893,9 @@ def get_initialization_step(session_id: str | None = Query(default=None)) -> Dic
 @web_app.post("/api/initialization/is-full")
 def set_initialization_is_full(payload: InitializationIsFullRequest) -> Dict[str, Any]:
     try:
-        service.require_active_initialization()
-        return service.persist_initialization_progress(
-            service.initialization.set_is_full(payload.session_id, payload.is_full)
+        return service.apply_initialization_action(
+            payload.session_id,
+            lambda: service.initialization.set_is_full(payload.session_id, payload.is_full)
         )
     except Exception as exc:
         _raise_http_error(exc)
@@ -1886,9 +1904,9 @@ def set_initialization_is_full(payload: InitializationIsFullRequest) -> Dict[str
 @web_app.post("/api/initialization/point")
 def submit_initialization_point(payload: InitializationPointRequest) -> Dict[str, Any]:
     try:
-        service.require_active_initialization()
-        return service.persist_initialization_progress(
-            service.initialization.submit_point(payload.session_id, payload.x, payload.y)
+        return service.apply_initialization_action(
+            payload.session_id,
+            lambda: service.initialization.submit_point(payload.session_id, payload.x, payload.y)
         )
     except Exception as exc:
         _raise_http_error(exc)
@@ -1897,9 +1915,9 @@ def submit_initialization_point(payload: InitializationPointRequest) -> Dict[str
 @web_app.post("/api/initialization/corner")
 def choose_initialization_corner(payload: InitializationCornerRequest) -> Dict[str, Any]:
     try:
-        service.require_active_initialization()
-        return service.persist_initialization_progress(
-            service.initialization.choose_corner(payload.session_id, payload.corner)
+        return service.apply_initialization_action(
+            payload.session_id,
+            lambda: service.initialization.choose_corner(payload.session_id, payload.corner)
         )
     except Exception as exc:
         _raise_http_error(exc)
@@ -1926,9 +1944,9 @@ def confirm_initialization_3d_choice(
 @web_app.post("/api/initialization/undo")
 def undo_initialization(payload: InitializationSessionRequest) -> Dict[str, Any]:
     try:
-        service.require_active_initialization()
-        return service.persist_initialization_progress(
-            service.initialization.undo(payload.session_id)
+        return service.apply_initialization_action(
+            payload.session_id,
+            lambda: service.initialization.undo(payload.session_id)
         )
     except Exception as exc:
         _raise_http_error(exc)
@@ -1937,9 +1955,9 @@ def undo_initialization(payload: InitializationSessionRequest) -> Dict[str, Any]
 @web_app.post("/api/initialization/reset")
 def reset_initialization(payload: InitializationResetRequest) -> Dict[str, Any]:
     try:
-        service.require_active_initialization()
-        return service.persist_initialization_progress(
-            service.initialization.reset(payload.session_id)
+        return service.apply_initialization_action(
+            payload.session_id,
+            lambda: service.initialization.reset(payload.session_id)
         )
     except Exception as exc:
         _raise_http_error(exc)

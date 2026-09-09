@@ -376,6 +376,10 @@ textarea {
   justify-content: center;
 }
 
+#retry-selection[hidden] {
+  display: none;
+}
+
 .experiment-message {
   min-height: 1.2em;
   margin: 8px 0 0;

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260820-init-actions">
+    <link rel="stylesheet" href="/static/styles.css?v=20260910-request-state">
   </head>
   <body>
     <div class="shell">
@@ -49,6 +49,8 @@
             <span id="initialized-text" class="status idle">not initialized</span>
           </div>
         </section>
+
+        <p id="connection-status" class="connection-status" role="status" aria-live="polite" hidden></p>
 
         <section class="panel initialization-panel">
           <div class="panel-head">
@@ -200,7 +202,7 @@
             </aside>
           </div>
 
-          <p id="init-save-status" class="save-status muted">idle</p>
+          <p id="init-save-status" class="save-status muted" role="status" aria-live="polite">idle</p>
         </section>
 
         <section class="panel online-measurement-panel" aria-labelledby="online-measurement-heading">
@@ -296,6 +298,6 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260820-remove-refresh"></script>
+    <script src="/static/app.js?v=20260910-request-state"></script>
   </body>
 </html>

@@ -8,6 +8,7 @@ const state = {
   runConfigurationUpdatedAt: null,
   runConfigurationInFlight: false,
   runConfigurationError: null,
+  runConfigurationRefreshError: null,
   drawerOpen: false,
   experiments: [],
   currentRunId: null,
@@ -17,6 +18,7 @@ const state = {
   experimentActionName: null,
   parameterActionInFlight: false,
   parameterError: null,
+  parameterRefreshError: null,
   parameterUnsavedCount: 0,
   latestOverlayKey: null,
   lastOverlayRefreshAt: 0,
@@ -31,6 +33,15 @@ const state = {
   pendingAdaptationEventId: null,
   adaptationActionMessage: "",
   adaptationActionError: false,
+  systemStatusFresh: false,
+  systemStatusInFlight: 0,
+  experimentRequestId: 0,
+  operationRequestId: 0,
+  parameterRequestId: 0,
+  configurationRequestId: 0,
+  gsensorStatusRunId: null,
+  selectionSentRunId: null,
+  selectionRetryRunId: null,
 };
 
 const shell = document.querySelector(".shell");
@@ -58,6 +69,7 @@ const copyCameraPathButton = document.querySelector("#copy-camera-path");
 const newExperimentLabel = document.querySelector("#new-experiment-label");
 const newExperimentButton = document.querySelector("#new-experiment");
 const startExperimentButton = document.querySelector("#start-experiment");
+const retrySelectionButton = document.querySelector("#retry-selection");
 const endExperimentButton = document.querySelector("#end-experiment");
 const experimentMessage = document.querySelector("#experiment-message");
 const systemRefreshStatus = document.querySelector("#system-refresh-status");
@@ -102,6 +114,51 @@ const runConfigurationControls = [
   growthRateSourceSelect,
 ];
 
+function mutationInFlight() {
+  return state.experimentActionInFlight || state.parameterActionInFlight
+    || state.runConfigurationInFlight || state.seedActionInFlight
+    || state.adaptationActionInFlight;
+}
+
+function invalidatePendingReads() {
+  state.experimentRequestId += 1;
+  state.operationRequestId += 1;
+  state.parameterRequestId += 1;
+  state.configurationRequestId += 1;
+}
+
+function clearCentralOverlay(message = "Waiting for an overlay for this experiment.") {
+  centralOverlayImage.hidden = true;
+  centralOverlayImage.removeAttribute("src");
+  centralOverlayCaption.textContent = message;
+  state.latestOverlayKey = null;
+  state.lastOverlayRefreshAt = 0;
+}
+
+function renderMutationState() {
+  renderExperiments();
+  updateParameterDraftState();
+  renderRuntimeControls();
+}
+
+function markSystemStatusUnavailable(message, label = "offline") {
+  state.systemStatusFresh = false;
+  state.controllerStatus = null;
+  systemRefreshStatus.textContent = label;
+  systemRefreshStatus.className = "status error";
+  controllerLiveStatus.textContent = "unavailable";
+  controllerLiveStatus.className = "status error";
+  gsensorLiveStatus.textContent = "unconfirmed";
+  gsensorLiveStatus.className = "status error";
+  [gsensorLiveFrame, gsensorLiveImage, controllerLastFrame, controllerValidCount,
+    controllerInvalidCount, controllerSeedCount, controllerLastSeedAt,
+    controllerAdaptationStatus].forEach((element) => { element.textContent = "—"; });
+  controllerLiveError.textContent = message;
+  controllerLiveError.hidden = false;
+  clearCentralOverlay("Status is unconfirmed. Refresh to view the current experiment overlay.");
+  renderMutationState();
+}
+
 function applyUiMode(mode) {
   const resolved = mode === "development" ? "development" : "production";
   state.uiMode = resolved;
@@ -121,6 +178,9 @@ async function loadUiConfig() {
 }
 
 function runConfigurationLocked() {
+  if (!state.systemStatusFresh || mutationInFlight()) {
+    return true;
+  }
   const status = currentExperiment()?.status;
   if (!status) {
     return false;
@@ -191,10 +251,19 @@ function renderRunConfiguration() {
     runConfigurationMessage.classList.add("error");
     return;
   }
+  if (state.runConfigurationRefreshError) {
+    runConfigurationStatus.textContent = "saved; refresh pending";
+    runConfigurationStatus.className = "status error";
+    runConfigurationMessage.textContent = state.runConfigurationRefreshError;
+    runConfigurationMessage.classList.add("error");
+    return;
+  }
   if (locked) {
     runConfigurationStatus.textContent = "locked";
     runConfigurationStatus.className = "status running";
-    runConfigurationMessage.textContent = "Configuration is locked for the active run.";
+    runConfigurationMessage.textContent = !state.systemStatusFresh
+      ? "Refresh system status before changing the configuration."
+      : (mutationInFlight() ? "Wait for the current operation to finish." : "Configuration is locked for the active run.");
     runConfigurationMessage.classList.remove("error");
     return;
   }
@@ -209,7 +278,9 @@ function renderRunConfiguration() {
 }
 
 async function loadRunConfiguration() {
+  const requestId = ++state.configurationRequestId;
   const payload = await fetchJson("/api/run-configuration");
+  if (requestId !== state.configurationRequestId) return payload;
   applyRunConfigurationPayload(payload);
   return payload;
 }
@@ -221,27 +292,34 @@ async function saveRunConfiguration() {
   }
   const previous = { ...state.runConfiguration };
   const draft = collectRunConfiguration();
+  const expectedRunId = state.currentRunId;
+  invalidatePendingReads();
   state.runConfiguration = draft;
   state.runConfigurationInFlight = true;
   state.runConfigurationError = null;
-  renderRunConfiguration();
-  renderExperiments();
+  state.runConfigurationRefreshError = null;
+  renderMutationState();
+  let saved = false;
   try {
     const payload = await fetchJson("/api/run-configuration", {
       method: "PUT",
-      body: JSON.stringify(draft),
+      body: JSON.stringify({ ...draft, expected_run_id: expectedRunId }),
     });
     applyRunConfigurationPayload(payload);
+    saved = true;
     await loadOperationState({ updateRunConfiguration: false });
     return payload;
   } catch (error) {
-    state.runConfiguration = previous;
-    state.runConfigurationError = error.message;
+    if (!saved) state.runConfiguration = previous;
+    if (saved) {
+      state.runConfigurationRefreshError = `Configuration saved, but preview refresh failed: ${error.message}`;
+    } else {
+      state.runConfigurationError = error.message;
+    }
     return null;
   } finally {
     state.runConfigurationInFlight = false;
-    renderRunConfiguration();
-    renderExperiments();
+    renderMutationState();
   }
 }
 
@@ -414,22 +492,43 @@ function cacheBustedUrl(url, options = {}) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(cacheBustedUrl(url, options), {
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    ...options,
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.detail || "Request failed");
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), 15000);
+  try {
+    const response = await fetch(cacheBustedUrl(url, options), {
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      ...options,
+      signal: options.signal || abort.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const detail = payload?.detail;
+      const message = Array.isArray(detail)
+        ? detail.map((item) => `${(item.loc || []).join(".")}: ${item.msg || "Invalid value"}`).join("; ")
+        : (typeof detail === "string" ? detail : `Request failed (HTTP ${response.status}).`);
+      throw new Error(message);
+    }
+    if (payload === null) throw new Error("The server returned an unreadable response.");
+    return payload;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Request timed out. Refresh status before retrying the operation.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return payload;
 }
 
 async function loadParams() {
-  state.params = await fetchJson("/api/params");
+  const requestId = ++state.parameterRequestId;
+  const payload = await fetchJson("/api/params");
+  if (requestId !== state.parameterRequestId) return;
+  state.params = payload;
   state.paramMeta = state.params.meta || {};
   state.parameterError = null;
+  state.parameterRefreshError = null;
   renderParameterForms();
 }
 
@@ -452,10 +551,12 @@ function parameterPayloadFromDraft() {
   return {
     version: state.params?.version || 1,
     ...collectParameterDraft(),
+    expected_run_id: state.currentRunId,
   };
 }
 
 function parametersLocked() {
+  if (!state.systemStatusFresh || mutationInFlight()) return true;
   const status = currentExperiment()?.status;
   return Boolean(status && !["created", "completed", "error"].includes(status));
 }
@@ -505,6 +606,9 @@ function renderParameterStatus(unsavedCount = 0) {
   } else if (state.parameterError) {
     kind = "error";
     message = `Save/validation failed: ${state.parameterError}`;
+  } else if (state.parameterRefreshError) {
+    kind = "error";
+    message = state.parameterRefreshError;
   } else if (unsavedCount > 0) {
     kind = "unsaved";
     message = `${unsavedCount} unsaved change${unsavedCount === 1 ? "" : "s"}`;
@@ -566,8 +670,16 @@ function renderExperiments() {
   const isTerminal = ["completed", "error"].includes(status);
   const canCreate = !hasCurrent || isTerminal;
   const canStart = ["created", "starting"].includes(status);
+  const selectionRetryRequired = status === "created"
+    && state.selectionRetryRunId === current?.run_id;
+  const canRetrySelection = status === "created" && (selectionRetryRequired
+    || (state.gsensorStatusRunId !== current?.run_id && state.selectionSentRunId !== current?.run_id));
   const canEnd = hasCurrent && !isTerminal;
   const action = state.experimentActionName;
+  const blocked = !state.systemStatusFresh || mutationInFlight();
+  if (state.lastRenderedRunId !== current?.run_id) {
+    clearCentralOverlay();
+  }
 
   experimentStatus.textContent = current?.status || "not selected";
   experimentStatus.className = `status ${current?.status || "idle"}`;
@@ -579,13 +691,17 @@ function renderExperiments() {
   cameraSavePath.value = current?.camera_save_path || "";
 
   copyCameraPathButton.disabled = !hasCurrent || state.experimentActionInFlight;
-  newExperimentButton.disabled = !canCreate || state.experimentActionInFlight;
+  newExperimentButton.disabled = !canCreate || blocked;
   startExperimentButton.disabled = !canStart
-    || state.experimentActionInFlight
+    || blocked
+    || selectionRetryRequired
     || state.runConfigurationInFlight
     || Boolean(state.runConfigurationError);
-  endExperimentButton.disabled = !canEnd || state.experimentActionInFlight;
-  newExperimentLabel.disabled = !canCreate || state.experimentActionInFlight;
+  endExperimentButton.disabled = !canEnd || blocked;
+  retrySelectionButton.hidden = !canRetrySelection;
+  retrySelectionButton.disabled = !canRetrySelection || blocked;
+  retrySelectionButton.textContent = action === "select" ? "Resending selection…" : "Retry Selection";
+  newExperimentLabel.disabled = !canCreate || blocked;
 
   newExperimentButton.textContent = action === "create" ? "Creating…" : "Create Experiment";
   startExperimentButton.textContent = action === "start"
@@ -604,7 +720,12 @@ function renderExperiments() {
 }
 
 async function loadExperiments() {
+  const requestId = ++state.experimentRequestId;
   const payload = await fetchJson("/api/experiments");
+  if (requestId !== state.experimentRequestId) return;
+  if (state.currentRunId !== (payload.current_run_id || null)) {
+    state.systemStatusFresh = false;
+  }
   state.experiments = payload.experiments || [];
   state.currentRunId = payload.current_run_id || null;
   renderExperiments();
@@ -630,9 +751,11 @@ function updateCentralOverlay(runId, frameSeq, { final = false, force = false } 
 
 function renderSystemStatus(payload) {
   const gsensor = payload.gsensor || {};
-  const gsensorStatus = gsensor.last_status || {};
   const controller = payload.controller || {};
-  const current = payload.current_experiment || null;
+  const current = currentExperiment();
+  const gsensorMatchesRun = Boolean(current?.run_id)
+    && gsensor.last_status?.run_id === current.run_id;
+  const gsensorStatus = gsensorMatchesRun ? gsensor.last_status : {};
   state.controllerStatus = controller;
 
   if (state.seedActionRunId && state.seedActionRunId !== current?.run_id) {
@@ -653,14 +776,14 @@ function renderSystemStatus(payload) {
 
   systemRefreshStatus.textContent = "online";
   systemRefreshStatus.className = "status running";
-  gsensorLiveStatus.textContent = gsensorStatus.status || "no status";
+  gsensorLiveStatus.textContent = gsensorStatus.status || "waiting for this run";
   gsensorLiveStatus.className = gsensorStatus.status === "error"
     ? "status error"
     : (gsensorStatus.status ? "status running" : "status idle");
   gsensorLiveFrame.textContent = gsensorStatus.frame_seq ?? "—";
   gsensorLiveImage.textContent = gsensorStatus.image_name || "—";
   gsensorMessageCount.textContent = String(gsensor.message_count || 0);
-  gsensorReceivedAt.textContent = formatExperimentTime(gsensor.received_at);
+  gsensorReceivedAt.textContent = formatExperimentTime(gsensorMatchesRun ? gsensor.received_at : null);
   gsensorLiveError.textContent = gsensorStatus.error || gsensor.consumer_error || "";
   gsensorLiveError.hidden = !gsensorLiveError.textContent;
 
@@ -677,7 +800,14 @@ function renderSystemStatus(payload) {
   const adaptation = controller.adaptation || {};
   controllerAdaptationStatus.textContent = adaptation.active ? "active" : "inactive";
   controllerAdaptationMode.textContent = adaptation.mode || "E_A";
-  controllerLiveError.textContent = controller.error || controller.last_error || "";
+  const previousConnectionError = !controller.error
+    && typeof controller.last_error === "string"
+    && controller.last_error.startsWith("RabbitMQ consumer error:")
+    && controller.consumer?.status === "consuming"
+    && controller.consumer?.thread_alive === true;
+  controllerLiveError.textContent = previousConnectionError
+    ? `Previous connection error; connection currently reported active. ${controller.last_error}`
+    : (controller.error || controller.last_error || "");
   controllerLiveError.hidden = !controllerLiveError.textContent;
 
   const lastSeedEventId = controller.seed_events?.last?.event_id || null;
@@ -714,16 +844,31 @@ function renderSystemStatus(payload) {
     state.adaptationActionError = true;
   }
 
+  renderRuntimeControls();
+
+  const frameSeq = Number(gsensorStatus.frame_seq || 0);
+  if (current?.run_id && frameSeq > 0) {
+    updateCentralOverlay(current.run_id, frameSeq, {
+      final: current.status === "completed",
+    });
+  }
+}
+
+function renderRuntimeControls() {
+  const current = currentExperiment();
+  const controller = state.controllerStatus || {};
+  const adaptation = controller.adaptation || {};
   const activeExperiment = current && [
     "starting",
     "waiting_for_initial_image",
     "initializing",
     "measuring",
   ].includes(current.status);
-  const controllerReady = controller.available
+  const controllerReady = state.systemStatusFresh && controller.available
     && controller.status === "running"
     && controller.current_run_id === current?.run_id;
-  const runtimeActionInFlight = state.seedActionInFlight || state.adaptationActionInFlight;
+  const runtimeActionInFlight = mutationInFlight()
+    || Boolean(state.pendingSeedEventId || state.pendingAdaptationEventId);
   addSeedButton.disabled = runtimeActionInFlight || !activeExperiment || !controllerReady;
   addSeedButton.textContent = state.seedActionInFlight ? "Recording..." : "Add Seed";
   seedActionMessage.textContent = state.seedActionMessage;
@@ -735,26 +880,47 @@ function renderSystemStatus(payload) {
   adaptationActionMessage.textContent = state.adaptationActionMessage;
   adaptationActionMessage.classList.toggle("error", state.adaptationActionError);
 
-  const frameSeq = Number(gsensorStatus.frame_seq || 0);
-  if (current?.run_id && frameSeq > 0) {
-    updateCentralOverlay(current.run_id, frameSeq, {
-      final: current.status === "completed",
-    });
-  }
 }
 
 async function loadSystemStatus({ forceOverlay = false } = {}) {
-  const payload = await fetchJson("/api/system/status");
+  const requestId = ++state.experimentRequestId;
+  state.systemStatusInFlight += 1;
+  let payload;
+  try {
+    payload = await fetchJson("/api/system/status");
+  } catch (error) {
+    if (requestId !== state.experimentRequestId) return null;
+    markSystemStatusUnavailable(error.message);
+    throw error;
+  } finally {
+    state.systemStatusInFlight -= 1;
+  }
+  if (requestId !== state.experimentRequestId) return null;
   const experiments = payload.experiments || {};
+  if ((experiments.current_run_id || null) !== (payload.current_experiment?.run_id || null)
+    || (experiments.current_run_id && !(experiments.experiments || []).some(
+      (item) => item.run_id === experiments.current_run_id,
+    ))) {
+    markSystemStatusUnavailable("Experiment identity is inconsistent. Refresh before operating.", "unconfirmed");
+    throw new Error("Experiment identity is inconsistent. Refresh before operating.");
+  }
+  if (state.currentRunId !== (experiments.current_run_id || null)) {
+    state.operationRequestId += 1;
+    state.parameterRequestId += 1;
+    state.configurationRequestId += 1;
+  }
   state.experiments = experiments.experiments || [];
   state.currentRunId = experiments.current_run_id || null;
+  state.gsensorStatusRunId = payload.gsensor?.last_status?.run_id || null;
+  state.systemStatusFresh = true;
   renderExperiments();
   updateParameterDraftState();
   renderSystemStatus(payload);
   if (forceOverlay) {
     const status = payload.gsensor?.last_status || {};
     const frameSeq = Number(status.frame_seq || 0);
-    if (payload.current_experiment?.run_id && frameSeq > 0) {
+    if (payload.current_experiment?.run_id && frameSeq > 0
+      && status.run_id === payload.current_experiment.run_id) {
       updateCentralOverlay(payload.current_experiment.run_id, frameSeq, {
         final: payload.current_experiment.status === "completed",
         force: true,
@@ -765,51 +931,81 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
 }
 
 async function runExperimentAction(actionName, action, successMessage) {
+  if (!state.systemStatusFresh || mutationInFlight()) return null;
+  const previousRunId = state.currentRunId;
+  invalidatePendingReads();
   state.experimentActionInFlight = true;
   state.experimentActionName = actionName;
+  state.systemStatusFresh = false;
+  systemRefreshStatus.textContent = "refreshing";
+  systemRefreshStatus.className = "status idle";
   setExperimentMessage("");
-  renderExperiments();
+  renderMutationState();
+  let result = null;
   try {
-    const result = await action();
-    await loadExperiments();
+    result = await action();
+    if (["create", "select"].includes(actionName)) {
+      state.selectionSentRunId = result.run_id;
+      if (state.selectionRetryRunId === result.run_id) state.selectionRetryRunId = null;
+    }
+    await loadSystemStatus();
     setExperimentMessage(successMessage(result));
     return result;
   } catch (error) {
+    if (result) {
+      setExperimentMessage(`${successMessage(result)} Status refresh failed: ${error.message} Confirm the current status before retrying.`, { error: true });
+      return result;
+    }
     try {
-      await loadExperiments();
+      await loadSystemStatus();
     } catch (reloadError) {
       setExperimentMessage(`${error.message} Reload failed: ${reloadError.message}`, { error: true });
       return null;
     }
-    setExperimentMessage(error.message, { error: true });
+    const current = currentExperiment();
+    if (current?.status === "created" && (
+      (actionName === "create" && current.run_id !== previousRunId)
+      || (actionName === "select" && current.run_id === previousRunId)
+    )) {
+      state.selectionRetryRunId = current.run_id;
+      setExperimentMessage(`Experiment ${displayNameForExperiment(current)} is created, but its selection notification failed. Use Retry Selection before Start. ${error.message}`, { error: true });
+    } else {
+      setExperimentMessage(error.message, { error: true });
+    }
     return null;
   } finally {
     state.experimentActionInFlight = false;
     state.experimentActionName = null;
-    renderExperiments();
+    renderMutationState();
   }
 }
 
 async function createExperiment() {
+  if (newExperimentButton.disabled) return null;
   const label = newExperimentLabel.value.trim();
+  const expectedRunId = state.currentRunId;
   const result = await runExperimentAction(
     "create",
     () => fetchJson("/api/experiments", {
       method: "POST",
-      body: JSON.stringify({ label: label || null }),
+      body: JSON.stringify({ label: label || null, expected_run_id: expectedRunId }),
     }),
     (experiment) => `Created ${displayNameForExperiment(experiment)}. Review the run configuration and parameters, point the camera software to the path shown above, then start the experiment.`,
   );
   if (result) {
     newExperimentLabel.value = "";
-    await loadOperationState();
+    try {
+      await loadOperationState();
+    } catch (error) {
+      setExperimentMessage(`Experiment created, but configuration refresh failed: ${error.message}`, { error: true });
+    }
   }
   return result;
 }
 
 async function finishCurrentExperiment() {
   const current = currentExperiment();
-  if (!current) {
+  if (!current || endExperimentButton.disabled) {
     return;
   }
   const confirmed = window.confirm(
@@ -824,16 +1020,30 @@ async function finishCurrentExperiment() {
     "end",
     () => fetchJson(`/api/experiments/${encodeURIComponent(current.run_id)}/finish`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ expected_run_id: current.run_id }),
     }),
     (experiment) => experiment.status === "completed"
       ? `Ended ${displayNameForExperiment(experiment)}.`
       : `End sent for ${displayNameForExperiment(experiment)}. Waiting for Gsensor to save the final result and confirm completion.`,
   );
   const refreshed = currentExperiment();
-  if (result && refreshed?.status === "completed") {
+  if (result && refreshed?.run_id === current.run_id && refreshed?.status === "completed"
+    && state.systemStatusFresh) {
     setExperimentMessage(`Completed ${displayNameForExperiment(refreshed)}. Gsensor finalization is complete.`);
   }
+}
+
+async function retryExperimentSelection() {
+  const current = currentExperiment();
+  if (!current || current.status !== "created" || retrySelectionButton.disabled) return null;
+  return runExperimentAction(
+    "select",
+    () => fetchJson(`/api/experiments/${encodeURIComponent(current.run_id)}/select`, {
+      method: "POST",
+      body: JSON.stringify({ expected_run_id: current.run_id }),
+    }),
+    (experiment) => `Selection notification resent for ${displayNameForExperiment(experiment)}. You can now start this experiment.`,
+  );
 }
 
 async function addSeed() {
@@ -849,36 +1059,38 @@ async function addSeed() {
   }
 
   state.seedActionInFlight = true;
+  invalidatePendingReads();
   state.seedActionRunId = current.run_id;
   state.seedActionMessage = "Recording seed addition...";
   state.seedActionError = false;
-  addSeedButton.disabled = true;
-  addSeedButton.textContent = "Recording...";
-  seedActionMessage.textContent = state.seedActionMessage;
-  seedActionMessage.classList.remove("error");
+  renderMutationState();
+  let sent = false;
   try {
     const result = await fetchJson("/api/operation/controller/add-seed", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ expected_run_id: current.run_id }),
     });
+    sent = true;
+    if (state.currentRunId !== current.run_id) return;
     state.pendingSeedEventId = result.event.event_id;
     state.seedActionMessage = "Add Seed sent. Waiting for Controller confirmation...";
-    await loadSystemStatus();
   } catch (error) {
-    state.pendingSeedEventId = null;
-    state.seedActionMessage = error.message;
-    state.seedActionError = true;
+    if (state.currentRunId === current.run_id) {
+      state.pendingSeedEventId = null;
+      state.seedActionMessage = `${error.message} Check Controller status before retrying Add Seed.`;
+      state.seedActionError = true;
+    }
   } finally {
     state.seedActionInFlight = false;
-    seedActionMessage.textContent = state.seedActionMessage;
-    seedActionMessage.classList.toggle("error", state.seedActionError);
+    renderMutationState();
     try {
       await loadSystemStatus();
     } catch (error) {
-      state.seedActionMessage = `${state.seedActionMessage} Status refresh failed: ${error.message}`;
-      state.seedActionError = true;
-      seedActionMessage.textContent = state.seedActionMessage;
-      seedActionMessage.classList.add("error");
+      if (state.currentRunId === current.run_id) {
+        state.seedActionMessage = `${sent ? "Add Seed was sent; confirmation is still pending." : state.seedActionMessage} Status refresh failed: ${error.message} Do not send Add Seed again until confirmed.`;
+        state.seedActionError = true;
+        renderRuntimeControls();
+      }
     }
   }
 }
@@ -899,18 +1111,19 @@ async function toggleAdaptation() {
   }
 
   state.adaptationActionInFlight = true;
+  invalidatePendingReads();
   state.adaptationActionRunId = current.run_id;
   state.adaptationActionMessage = `${enabled ? "Starting" : "Stopping"} adaptation...`;
   state.adaptationActionError = false;
-  toggleAdaptationButton.disabled = true;
-  toggleAdaptationButton.textContent = "Applying...";
-  adaptationActionMessage.textContent = state.adaptationActionMessage;
-  adaptationActionMessage.classList.remove("error");
+  renderMutationState();
+  let sent = false;
   try {
     const result = await fetchJson("/api/operation/controller/adaptation", {
       method: "POST",
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({ enabled, expected_run_id: current.run_id }),
     });
+    sent = true;
+    if (state.currentRunId !== current.run_id) return;
     if (result.requested) {
       state.pendingAdaptationEventId = result.event.event_id;
       state.adaptationActionMessage = "Adaptation change sent. Waiting for Controller confirmation...";
@@ -918,22 +1131,23 @@ async function toggleAdaptation() {
       state.pendingAdaptationEventId = null;
       state.adaptationActionMessage = `Adaptation is already ${enabled ? "active" : "inactive"}.`;
     }
-    await loadSystemStatus();
   } catch (error) {
-    state.pendingAdaptationEventId = null;
-    state.adaptationActionMessage = error.message;
-    state.adaptationActionError = true;
+    if (state.currentRunId === current.run_id) {
+      state.pendingAdaptationEventId = null;
+      state.adaptationActionMessage = `${error.message} Check Controller status before retrying.`;
+      state.adaptationActionError = true;
+    }
   } finally {
     state.adaptationActionInFlight = false;
-    adaptationActionMessage.textContent = state.adaptationActionMessage;
-    adaptationActionMessage.classList.toggle("error", state.adaptationActionError);
+    renderMutationState();
     try {
       await loadSystemStatus();
     } catch (error) {
-      state.adaptationActionMessage = `${state.adaptationActionMessage} Status refresh failed: ${error.message}`;
-      state.adaptationActionError = true;
-      adaptationActionMessage.textContent = state.adaptationActionMessage;
-      adaptationActionMessage.classList.add("error");
+      if (state.currentRunId === current.run_id) {
+        state.adaptationActionMessage = `${sent ? "Adaptation request was accepted; confirmation is still pending." : state.adaptationActionMessage} Status refresh failed: ${error.message} Confirm the status before retrying.`;
+        state.adaptationActionError = true;
+        renderRuntimeControls();
+      }
     }
   }
 }
@@ -958,58 +1172,78 @@ async function copyCameraPath() {
 }
 
 async function loadOperationState({ updateRunConfiguration = true } = {}) {
+  const requestId = ++state.operationRequestId;
   const payload = await fetchJson("/api/operation/state");
+  if (requestId !== state.operationRequestId) return;
+  state.runConfigurationRefreshError = null;
+  state.parameterRefreshError = null;
   state.target = payload.target;
   if (updateRunConfiguration && !state.runConfigurationInFlight) {
     applyRunConfigurationPayload(payload.run_configuration);
   }
   derivedPreview.textContent = JSON.stringify(payload.preview, null, 2);
+  renderParameterStatus(state.parameterUnsavedCount);
 }
 
 async function saveParams() {
+  if (saveParamsButton.disabled || !state.systemStatusFresh || mutationInFlight()) return null;
+  const draft = parameterPayloadFromDraft();
+  invalidatePendingReads();
   state.parameterActionInFlight = true;
   state.parameterError = null;
-  updateParameterDraftState();
+  state.parameterRefreshError = null;
+  renderMutationState();
+  let saved = false;
   try {
     state.params = await fetchJson("/api/params", {
       method: "POST",
-      body: JSON.stringify(parameterPayloadFromDraft()),
+      body: JSON.stringify(draft),
     });
+    saved = true;
     renderParameterForms();
     await loadOperationState();
     return state.params;
   } catch (error) {
-    state.parameterError = error.message;
-    updateParameterDraftState();
+    if (saved) state.parameterRefreshError = `Parameters saved, but preview refresh failed: ${error.message}`;
+    else state.parameterError = error.message;
+    renderMutationState();
     return null;
   } finally {
     state.parameterActionInFlight = false;
-    updateParameterDraftState();
+    renderMutationState();
   }
 }
 
 async function resetParamsToDefaults() {
+  if (resetParamsButton.disabled || !state.systemStatusFresh || mutationInFlight()) return null;
+  const expectedRunId = state.currentRunId;
+  invalidatePendingReads();
   state.parameterActionInFlight = true;
   state.parameterError = null;
-  updateParameterDraftState();
+  state.parameterRefreshError = null;
+  renderMutationState();
+  let saved = false;
   try {
     state.params = await fetchJson("/api/params/reset", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ expected_run_id: expectedRunId }),
     });
+    saved = true;
     renderParameterForms();
     await loadOperationState();
   } catch (error) {
-    state.parameterError = error.message;
-    updateParameterDraftState();
+    if (saved) state.parameterRefreshError = `Defaults restored, but preview refresh failed: ${error.message}`;
+    else state.parameterError = error.message;
+    renderMutationState();
     return null;
   } finally {
     state.parameterActionInFlight = false;
-    updateParameterDraftState();
+    renderMutationState();
   }
 }
 
 async function startExperimentCommand() {
+  if (!state.systemStatusFresh || mutationInFlight() || startExperimentButton.disabled) return null;
   if (state.runConfigurationInFlight) {
     setExperimentMessage("Wait for the run configuration to finish saving before starting.", { error: true });
     return null;
@@ -1023,26 +1257,40 @@ async function startExperimentCommand() {
   state.parameterActionInFlight = true;
   state.experimentActionInFlight = true;
   state.experimentActionName = "start";
+  state.systemStatusFresh = false;
+  systemRefreshStatus.textContent = "refreshing";
+  systemRefreshStatus.className = "status idle";
   state.parameterError = null;
+  const draft = parameterPayloadFromDraft();
+  invalidatePendingReads();
   setExperimentMessage("");
-  updateParameterDraftState();
-  renderExperiments();
+  renderMutationState();
+  let accepted = null;
   try {
     const payload = await fetchJson("/api/operation/experiment/start", {
       method: "POST",
-      body: JSON.stringify(parameterPayloadFromDraft()),
+      body: JSON.stringify(draft),
     });
+    accepted = payload;
     state.params = payload.parameters;
     renderParameterForms();
     commandResult.textContent = JSON.stringify(payload, null, 2);
-    commandStatus.textContent = "started";
+    commandStatus.textContent = "start accepted";
     commandStatus.className = "status success";
-    await loadExperiments();
-    setExperimentMessage(`Started ${displayNameForExperiment(payload.experiment)}. Waiting for the first image.`);
+    await loadSystemStatus();
+    setExperimentMessage(`Start accepted for ${displayNameForExperiment(payload.experiment)}. Service status is shown below.`);
     return payload;
   } catch (error) {
+    if (accepted) {
+      commandStatus.textContent = "start accepted";
+      commandStatus.className = "status success";
+      const message = `Start accepted for ${displayNameForExperiment(accepted.experiment)}, but status refresh failed: ${error.message} Confirm the current status before retrying.`;
+      setExperimentMessage(message, { error: true });
+      commandResult.textContent = message;
+      return accepted;
+    }
     try {
-      await Promise.all([loadParams(), loadExperiments(), loadRunConfiguration()]);
+      await Promise.all([loadParams(), loadSystemStatus(), loadRunConfiguration()]);
     } catch (reloadError) {
       commandResult.textContent = `${error.message}\nReload failed: ${reloadError.message}`;
     }
@@ -1058,8 +1306,7 @@ async function startExperimentCommand() {
     state.parameterActionInFlight = false;
     state.experimentActionInFlight = false;
     state.experimentActionName = null;
-    updateParameterDraftState();
-    renderExperiments();
+    renderMutationState();
   }
 }
 
@@ -1078,7 +1325,13 @@ saveParamsButton.addEventListener("click", async () => {
 refreshPreviewButton.addEventListener("click", async (event) => {
   event.preventDefault();
   event.stopPropagation();
-  await loadOperationState();
+  try {
+    await loadOperationState();
+  } catch (error) {
+    commandStatus.textContent = "error";
+    commandStatus.className = "status error";
+    commandResult.textContent = `Preview refresh failed: ${error.message}`;
+  }
 });
 
 newExperimentButton.addEventListener("click", async () => {
@@ -1094,6 +1347,10 @@ newExperimentLabel.addEventListener("keydown", async (event) => {
 
 startExperimentButton.addEventListener("click", async () => {
   await startExperimentCommand();
+});
+
+retrySelectionButton.addEventListener("click", async () => {
+  await retryExperimentSelection();
 });
 
 endExperimentButton.addEventListener("click", async () => {
@@ -1153,32 +1410,30 @@ bootstrap().catch((error) => {
 });
 
 setInterval(() => {
-  if (!state.experimentActionInFlight && !document.hidden) {
+  if (!mutationInFlight() && !state.systemStatusInFlight && !document.hidden) {
     Promise.all([loadOperationState(), loadSystemStatus()]).catch((error) => {
       commandResult.textContent = error.message;
       commandStatus.textContent = "error";
       commandStatus.className = "status error";
-      systemRefreshStatus.textContent = "offline";
-      systemRefreshStatus.className = "status error";
     });
   }
 }, 2000);
 
 window.addEventListener("focus", () => {
-  if (!state.parameterActionInFlight && state.parameterUnsavedCount === 0) {
+  if (!mutationInFlight() && state.parameterUnsavedCount === 0) {
     loadParams().catch((error) => {
       state.parameterError = error.message;
       updateParameterDraftState();
     });
   }
-  if (!state.experimentActionInFlight) {
+  if (!mutationInFlight()) {
     loadOperationState().catch((error) => {
       commandResult.textContent = error.message;
       commandStatus.textContent = "error";
       commandStatus.className = "status error";
     });
   }
-  if (!state.experimentActionInFlight) {
+  if (!mutationInFlight() && !state.systemStatusInFlight) {
     loadSystemStatus().catch((error) => {
       setExperimentMessage(error.message, { error: true });
     });

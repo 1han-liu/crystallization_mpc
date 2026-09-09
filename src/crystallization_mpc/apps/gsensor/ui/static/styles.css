@@ -187,6 +187,35 @@ button:disabled {
   opacity: 0.55;
 }
 
+.connection-status {
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid #c99a30;
+  border-radius: 4px;
+  background: #fff8e8;
+  color: #704b00;
+}
+
+.connection-status[hidden] {
+  display: none;
+}
+
+#init-canvas[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+#init-canvas[aria-busy="true"] {
+  cursor: progress;
+}
+
+#init-save-status.error {
+  color: #a42222;
+}
+
+#init-save-status.pending {
+  color: #705000;
+}
+
 .selected {
   border-color: #222222;
   background: #e8e8e8;

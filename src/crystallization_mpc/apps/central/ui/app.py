@@ -7,8 +7,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 from uuid import uuid4
@@ -88,18 +89,22 @@ FINAL_OVERLAY_FILENAME = "gsensor_detection_final.jpg"
 logger = logging.getLogger(__name__)
 
 
-class TargetUpdate(BaseModel):
+class ExperimentContext(BaseModel):
+    expected_run_id: str | None = None
+
+
+class TargetUpdate(ExperimentContext):
     target: Literal["sigma", "G"]
 
 
-class ParamsUpdate(BaseModel):
+class ParamsUpdate(ExperimentContext):
     version: int = 1
     shared: Dict[str, Any] = Field(default_factory=dict)
     gsensor: Dict[str, Any] = Field(default_factory=dict)
     controller: Dict[str, Any] = Field(default_factory=dict)
 
 
-class RunConfigurationUpdate(BaseModel):
+class RunConfigurationUpdate(ExperimentContext):
     model_config = ConfigDict(extra="forbid")
 
     run_type: Literal["experiment", "simulation"]
@@ -121,16 +126,16 @@ class RunConfigurationUpdate(BaseModel):
         "presaved_images",
     ]
 
-class OperationValueUpdate(BaseModel):
+class OperationValueUpdate(ExperimentContext):
     key: str
     value: Any
 
 
-class ExperimentCreateRequest(BaseModel):
+class ExperimentCreateRequest(ExperimentContext):
     label: str | None = Field(default=None, max_length=120)
 
 
-class AdaptationUpdate(BaseModel):
+class AdaptationUpdate(ExperimentContext):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     enabled: bool
@@ -459,6 +464,14 @@ class CentralApp:
         self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
         return env
 
+def _locked_service_state(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class CentralService:
     def __init__(self, publisher: CentralApp | None = None) -> None:
         self.ui_mode = resolve_ui_mode()
@@ -512,6 +525,17 @@ class CentralService:
 
     def ui_config(self) -> Dict[str, str | bool]:
         return ui_mode_payload(self.ui_mode)
+
+    @contextmanager
+    def ui_action(self, context: ExperimentContext | None = None):
+        """Check the displayed run and execute its action without a UI switch race."""
+        with self._lock:
+            if context is not None and "expected_run_id" in context.model_fields_set:
+                if context.expected_run_id != self.experiments.current_run_id():
+                    raise InvalidExperimentStateError(
+                        "The selected experiment changed. Refresh the page before retrying this action."
+                    )
+            yield
 
     def run_configuration_payload(self) -> Dict[str, Any]:
         return {
@@ -625,6 +649,7 @@ class CentralService:
                 logger.exception("Central RabbitMQ consumer stopped; retrying.")
                 time.sleep(5)
 
+    @_locked_service_state
     def on_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
         try:
             if message.get("src") != "gsensor" or message.get("dst") != ROLE:
@@ -643,7 +668,8 @@ class CentralService:
                 and payload.status != GrowthRateStatus.COMPLETED
             ):
                 raise ValueError("growth_rate.completed must use status='completed'.")
-            self._apply_gsensor_status(payload)
+            if not self._apply_gsensor_status(payload):
+                return {"accepted": True, "ignored": True, "reason": "Outdated Gsensor status."}
         except Exception as exc:
             with self._lock:
                 self.last_rejected_status_error = str(exc)
@@ -661,10 +687,30 @@ class CentralService:
             self.status_message_count += 1
         return {"accepted": True, "status": payload.status.value}
 
-    def _apply_gsensor_status(self, payload: GrowthRateStatusPayload) -> None:
+    def _apply_gsensor_status(self, payload: GrowthRateStatusPayload) -> bool:
         run_id = self.experiments.current_run_id()
         if run_id is None or payload.run_id != run_id:
             raise ValueError("Gsensor status run_id does not match the current experiment.")
+
+        manifest = self.experiments.registry.get(run_id)
+        previous = self.last_gsensor_status
+        if previous is not None and previous.get("run_id") == run_id:
+            previous_frame = previous.get("frame_seq")
+            if (
+                payload.frame_seq is not None and previous_frame is not None
+                and payload.frame_seq < previous_frame
+            ):
+                return False
+            try:
+                previous_time = datetime.fromisoformat(str(previous["occurred_at"]).replace("Z", "+00:00"))
+                incoming_time = datetime.fromisoformat(payload.occurred_at.replace("Z", "+00:00"))
+                if incoming_time < previous_time:
+                    return False
+            except (KeyError, TypeError, ValueError):
+                # Older valid producers may not have a comparable timestamp.
+                pass
+        if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+            return False
 
         status = payload.status
         if status == GrowthRateStatus.ERROR:
@@ -674,7 +720,7 @@ class CentralService:
             )
             with self._lock:
                 self.operation_state["experiment_active"] = False
-            return
+            return True
 
         if status == GrowthRateStatus.COMPLETED:
             manifest = self.experiments.registry.get(run_id)
@@ -683,7 +729,7 @@ class CentralService:
             self.experiments.finish(run_id)
             with self._lock:
                 self.operation_state["experiment_active"] = False
-            return
+            return True
 
         target_by_status = {
             GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE: ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
@@ -695,18 +741,20 @@ class CentralService:
         }
         target = target_by_status.get(status)
         if target is None:
-            return
-        self._advance_experiment_status(run_id, target)
+            return True
+        if not self._advance_experiment_status(run_id, target):
+            return False
         with self._lock:
             self.operation_state["experiment_active"] = target not in {
                 ExperimentStatus.STOPPING,
             }
+        return True
 
     def _advance_experiment_status(
         self,
         run_id: str,
         target: ExperimentStatus,
-    ) -> None:
+    ) -> bool:
         ordered = [
             ExperimentStatus.STARTING,
             ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
@@ -716,7 +764,7 @@ class CentralService:
         ]
         manifest = self.experiments.registry.get(run_id)
         if manifest.status == target:
-            return
+            return True
         if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
             raise InvalidExperimentStateError(
                 f"Cannot apply Gsensor status to {manifest.status.value} experiment."
@@ -724,9 +772,10 @@ class CentralService:
         current_index = ordered.index(manifest.status)
         target_index = ordered.index(target)
         if target_index < current_index:
-            return
+            return False
         for next_status in ordered[current_index + 1 : target_index + 1]:
             self.experiments.transition(run_id, next_status)
+        return True
 
     def controller_status(self) -> Dict[str, Any]:
         try:
@@ -743,6 +792,7 @@ class CentralService:
                 "error": str(exc),
             }
 
+    @_locked_service_state
     def system_status(self) -> Dict[str, Any]:
         experiments = self.experiments.list()
         current_run_id = experiments.get("current_run_id")
@@ -755,9 +805,13 @@ class CentralService:
             None,
         )
         with self._lock:
+            same_run = bool(
+                self.last_gsensor_status
+                and self.last_gsensor_status.get("run_id") == current_run_id
+            )
             gsensor = {
-                "last_status": self.last_gsensor_status,
-                "received_at": self.last_gsensor_status_received_at,
+                "last_status": self.last_gsensor_status if same_run else None,
+                "received_at": self.last_gsensor_status_received_at if same_run else None,
                 "consumer_error": self.last_status_consumer_error,
                 "last_rejection_error": self.last_rejected_status_error,
                 "message_count": self.status_message_count,
@@ -1050,19 +1104,31 @@ class CentralService:
 
         self._require_experiment_switch_allowed()
         experiment = self.experiments.create(label=label)
-        command = self.publisher.publish_experiment_select_command(
-            experiment["run_id"],
-            image_directory=experiment["image_directory"],
-        )
+        try:
+            command = self.publisher.publish_experiment_select_command(
+                experiment["run_id"],
+                image_directory=experiment["image_directory"],
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "The experiment was created, but its selection could not be delivered "
+                "to Gsensor. Keep this experiment and use Retry Selection before Start."
+            ) from exc
         return {**experiment, "selection_command": command}
 
     def select_experiment(self, run_id: str) -> Dict[str, Any]:
         self._require_experiment_switch_allowed(run_id)
         experiment = self.experiments.select(run_id)
-        command = self.publisher.publish_experiment_select_command(
-            experiment["run_id"],
-            image_directory=experiment["image_directory"],
-        )
+        try:
+            command = self.publisher.publish_experiment_select_command(
+                experiment["run_id"],
+                image_directory=experiment["image_directory"],
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "The experiment is selected in Central, but delivery to Gsensor failed. "
+                "Keep this experiment and use Retry Selection before Start."
+            ) from exc
         return {**experiment, "selection_command": command}
 
     def _require_experiment_switch_allowed(self, run_id: str | None = None) -> None:
@@ -1331,7 +1397,8 @@ def get_run_configuration() -> Dict[str, Any]:
 @web_app.put("/api/run-configuration")
 def update_run_configuration(payload: RunConfigurationUpdate) -> Dict[str, Any]:
     try:
-        return service.update_run_configuration(payload)
+        with service.ui_action(payload):
+            return service.update_run_configuration(payload)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1339,15 +1406,17 @@ def update_run_configuration(payload: RunConfigurationUpdate) -> Dict[str, Any]:
 @web_app.post("/api/params")
 def update_params(payload: ParamsUpdate) -> Dict[str, Any]:
     try:
-        return service.save_params(payload)
+        with service.ui_action(payload):
+            return service.save_params(payload)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/params/reset")
-def reset_params() -> Dict[str, Any]:
+def reset_params(payload: ExperimentContext | None = None) -> Dict[str, Any]:
     try:
-        return service.reset_params_to_defaults()
+        with service.ui_action(payload):
+            return service.reset_params_to_defaults()
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1355,7 +1424,8 @@ def reset_params() -> Dict[str, Any]:
 @web_app.post("/api/experiments", status_code=201)
 def create_experiment(payload: ExperimentCreateRequest) -> Dict[str, Any]:
     try:
-        return service.create_experiment(label=payload.label)
+        with service.ui_action(payload):
+            return service.create_experiment(label=payload.label)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1386,17 +1456,19 @@ def get_experiment_overlay(run_id: str, kind: str) -> FileResponse:
 
 
 @web_app.post("/api/experiments/{run_id}/select")
-def select_experiment(run_id: str) -> Dict[str, Any]:
+def select_experiment(run_id: str, payload: ExperimentContext | None = None) -> Dict[str, Any]:
     try:
-        return service.select_experiment(run_id)
+        with service.ui_action(payload):
+            return service.select_experiment(run_id)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/experiments/{run_id}/finish")
-def finish_experiment(run_id: str) -> Dict[str, Any]:
+def finish_experiment(run_id: str, payload: ExperimentContext | None = None) -> Dict[str, Any]:
     try:
-        return service.finish_experiment(run_id)
+        with service.ui_action(payload):
+            return service.finish_experiment(run_id)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1430,14 +1502,15 @@ def get_operation_meta() -> Dict[str, Any]:
 @web_app.post("/api/operation/target")
 def update_target(payload: TargetUpdate) -> Dict[str, Any]:
     try:
-        updated = service.run_configuration.to_dict()
-        updated["control_target"] = payload.target
-        result = service.update_run_configuration(updated)
-        return {
-            "saved": True,
-            "target": service.target,
-            "run_configuration": result,
-        }
+        with service.ui_action(payload):
+            updated = service.run_configuration.to_dict()
+            updated["control_target"] = payload.target
+            result = service.update_run_configuration(updated)
+            return {
+                "saved": True,
+                "target": service.target,
+                "run_configuration": result,
+            }
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1445,7 +1518,8 @@ def update_target(payload: TargetUpdate) -> Dict[str, Any]:
 @web_app.post("/api/operation/value")
 def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
     try:
-        return service.update_operation_value(payload.key, payload.value)
+        with service.ui_action(payload):
+            return service.update_operation_value(payload.key, payload.value)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1453,15 +1527,17 @@ def update_operation_value(payload: OperationValueUpdate) -> Dict[str, Any]:
 @web_app.post("/api/operation/experiment/start")
 def start_experiment(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
     try:
-        return service.start_experiment(payload)
+        with service.ui_action(payload):
+            return service.start_experiment(payload)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
 
 @web_app.post("/api/operation/controller/add-seed")
-def add_seed() -> Dict[str, Any]:
+def add_seed(payload: ExperimentContext | None = None) -> Dict[str, Any]:
     try:
-        return service.add_seed()
+        with service.ui_action(payload):
+            return service.add_seed()
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -1469,7 +1545,8 @@ def add_seed() -> Dict[str, Any]:
 @web_app.post("/api/operation/controller/adaptation")
 def set_adaptation(payload: AdaptationUpdate) -> Dict[str, Any]:
     try:
-        return service.set_adaptation(payload.enabled)
+        with service.ui_action(payload):
+            return service.set_adaptation(payload.enabled)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
