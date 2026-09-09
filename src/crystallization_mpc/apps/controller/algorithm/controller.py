@@ -468,6 +468,7 @@ class CrystallizationController:
                 target_error_abs=absolute_error, dT_dt_set=dT_dt_set,
                 T_j_set=T_j_set, objective=objective, E_A=float(self.params["E_A"]),
                 k_0=float(self.params["k_0"]), n=float(self.params["n"]),
+                t_lag=lag, t_lag_perc=lag_percentage,
             )
         except (OptimizationError, AdaptationError, FloatingPointError) as exc:
             if rollback_state is not None:

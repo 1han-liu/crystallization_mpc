@@ -41,6 +41,10 @@ class ControllerStepResult:
     E_A: float | None = None
     k_0: float | None = None
     n: float | None = None
+    # Calculated lag in seconds and its multiplier, not the input parameters.
+    # The MATLAB increase percentage is (t_lag_perc - 1) * 100.
+    t_lag: float | None = None
+    t_lag_perc: float | None = None
 
     NUMERIC_FIELDS: ClassVar[tuple[str, ...]] = (
         "T",
@@ -65,6 +69,8 @@ class ControllerStepResult:
         "E_A",
         "k_0",
         "n",
+        "t_lag",
+        "t_lag_perc",
     )
 
     def __post_init__(self) -> None:
