@@ -4,39 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260910-request-state">
+    <link rel="stylesheet" href="/static/styles.css?v=20260910-run-alignment">
   </head>
   <body>
     <div class="shell">
-      <aside class="sidebar" id="parameter-drawer">
-        <div class="sidebar-top">
-          <div class="brand">
-            <p class="eyebrow">Crystallization MPC</p>
-            <h1>Gsensor UI</h1>
-          </div>
-          <button id="toggle-parameters" class="nav-link">Parameters</button>
-        </div>
-
-        <div class="drawer-body">
-          <div class="panel drawer-panel">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Parameter Drawer</p>
-                <h2>Gsensor Values</h2>
-              </div>
-              <div class="actions">
-                <button id="reset-params" class="ghost" type="button">Reset to Defaults</button>
-                <button id="save-params" class="primary" type="button">Save Parameters</button>
-              </div>
-            </div>
-            <div id="parameter-status" class="parameter-status loading" role="status" aria-live="polite">
-              <span id="parameter-status-text">Loading parameters…</span>
-            </div>
-            <form id="params-form" class="param-form"></form>
-          </div>
-        </div>
-      </aside>
-
       <main class="content">
         <section class="panel hero">
           <div>
@@ -47,10 +18,31 @@
           <div class="actions">
             <span id="status-text" class="status idle">idle</span>
             <span id="initialized-text" class="status idle">not initialized</span>
+            <button id="run-parameters-button" class="ghost" type="button" aria-haspopup="dialog" aria-controls="run-parameters-dialog">本次参数</button>
           </div>
         </section>
 
         <p id="connection-status" class="connection-status" role="status" aria-live="polite" hidden></p>
+
+        <section class="panel alignment-panel" aria-labelledby="alignment-heading">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Initialization Setting</p>
+              <h2 id="alignment-heading">Image Alignment</h2>
+            </div>
+            <span id="alignment-configuration-status" class="status idle">waiting for experiment</span>
+          </div>
+          <div class="alignment-selection">
+            <div class="alignment-field">
+              <label for="alignment-method-select">Alignment method</label>
+              <select id="alignment-method-select" aria-describedby="alignment-selection-help alignment-capability-notes" disabled>
+                <option value="none">None — no image alignment</option>
+              </select>
+            </div>
+            <p id="alignment-selection-help" class="muted" role="status" aria-live="polite">Start an experiment in Central. Choose an alignment method during image marking.</p>
+          </div>
+          <p id="alignment-capability-notes" class="save-status muted" hidden></p>
+        </section>
 
         <section class="panel initialization-panel">
           <div class="panel-head">
@@ -283,21 +275,24 @@
       </main>
     </div>
 
-    <template id="param-field-template">
-      <div class="field">
-        <div class="field-heading">
-          <span class="field-key"></span>
-          <div class="field-actions">
-            <span class="field-modified" hidden>Modified</span>
-            <button class="field-reset ghost" type="button" hidden>Reset</button>
-          </div>
+    <dialog id="run-parameters-dialog" class="run-parameters-dialog" aria-labelledby="run-parameters-heading" aria-describedby="run-parameters-description">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Read Only</p>
+          <h2 id="run-parameters-heading" tabindex="-1">本次参数 · Current Run Parameters</h2>
         </div>
-        <div class="field-badges"></div>
-        <p class="field-description"></p>
-        <textarea rows="1" class="field-input"></textarea>
+        <button id="close-run-parameters" class="ghost" type="button" aria-label="Close current run parameters">Close</button>
       </div>
-    </template>
+      <p id="run-parameters-description" class="muted">Effective parameters for this experiment. Edit the full parameter configuration in Central.</p>
+      <dl class="run-parameter-facts">
+        <div><dt>Experiment</dt><dd id="parameter-run-label">—</dd></div>
+        <div><dt>Run ID</dt><dd id="parameter-run-id">—</dd></div>
+        <div><dt>Parameter Version</dt><dd id="parameter-run-version">—</dd></div>
+      </dl>
+      <p id="run-parameters-status" class="save-status muted" role="status" aria-live="polite">Parameters become available after Start in Central.</p>
+      <div id="run-parameters-values" class="run-parameters-values"></div>
+    </dialog>
 
-    <script src="/static/app.js?v=20260910-request-state"></script>
+    <script src="/static/app.js?v=20260910-run-alignment"></script>
   </body>
 </html>

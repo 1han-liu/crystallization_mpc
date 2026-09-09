@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import os
 import threading
@@ -24,7 +26,10 @@ from crystallization_mpc.apps.central.params import (
     save_params_document,
     validate_params_section,
 )
-from crystallization_mpc.apps.gsensor.alignment import alignment_capabilities
+from crystallization_mpc.apps.gsensor.alignment import (
+    alignment_capabilities,
+    parse_alignment_method,
+)
 from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.gsensor.DSCGR import DSCGR
 from crystallization_mpc.apps.gsensor.detection.initialize_DSCGR import initialize_DSCGR
@@ -58,7 +63,8 @@ from crystallization_mpc.apps.gsensor.telemetry import (
     write_gsensor_measurement,
 )
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
-from crystallization_mpc.experiments import ExperimentStatus
+from crystallization_mpc.experiments import ExperimentStatus, TERMINAL_EXPERIMENT_STATUSES
+from crystallization_mpc.experiments.registry import GSENSOR_INITIALIZATION_FILENAME
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
     EXPERIMENT_SELECT_COMMAND,
@@ -136,6 +142,10 @@ class InitializationCornerRequest(InitializationSessionRequest):
 
 class Initialization3DChoiceRequest(InitializationSessionRequest):
     choice: int
+
+
+class InitializationConfirmRequest(InitializationSessionRequest):
+    alignment_method: str | None = None
 
 
 class InitializationResetRequest(InitializationSessionRequest):
@@ -288,6 +298,8 @@ class GsensorService:
         self.experiment_started_at: str | None = None
         self.experiment_parameter_version: int | None = None
         self.experiment_params: Dict[str, Any] | None = None
+        self.confirmed_alignment_method: str | None = None
+        self.alignment_confirmed_at: str | None = None
         self.last_lifecycle_message: Dict[str, Any] | None = None
         # Values are revision identities (name + mtime_ns + size), not filenames.
         self.processed_image_files: set[str] = set()
@@ -492,6 +504,8 @@ class GsensorService:
         self.experiment_started_at = None
         self.experiment_parameter_version = None
         self.experiment_params = None
+        self.confirmed_alignment_method = None
+        self.alignment_confirmed_at = None
         self.experiment_lifecycle_error = None
         self.last_lifecycle_message = None
         self.recovery_status = "not_attempted"
@@ -518,6 +532,11 @@ class GsensorService:
             "experiment_started_at": self.experiment_started_at,
             "parameter_version": self.experiment_parameter_version,
             "algorithm_params": self.experiment_params,
+            "alignment_configuration": {
+                key: value
+                for key, value in self._alignment_configuration_locked().items()
+                if key != "can_select"
+            },
             "initialization": initialization_payload,
             "initialized_at": self.initialized_at,
             "baseline": self.baseline,
@@ -611,6 +630,9 @@ class GsensorService:
             )
 
         processor_state = state.get("processor")
+        self._restore_alignment_configuration_locked(
+            state.get("alignment_configuration"), has_processor=processor_state is not None
+        )
         if processor_state is not None:
             if not isinstance(initialization_payload, dict):
                 raise ValueError(
@@ -642,6 +664,7 @@ class GsensorService:
                 final_overlay_path=final_overlay_path,
                 debug_directory=debug_directory,
                 initial_image_path=initialization_payload["selected_image"],
+                alignment_method=self.confirmed_alignment_method,
             )
             restore_state = getattr(processor, "restore_state", None)
             if not callable(restore_state):
@@ -720,6 +743,8 @@ class GsensorService:
                 self.experiment_started_at = payload.started_at
                 self.experiment_parameter_version = payload.parameter_version
                 self.experiment_params = self.current_params()
+                self.confirmed_alignment_method = None
+                self.alignment_confirmed_at = None
                 self.experiment_lifecycle_status = (
                     GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE.value
                 )
@@ -1259,6 +1284,69 @@ class GsensorService:
         with self._lock:
             return {**shared, **gsensor, **self.params}
 
+    def _alignment_configuration_locked(self) -> Dict[str, Any]:
+        params = self.experiment_params or self.current_params()
+        configured = parse_alignment_method(params.get("alignment_method", "none")).value
+        confirmed = self.confirmed_alignment_method
+        # Older in-memory integrations may construct an initialized processor
+        # without the new confirmation attributes.
+        if confirmed is None and self.initialized and self.growth_rate_processor is not None:
+            confirmed = parse_alignment_method(
+                getattr(self.growth_rate_processor, "alignment_method", configured)
+            ).value
+        return {
+            "method": confirmed or configured,
+            "configured_method": configured,
+            "confirmed": confirmed is not None,
+            "confirmed_at": self.alignment_confirmed_at or (self.initialized_at if confirmed else None),
+            "can_select": (
+                self.experiment_lifecycle_status == GrowthRateStatus.INITIALIZING.value
+                and not self.initialized
+            ),
+        }
+
+    def _restore_alignment_configuration_locked(
+        self, configuration: Any, *, has_processor: bool
+    ) -> None:
+        self.confirmed_alignment_method = None
+        self.alignment_confirmed_at = None
+        if configuration is None:
+            # Older runs used the Start-time method and have no separate choice.
+            if has_processor:
+                self.confirmed_alignment_method = parse_alignment_method(
+                    (self.experiment_params or {}).get("alignment_method", "none")
+                ).value
+                self.alignment_confirmed_at = self.initialized_at
+            return
+        if not isinstance(configuration, dict) or not isinstance(
+            configuration.get("confirmed"), bool
+        ):
+            raise ValueError("Persisted alignment configuration is invalid.")
+        method = parse_alignment_method(configuration.get("method")).value
+        if configuration["confirmed"]:
+            confirmed_at = configuration.get("confirmed_at")
+            if confirmed_at is not None and not isinstance(confirmed_at, str):
+                raise ValueError("Persisted alignment confirmation time is invalid.")
+            self.confirmed_alignment_method = method
+            self.alignment_confirmed_at = confirmed_at
+        elif has_processor:
+            raise ValueError("Processor recovery requires a confirmed alignment method.")
+
+    def _experiment_parameters_locked(self) -> Dict[str, Any] | None:
+        if self.current_experiment is None or self.experiment_params is None:
+            return None
+        run_id = self.current_experiment["run_id"]
+        configuration = self._alignment_configuration_locked()
+        params = copy.deepcopy(self.experiment_params)
+        params["alignment_method"] = configuration["method"]
+        return {
+            "run_id": run_id,
+            "label": self.experiments.registry.get(run_id).label,
+            "parameter_version": self.experiment_parameter_version,
+            "params": params,
+            "alignment_configuration": configuration,
+        }
+
     def params_payload(self) -> Dict[str, Any]:
         shared, gsensor, _controller, persisted_version = self._load_persisted_params()
         default_shared, default_gsensor, _default_controller, default_version = load_params(
@@ -1454,6 +1542,8 @@ class GsensorService:
                 "exchange": self.exchange,
                 "param_count": len(current_params),
                 "params": current_params,
+                "alignment_configuration": self._alignment_configuration_locked(),
+                "experiment_parameters": self._experiment_parameters_locked(),
                 "last_message": self.last_message,
                 "last_command_message": self.last_command_message,
                 "last_params_message": self.last_params_message,
@@ -1617,6 +1707,7 @@ class GsensorService:
     def confirm_initialization_3d_choice(
         self,
         session_id: str,
+        alignment_method: str | None = None,
     ) -> Dict[str, Any]:
         """Freeze the previewed candidate, establish baseline, and measure."""
 
@@ -1635,6 +1726,17 @@ class GsensorService:
                 raise ValueError(
                     "Preview and select a 3D candidate before confirming initialization."
                 )
+            configured = self._alignment_configuration_locked()["configured_method"]
+            selected_method = parse_alignment_method(
+                configured if alignment_method is None else alignment_method
+            ).value
+            capability = next(
+                (item for item in alignment_capabilities() if item.method == selected_method),
+                None,
+            )
+            if capability is None or not capability.available:
+                reason = capability.reason if capability is not None else "not available"
+                raise ValueError(f"Alignment method {selected_method!r} is unavailable: {reason}")
             uv_struct_list, kernel = initialize_DSCGR(
                 self.initialization,
                 session_id=session_id,
@@ -1657,14 +1759,21 @@ class GsensorService:
             )
             processor = self.growth_rate_processor_factory(
                 run_id=selection["run_id"],
-                params=self.experiment_params or self.current_params(),
+                params=copy.deepcopy(self.experiment_params or self.current_params()),
                 uv_struct_list=uv_struct_list,
                 kernel=kernel,
                 latest_overlay_path=latest_overlay_path,
                 final_overlay_path=final_overlay_path,
                 debug_directory=debug_directory,
                 initial_image_path=payload["selected_image"],
+                alignment_method=selected_method,
             )
+            configuration = {
+                "method": selected_method,
+                "configured_method": configured,
+                "confirmed": True,
+                "confirmed_at": completed_at,
+            }
             snapshot = {
                 "schema_version": 1,
                 "run_id": selection["run_id"],
@@ -1672,19 +1781,44 @@ class GsensorService:
                 "parameter_version": self.experiment_parameter_version,
                 "initialization": payload,
                 "baseline": baseline,
+                "alignment_configuration": configuration,
             }
-            self.experiments.save_initialization(snapshot)
-            self.initialized = True
-            self.initialization_status = str(payload.get("status") or "ready_for_3d")
-            self.initialized_at = completed_at
-            self.uv_struct_list = processor.uv_structs
-            self.kernel = kernel
-            self.growth_rate_processor = processor
-            self.latest_overlay_path = str(latest_overlay_path)
-            self.final_overlay_path = None
-            self.baseline = baseline
-            self.experiment_lifecycle_status = GrowthRateStatus.BASELINE_READY.value
-            self.image_scan_status = "baseline_ready"
+            # A crash between the two writes may leave a prepared, immutable
+            # initialization snapshot. Only an uncommitted run may replace it.
+            self._discard_uncommitted_initialization_locked(selection["run_id"])
+            updates = {
+                "initialized": True,
+                "initialization_status": str(payload.get("status") or "ready_for_3d"),
+                "initialized_at": completed_at,
+                "uv_struct_list": processor.uv_structs,
+                "kernel": kernel,
+                "growth_rate_processor": processor,
+                "latest_overlay_path": str(latest_overlay_path),
+                "final_overlay_path": None,
+                "baseline": baseline,
+                "experiment_lifecycle_status": GrowthRateStatus.MEASURING.value,
+                "image_scan_status": "baseline_ready",
+                "confirmed_alignment_method": selected_method,
+                "alignment_confirmed_at": completed_at,
+            }
+            previous = {key: getattr(self, key) for key in updates}
+            try:
+                self.experiments.save_initialization(snapshot)
+                for key, value in updates.items():
+                    setattr(self, key, value)
+                # This atomic recovery record commits the confirmation. Nothing
+                # may publish readiness or scan images until it is durable.
+                self._persist_processing_state_locked()
+            except Exception:
+                for key, value in previous.items():
+                    setattr(self, key, value)
+                try:
+                    self._discard_uncommitted_initialization_locked(
+                        selection["run_id"], expected_snapshot=snapshot
+                    )
+                except Exception:
+                    logger.exception("Unable to clean up uncommitted initialization snapshot.")
+                raise
             image_name = baseline["image_name"]
 
         self._publish_growth_rate_status(
@@ -1692,16 +1826,41 @@ class GsensorService:
             frame_seq=0,
             image_name=image_name,
         )
-        with self._lock:
-            self.experiment_lifecycle_status = GrowthRateStatus.MEASURING.value
-            self._persist_processing_state_locked()
         self._publish_growth_rate_status(
             GrowthRateStatus.MEASURING,
             frame_seq=0,
             image_name=image_name,
         )
         self.start_image_scanning()
-        return {**payload, "baseline": baseline}
+        return {**payload, "baseline": baseline, "alignment_configuration": configuration}
+
+    def _discard_uncommitted_initialization_locked(
+        self, run_id: str, *, expected_snapshot: Dict[str, Any] | None = None
+    ) -> None:
+        path = self.experiments.registry.image_dir(run_id).parent / GSENSOR_INITIALIZATION_FILENAME
+        if not path.exists():
+            return
+        if expected_snapshot is not None:
+            # Roll back only the exact file prepared by this failed call, even
+            # if Central ended the run while the disk write was in progress.
+            if json.loads(path.read_text(encoding="utf-8")) != expected_snapshot:
+                return
+        elif self.experiments.registry.get(run_id).status in TERMINAL_EXPERIMENT_STATUSES:
+            return
+        saved = self.experiments.load_processing_state(run_id)
+        configuration = (saved or {}).get("alignment_configuration") or {}
+        if (
+            saved is not None
+            and isinstance(configuration, dict)
+            and saved.get("lifecycle_status") == GrowthRateStatus.INITIALIZING.value
+            and saved.get("processor") is None
+            and saved.get("initialized_at") is None
+            and not configuration.get("confirmed", False)
+        ):
+            # Keep the shared manifest's lifecycle untouched; the next save
+            # fills the same initialization filename. Completed records stay
+            # immutable, even if the current in-memory state is inconsistent.
+            path.unlink()
 
     def _build_baseline_locked(
         self,
@@ -1933,10 +2092,12 @@ def choose_initialization_3d_choice(payload: Initialization3DChoiceRequest) -> D
 
 @web_app.post("/api/initialization/confirm")
 def confirm_initialization_3d_choice(
-    payload: InitializationSessionRequest,
+    payload: InitializationConfirmRequest,
 ) -> Dict[str, Any]:
     try:
-        return service.confirm_initialization_3d_choice(payload.session_id)
+        return service.confirm_initialization_3d_choice(
+            payload.session_id, getattr(payload, "alignment_method", None)
+        )
     except Exception as exc:
         _raise_http_error(exc)
 
@@ -1977,6 +2138,7 @@ __all__ = [
     "GsensorService",
     "DscgrRunRequest",
     "Initialization3DChoiceRequest",
+    "InitializationConfirmRequest",
     "InitializationCornerRequest",
     "InitializationIsFullRequest",
     "InitializationPointRequest",

@@ -3,14 +3,19 @@ const initializedText = document.querySelector("#initialized-text");
 const connectionStatus = document.querySelector("#connection-status");
 const paramsBlock = document.querySelector("#params-block");
 const messageBlock = document.querySelector("#message-block");
-const shell = document.querySelector(".shell");
-const toggleParametersButton = document.querySelector("#toggle-parameters");
-const paramsForm = document.querySelector("#params-form");
-const fieldTemplate = document.querySelector("#param-field-template");
-const saveParamsButton = document.querySelector("#save-params");
-const resetParamsButton = document.querySelector("#reset-params");
-const parameterStatus = document.querySelector("#parameter-status");
-const parameterStatusText = document.querySelector("#parameter-status-text");
+const runParametersButton = document.querySelector("#run-parameters-button");
+const runParametersDialog = document.querySelector("#run-parameters-dialog");
+const closeRunParametersButton = document.querySelector("#close-run-parameters");
+const parameterRunLabel = document.querySelector("#parameter-run-label");
+const parameterRunId = document.querySelector("#parameter-run-id");
+const parameterRunVersion = document.querySelector("#parameter-run-version");
+const runParametersStatus = document.querySelector("#run-parameters-status");
+const runParametersValues = document.querySelector("#run-parameters-values");
+const alignmentMethodSelect = document.querySelector("#alignment-method-select");
+const alignmentConfigurationStatus = document.querySelector("#alignment-configuration-status");
+const alignmentSelectionHelp = document.querySelector("#alignment-selection-help");
+const alignmentCapabilityNotes = document.querySelector("#alignment-capability-notes");
+let parameterDialogOpener = null;
 
 const currentRunId = document.querySelector("#current-run-id");
 const currentImageDirectory = document.querySelector("#current-image-directory");
@@ -82,14 +87,16 @@ const default3DView = { yaw: -0.65, pitch: 0.55 };
 
 const state = {
   uiMode: "production",
-  params: null,
-  paramsVersion: 1,
   paramMeta: {},
-  drawerOpen: false,
-  parameterActionInFlight: false,
-  parameterError: null,
-  parameterNotice: null,
-  parameterUnsavedCount: 0,
+  experimentParameters: null,
+  parameterRenderKey: null,
+  alignmentConfiguration: null,
+  alignmentDraft: null,
+  alignmentDraftScope: null,
+  alignmentDraftEdited: false,
+  alignmentCapabilitiesReady: false,
+  alignmentCapabilitiesError: null,
+  initialized: false,
   initialization: null,
   experimentSource: null,
   measurementActive: false,
@@ -148,42 +155,6 @@ async function loadUiConfig() {
   }
 }
 
-function setDrawerOpen(open) {
-  state.drawerOpen = open;
-  shell.classList.toggle("drawer-open", open);
-}
-
-function parseFieldValue(rawValue) {
-  const trimmed = rawValue.trim();
-  if (trimmed === "") {
-    return null;
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch (error) {
-    return trimmed;
-  }
-}
-
-function formatFieldValue(value) {
-  if (typeof value === "string") {
-    return value;
-  }
-  return JSON.stringify(value);
-}
-
-function valuesEqual(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function formatParameterTime(value) {
-  if (!value) {
-    return null;
-  }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString();
-}
-
 function cacheBustedUrl(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   if (method !== "GET" || !url.startsWith("/api/")) {
@@ -219,198 +190,6 @@ async function fetchJson(url, options = {}) {
   return payload;
 }
 
-function renderForm(params) {
-  paramsForm.innerHTML = "";
-  const entries = Object.entries(params || {})
-    .map(([key, value], index) => ({ key, value, index, meta: state.paramMeta[key] || {} }))
-    .filter(({ meta }) => {
-      const publishTo = Array.isArray(meta.publish_to) ? meta.publish_to : [];
-      const uiMeta = meta.ui || {};
-      return publishTo.includes("gsensor") && uiMeta.visible !== false;
-    })
-    .sort((left, right) => {
-      const leftOrder = Number.isFinite(left.meta?.ui?.order) ? left.meta.ui.order : Number.MAX_SAFE_INTEGER;
-      const rightOrder = Number.isFinite(right.meta?.ui?.order) ? right.meta.ui.order : Number.MAX_SAFE_INTEGER;
-      if (leftOrder !== rightOrder) {
-        return leftOrder - rightOrder;
-      }
-      return left.index - right.index;
-    });
-
-  const groups = [];
-  const bySection = new Map();
-  entries.forEach((entry) => {
-    const section = entry.meta.section || "General";
-    if (!bySection.has(section)) {
-      const group = { section, items: [] };
-      bySection.set(section, group);
-      groups.push(group);
-    }
-    bySection.get(section).items.push(entry);
-  });
-
-  groups.forEach((group) => {
-    const wrapper = document.createElement("section");
-    wrapper.className = "param-group";
-
-    const title = document.createElement("h3");
-    title.className = "param-group-title";
-    title.textContent = group.section;
-    wrapper.appendChild(title);
-
-    group.items.forEach(({ key, value, meta }) => {
-      const field = fieldTemplate.content.firstElementChild.cloneNode(true);
-      const label = field.querySelector(".field-key");
-      const badges = field.querySelector(".field-badges");
-      const description = field.querySelector(".field-description");
-      let input = field.querySelector(".field-input");
-      const modifiedBadge = field.querySelector(".field-modified");
-      const resetButton = field.querySelector(".field-reset");
-      const defaultValue = state.params?.defaults?.params?.[key];
-
-      label.textContent = meta.label || key;
-      description.textContent = meta.description || "";
-      description.classList.toggle("is-empty", !meta.description);
-
-      const badgeItems = [];
-      if (meta.unit) {
-        badgeItems.push(`unit: ${meta.unit}`);
-      }
-      if (meta.kind) {
-        badgeItems.push(meta.kind);
-      }
-      badges.innerHTML = badgeItems.map((item) => `<span class="field-badge">${item}</span>`).join("");
-      badges.classList.toggle("is-empty", badgeItems.length === 0);
-
-      if (Array.isArray(meta.choices) && meta.choices.length > 0) {
-        const select = document.createElement("select");
-        select.className = input.className;
-        meta.choices.forEach((choice) => {
-          const option = document.createElement("option");
-          const capability = state.alignmentCapabilities[choice];
-          option.value = choice;
-          option.textContent = capability?.available === false
-            ? `${choice} (unavailable)`
-            : choice;
-          option.disabled = capability?.available === false;
-          if (capability?.reason) {
-            option.title = capability.reason;
-          }
-          select.appendChild(option);
-        });
-        input.replaceWith(select);
-        input = select;
-      }
-      input.dataset.key = key;
-      input.setAttribute("aria-label", meta.label || key);
-      input.value = formatFieldValue(value);
-      input.addEventListener("input", () => {
-        state.parameterError = null;
-        state.parameterNotice = null;
-        updateParameterDraftState();
-      });
-      resetButton.addEventListener("click", () => {
-        input.value = formatFieldValue(defaultValue);
-        state.parameterError = null;
-        state.parameterNotice = null;
-        updateParameterDraftState();
-        input.focus();
-      });
-      const modified = !valuesEqual(value, defaultValue);
-      field.classList.toggle("modified", modified);
-      modifiedBadge.hidden = !modified;
-      resetButton.hidden = !modified;
-      wrapper.appendChild(field);
-    });
-
-    paramsForm.appendChild(wrapper);
-  });
-}
-
-function parametersLocked() {
-  return [
-    "waiting_for_initial_image",
-    "initializing",
-    "baseline_ready",
-    "measuring",
-    "stopping",
-  ].includes(state.experimentLifecycleStatus);
-}
-
-function updateParameterDraftState() {
-  if (!state.params) {
-    return;
-  }
-  let unsavedCount = 0;
-  let modifiedCount = 0;
-  const locked = parametersLocked() || !state.statusAvailable;
-  paramsForm.querySelectorAll(".field-input").forEach((input) => {
-    const key = input.dataset.key;
-    const value = parseFieldValue(input.value);
-    const savedValue = state.params?.params?.[key];
-    const defaultValue = state.params?.defaults?.params?.[key];
-    input.disabled = state.parameterActionInFlight || locked;
-    if (!valuesEqual(value, savedValue)) {
-      unsavedCount += 1;
-    }
-    const modified = !valuesEqual(value, defaultValue);
-    if (modified) {
-      modifiedCount += 1;
-    }
-    const field = input.closest(".field");
-    field.classList.toggle("modified", modified);
-    field.querySelector(".field-modified").hidden = !modified;
-    const fieldReset = field.querySelector(".field-reset");
-    fieldReset.hidden = !modified;
-    fieldReset.disabled = state.parameterActionInFlight || locked;
-  });
-
-  saveParamsButton.disabled = state.parameterActionInFlight || locked || unsavedCount === 0;
-  resetParamsButton.disabled = state.parameterActionInFlight || locked || modifiedCount === 0;
-  state.parameterUnsavedCount = unsavedCount;
-  renderParameterStatus(unsavedCount);
-}
-
-function renderParameterStatus(unsavedCount = 0) {
-  let kind = state.params?.status?.kind || "loading";
-  let message = state.params?.status?.message || "Loading parameters…";
-  if (state.parameterActionInFlight) {
-    kind = "saving";
-    message = "Saving…";
-  } else if (state.parameterError) {
-    kind = "error";
-    message = `Save/validation failed: ${state.parameterError}`;
-  } else if (state.parameterNotice) {
-    kind = "draft_saved";
-    message = state.parameterNotice;
-  } else if (!state.statusAvailable) {
-    kind = "error";
-    message = "Status unavailable · displayed parameter values may be outdated";
-  } else if (parametersLocked()) {
-    kind = "applied";
-    const runId = state.experimentSource?.run_id;
-    message = `Applied${runId ? ` to ${runId}` : ""} · version ${state.params?.version || state.paramsVersion}`;
-  } else if (unsavedCount > 0) {
-    kind = "unsaved";
-    message = `${unsavedCount} unsaved change${unsavedCount === 1 ? "" : "s"}`;
-  } else if (kind === "draft_saved") {
-    const savedTime = formatParameterTime(state.params?.status?.saved_at);
-    if (savedTime) {
-      message = `Draft saved at ${savedTime} · version ${state.params.version}`;
-    }
-  }
-  parameterStatus.className = `parameter-status ${kind}`;
-  parameterStatusText.textContent = message;
-}
-
-function collectForm() {
-  const data = {};
-  paramsForm.querySelectorAll(".field-input").forEach((input) => {
-    data[input.dataset.key] = parseFieldValue(input.value);
-  });
-  return data;
-}
-
 function clearMeasurementOverlay() {
   state.overlayRequest += 1;
   state.overlayImage = null;
@@ -426,7 +205,7 @@ function setStatusAvailable(available, message = "") {
   state.statusAvailable = available;
   connectionStatus.hidden = available;
   connectionStatus.textContent = available ? "" : `Status connection lost. Measurements, images and parameters may be outdated. Editing is disabled until status refresh succeeds. ${message}`;
-  updateParameterDraftState();
+  renderRunParameters();
   renderInitialization(state.initialization);
   refreshOverlayButton.disabled = !available || !state.latestOverlayFrame;
 }
@@ -442,8 +221,12 @@ function adoptExperiment(payload) {
   state.initializationAction = null;
   state.initializationFeedback = null;
   state.confirmedSessionId = null;
-  state.parameterError = null;
-  state.parameterNotice = null;
+  state.experimentParameters = null;
+  state.alignmentConfiguration = null;
+  state.alignmentDraft = null;
+  state.alignmentDraftScope = null;
+  state.alignmentDraftEdited = false;
+  state.initialized = false;
   state.sourceError = null;
   clearMeasurementOverlay();
   renderInitialization(null);
@@ -458,18 +241,12 @@ function renderStatus(payload, { includeInitialization = true } = {}) {
   connectionStatus.hidden = true;
   state.measurementActive = Boolean(payload.active);
   state.experimentLifecycleStatus = payload.experiment_lifecycle_status || "not_started";
-  if (parametersLocked() && state.params && payload.params) {
-    const paramsChanged = !valuesEqual(state.params.params, payload.params);
-    state.params.params = payload.params;
-    if (payload.experiment_parameter_version != null) {
-      state.params.version = Number(payload.experiment_parameter_version);
-      state.paramsVersion = state.params.version;
-    }
-    if (paramsChanged) {
-      renderForm(state.params.params);
-    }
-  }
-  updateParameterDraftState();
+  state.initialized = Boolean(payload.initialized);
+  state.alignmentConfiguration = payload.alignment_configuration || null;
+  const snapshot = payload.experiment_parameters;
+  // Only the run snapshot is authoritative. /api/params can be a later Central draft.
+  state.experimentParameters = snapshot?.run_id === state.runId ? snapshot : null;
+  renderRunParameters();
   statusText.textContent = state.experimentLifecycleStatus;
   const lifecycleRunning = [
     "waiting_for_initial_image",
@@ -724,69 +501,172 @@ async function refreshLiveStatus() {
   }
 }
 
-async function loadParams() {
+async function loadParameterMetadata() {
   const request = ++state.paramsRequest;
-  const context = state.contextRevision;
-  const [params, capabilities] = await Promise.all([
+  const results = await Promise.allSettled([
     fetchJson("/api/params"),
     fetchJson("/api/alignment/capabilities"),
   ]);
-  if (request !== state.paramsRequest || context !== state.contextRevision || state.parameterActionInFlight || state.parameterUnsavedCount > 0) return state.params;
-  state.params = params;
-  state.alignmentCapabilities = Object.fromEntries(
-    (capabilities.methods || []).map((item) => [item.method, item]),
-  );
-  state.paramsVersion = state.params.version || 1;
-  state.paramMeta = state.params.meta || {};
-  state.parameterError = null;
-  state.parameterNotice = null;
-  renderForm(state.params.params || {});
-  updateParameterDraftState();
-  return state.params;
-}
-
-async function saveParams() {
-  return performParameterAction("/api/params", { version: state.paramsVersion, params: collectForm() });
-}
-
-async function performParameterAction(url, body) {
-  if (state.parameterActionInFlight || parametersLocked() || !state.statusAvailable) return;
-  ++state.paramsRequest;
-  const context = state.contextRevision;
-  state.parameterActionInFlight = true;
-  state.parameterError = null;
-  state.parameterNotice = null;
-  updateParameterDraftState();
-  try {
-    const payload = await fetchJson(url, { method: "POST", body: JSON.stringify(body) });
-    if (context !== state.contextRevision) return;
-    state.params = payload;
-    state.paramsVersion = state.params.version || state.paramsVersion;
-    state.paramMeta = state.params.meta || state.paramMeta;
-    renderForm(state.params.params || {});
-    state.parameterNotice = "Parameters saved.";
-    try {
-      await loadStatus();
-    } catch (error) {
-      if (context === state.contextRevision) state.parameterNotice = "Parameters saved; status refresh failed. Wait for status to reconnect before further changes.";
-    }
-  } catch (error) {
-    if (context === state.contextRevision) {
-      if (error.outcomeUnknown) {
-        state.parameterNotice = "Save outcome is unknown. Refresh status before trying again.";
-        setStatusAvailable(false, error.message);
-      } else {
-        state.parameterError = error.message;
-      }
-    }
-  } finally {
-    state.parameterActionInFlight = false;
-    updateParameterDraftState();
+  if (request !== state.paramsRequest) return;
+  const [metadata, capabilities] = results;
+  if (metadata.status === "fulfilled") state.paramMeta = metadata.value.meta || {};
+  if (capabilities.status === "fulfilled" && Array.isArray(capabilities.value.methods)) {
+    state.alignmentCapabilities = Object.fromEntries(
+      capabilities.value.methods.filter((item) => typeof item?.method === "string").map((item) => [item.method, item]),
+    );
+    state.alignmentCapabilitiesReady = Object.keys(state.alignmentCapabilities).length > 0;
+    state.alignmentCapabilitiesError = state.alignmentCapabilitiesReady ? null : "No alignment capabilities were returned.";
+  } else {
+    state.alignmentCapabilitiesReady = false;
+    state.alignmentCapabilitiesError = capabilities.reason?.message || "Alignment capabilities could not be loaded.";
   }
+  renderInitialization(state.initialization);
+  renderRunParameters();
+}
+
+function alignmentLabel(method) {
+  if (method === "none") return "None";
+  return state.alignmentCapabilities[method]?.label || String(method || "Unknown").replaceAll("_", " ").toUpperCase();
+}
+
+function syncAlignmentDraft() {
+  const scope = `${state.runId || ""}:${state.initialization?.session_id || ""}`;
+  const configuration = state.alignmentConfiguration;
+  if (state.alignmentDraftScope !== scope) {
+    state.alignmentDraftScope = scope;
+    state.alignmentDraftEdited = false;
+  }
+  if (!state.alignmentDraftEdited) state.alignmentDraft = configuration?.method ?? configuration?.configured_method ?? "none";
+  if (configuration?.confirmed) state.alignmentDraft = configuration.method;
+}
+
+function alignmentSelectable() {
+  return initializationEditable() && Boolean(state.initialization?.session_id)
+    && state.alignmentConfiguration?.can_select === true
+    && !state.alignmentConfiguration?.confirmed
+    && state.alignmentCapabilitiesReady;
+}
+
+function alignmentSelectionReady() {
+  // During a rolling upgrade the previous service can still confirm initialization.
+  if (!state.alignmentConfiguration) return true;
+  return alignmentSelectable() && state.alignmentCapabilities[state.alignmentDraft]?.available === true;
+}
+
+function renderAlignmentConfiguration() {
+  syncAlignmentDraft();
+  const configuration = state.alignmentConfiguration;
+  const method = state.alignmentDraft || "none";
+  const methods = new Set(["none", ...Object.keys(state.alignmentCapabilities), method]);
+  const optionsKey = JSON.stringify([...methods].map((value) => [value, state.alignmentCapabilities[value]]));
+  if (alignmentMethodSelect.dataset.optionsKey !== optionsKey) {
+    alignmentMethodSelect.replaceChildren();
+    methods.forEach((value) => {
+      const option = document.createElement("option");
+      const capability = state.alignmentCapabilities[value];
+      option.value = value;
+      option.textContent = value === "none" ? "None — no image alignment" : alignmentLabel(value);
+      option.disabled = capability?.available !== true;
+      if (capability?.available === false) option.textContent += " (unavailable)";
+      option.title = capability?.reason || "";
+      alignmentMethodSelect.appendChild(option);
+    });
+    alignmentMethodSelect.dataset.optionsKey = optionsKey;
+  }
+  alignmentMethodSelect.value = method;
+  alignmentMethodSelect.disabled = !alignmentSelectable();
+  const confirmed = Boolean(configuration?.confirmed);
+  alignmentConfigurationStatus.textContent = confirmed ? `confirmed · ${alignmentLabel(configuration.method)}`
+    : (state.initialization?.session_id ? `draft · ${alignmentLabel(method)}` : "waiting for initialization");
+  alignmentConfigurationStatus.className = confirmed ? "status running" : "status idle";
+  let help;
+  if (!state.statusAvailable) {
+    help = "Status is unavailable. Alignment selection is disabled until the connection recovers.";
+  } else if (confirmed) {
+    help = `${alignmentLabel(configuration.method)} was confirmed with the selected 3D candidate and is locked for this experiment.`;
+  } else if (state.initializationAction) {
+    help = "Waiting for the initialization operation to finish. Your alignment draft is retained.";
+  } else if (state.confirmedSessionId === state.initialization?.session_id && state.confirmedSessionId) {
+    help = "Candidate confirmation was accepted. Waiting for the confirmed alignment status; do not submit again.";
+  } else if (!state.initialization?.session_id) {
+    help = "Start an experiment in Central. Choose an alignment method during image marking.";
+  } else if (!configuration) {
+    help = "This service has not provided alignment configuration. Image marking remains available.";
+    alignmentConfigurationStatus.textContent = "configuration unavailable";
+  } else if (!configuration.can_select || state.initialized) {
+    help = "Alignment can be selected only during manual initialization, before confirming the candidate.";
+    alignmentConfigurationStatus.textContent = "selection locked";
+  } else if (!state.alignmentCapabilitiesReady) {
+    help = "Alignment capabilities are unavailable. Use Refresh Images to retry before confirming.";
+  } else if (state.alignmentCapabilities[method]?.available !== true) {
+    help = "This method is unavailable. Choose an available method before confirming the candidate.";
+  } else {
+    help = `Draft: ${alignmentLabel(method)}. “Confirm selected candidate” also confirms this method and locks it for this experiment. None skips image alignment.`;
+  }
+  alignmentSelectionHelp.textContent = help;
+  const unavailable = Object.values(state.alignmentCapabilities)
+    .filter((item) => item.available === false)
+    .map((item) => `${alignmentLabel(item.method)}: ${item.reason || "unavailable on this service"}`);
+  alignmentCapabilityNotes.textContent = state.alignmentCapabilitiesError || unavailable.join(" · ");
+  alignmentCapabilityNotes.hidden = !alignmentCapabilityNotes.textContent || confirmed;
+}
+
+function renderRunParameters() {
+  const snapshot = state.experimentParameters;
+  parameterRunLabel.textContent = snapshot?.label || "—";
+  parameterRunId.textContent = snapshot?.run_id || state.runId || "—";
+  parameterRunVersion.textContent = snapshot?.parameter_version ?? "—";
+  const configuration = snapshot?.alignment_configuration;
+  const alignmentMessage = configuration?.confirmed
+    ? `Confirmed alignment: ${alignmentLabel(configuration.method)}.`
+    : "Alignment has not been confirmed. The selection in Image Alignment is a local draft until candidate confirmation.";
+  runParametersStatus.textContent = !snapshot
+    ? (state.runId ? "No run parameter snapshot is available. Parameters become available after Start in Central."
+      : "No experiment has started. Parameters become available after Start in Central.")
+    : `Effective run parameters · ${alignmentMessage}`;
+  if (!state.statusAvailable) runParametersStatus.textContent = `Status unavailable; displayed values may be outdated. ${runParametersStatus.textContent}`;
+  const renderKey = JSON.stringify([snapshot?.params || {}, state.paramMeta]);
+  if (renderKey === state.parameterRenderKey) return;
+  state.parameterRenderKey = renderKey;
+  runParametersValues.replaceChildren();
+  const entries = Object.entries(snapshot?.params || {}).sort(([left], [right]) => {
+    const leftOrder = state.paramMeta[left]?.ui?.order ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = state.paramMeta[right]?.ui?.order ?? Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder || left.localeCompare(right);
+  });
+  const groups = new Map();
+  entries.forEach(([key, value]) => {
+    const meta = state.paramMeta[key] || {};
+    const section = meta.section || "Parameters";
+    if (!groups.has(section)) {
+      const group = document.createElement("section");
+      group.className = "run-parameter-group";
+      const heading = document.createElement("h3");
+      heading.textContent = section;
+      const list = document.createElement("dl");
+      list.className = "run-parameter-list";
+      group.append(heading, list);
+      groups.set(section, list);
+      runParametersValues.appendChild(group);
+    }
+    const row = document.createElement("div");
+    const label = document.createElement("dt");
+    label.textContent = `${meta.label || key}${meta.unit ? ` (${meta.unit})` : ""}`;
+    if (meta.label && meta.label !== key) {
+      const parameterKey = document.createElement("code");
+      parameterKey.textContent = key;
+      label.appendChild(parameterKey);
+    }
+    const content = document.createElement("dd");
+    content.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    row.append(label, content);
+    groups.get(section).appendChild(row);
+  });
 }
 
 function initializationEditable() {
   return state.statusAvailable && state.experimentLifecycleStatus === "initializing"
+    && !state.initialized && !state.alignmentConfiguration?.confirmed
     && !state.initializationAction && !state.dscgrInFlight
     && (!state.confirmedSessionId || state.confirmedSessionId !== state.initialization?.session_id);
 }
@@ -798,6 +678,7 @@ function renderInitialization(payload) {
   }
   ensure3DSnapshotScope(payload);
   state.initialization = payload;
+  renderAlignmentConfiguration();
   const hasSession = Boolean(payload?.session_id);
   const step = payload?.current_step || null;
   const selected3DChoice = payload?.selected_3d_choice;
@@ -818,6 +699,7 @@ function renderInitialization(payload) {
   undoInitButton.disabled = !editable || !payload?.can_undo;
   resetInitButton.disabled = !editable || !hasSession;
   confirm3DChoiceButton.disabled = !editable
+    || !alignmentSelectionReady()
     || payload?.status !== "ready_for_3d"
     || selected3DChoice == null;
   runDscgrButton.disabled = !state.statusAvailable || payload?.status !== "ready_for_3d" || state.dscgrInFlight || Boolean(state.initializationAction);
@@ -1553,6 +1435,7 @@ async function runDscgr() {
   const context = state.contextRevision;
   const sessionId = state.initialization.session_id;
   runDscgrButton.disabled = true;
+  renderInitialization(state.initialization);
   dscgrStatus.textContent = "running";
   try {
     const result = await fetchJson("/api/dscgr/run", {
@@ -1575,16 +1458,36 @@ async function runDscgr() {
   }
 }
 
-toggleParametersButton.addEventListener("click", () => {
-  setDrawerOpen(!state.drawerOpen);
+runParametersButton.addEventListener("click", () => {
+  parameterDialogOpener = document.activeElement;
+  renderRunParameters();
+  runParametersDialog.showModal();
+  document.body.classList.add("modal-open");
+  document.querySelector("#run-parameters-heading").focus();
 });
 
-saveParamsButton.addEventListener("click", async () => {
-  await saveParams();
+closeRunParametersButton.addEventListener("click", () => runParametersDialog.close());
+runParametersDialog.addEventListener("close", () => {
+  document.body.classList.remove("modal-open");
+  if (parameterDialogOpener?.isConnected) parameterDialogOpener.focus();
+});
+runParametersDialog.addEventListener("click", (event) => {
+  if (event.target !== runParametersDialog) return;
+  const bounds = runParametersDialog.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right
+      || event.clientY < bounds.top || event.clientY > bounds.bottom) runParametersDialog.close();
 });
 
-resetParamsButton.addEventListener("click", async () => {
-  await performParameterAction("/api/params/reset", {});
+alignmentMethodSelect.addEventListener("change", () => {
+  if (!alignmentSelectable()) {
+    renderAlignmentConfiguration();
+    return;
+  }
+  const method = alignmentMethodSelect.value;
+  if (state.alignmentCapabilities[method]?.available !== true) return;
+  state.alignmentDraft = method;
+  state.alignmentDraftEdited = true;
+  renderInitialization(state.initialization);
 });
 
 refreshImagesButton.addEventListener("click", async () => {
@@ -1594,7 +1497,7 @@ refreshImagesButton.addEventListener("click", async () => {
   state.sourceError = null;
   renderExperimentSource(state.experimentSource);
   try {
-    await refreshOverview();
+    await Promise.all([loadParameterMetadata(), refreshOverview()]);
     if (!state.imageReady && state.initialization?.session_id) {
       state.currentImageKey = null;
       maybeLoadInitializationImage(state.initialization);
@@ -1638,12 +1541,16 @@ candidateControls.addEventListener("click", async (event) => {
 
 confirm3DChoiceButton.addEventListener("click", async () => {
   if (!initializationEditable() || !state.initialization?.session_id
+      || !alignmentSelectionReady()
       || state.initialization?.selected_3d_choice == null
       || state.initialization?.status !== "ready_for_3d") {
     return;
   }
   captureCurrent3DSnapshot();
-  await performInitializationAction("confirm", {}, "Confirming selected 3D candidate…", "Candidate confirmed; baseline established.", { refresh: true });
+  const fields = state.alignmentConfiguration ? { alignment_method: state.alignmentDraft } : {};
+  const successMessage = state.alignmentConfiguration
+    ? "Candidate and alignment confirmed; baseline established." : "Candidate confirmed; baseline established.";
+  await performInitializationAction("confirm", fields, "Confirming selected candidate…", successMessage, { refresh: true });
 });
 
 runDscgrButton.addEventListener("click", async () => {
@@ -1724,42 +1631,16 @@ window.addEventListener("resize", () => {
 
 async function initializePage() {
   await loadUiConfig();
-  try {
-    await refreshOverview();
-  } catch (error) {
-    if (!state.statusAvailable) {
-      statusText.textContent = error.message;
-      statusText.className = "status error";
-    }
-  }
-  try {
-    await loadParams();
-  } catch (error) {
-    state.parameterError = error.message;
-    updateParameterDraftState();
-  }
+  await Promise.allSettled([loadParameterMetadata(), refreshOverview()]);
 }
 initializePage();
 
-window.addEventListener("focus", () => {
-  if (state.parameterActionInFlight) {
-    return;
-  }
-  const parameterRefresh = state.parameterUnsavedCount === 0 ? loadParams() : Promise.resolve();
-  Promise.all([parameterRefresh, refreshOverview()]).catch((error) => {
-    statusText.textContent = error.message;
-    statusText.className = "status error";
-  });
-});
-
+function refreshPage() {
+  Promise.allSettled([loadParameterMetadata(), refreshOverview()]);
+}
+window.addEventListener("focus", refreshPage);
 document.addEventListener("visibilitychange", () => {
-  if (!state.parameterActionInFlight && !document.hidden) {
-    const parameterRefresh = state.parameterUnsavedCount === 0 ? loadParams() : Promise.resolve();
-    Promise.all([parameterRefresh, refreshOverview()]).catch((error) => {
-      statusText.textContent = error.message;
-      statusText.className = "status error";
-    });
-  }
+  if (!document.hidden) refreshPage();
 });
 
 window.setInterval(refreshLiveStatus, 1000);
