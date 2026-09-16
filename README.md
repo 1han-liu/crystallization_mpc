@@ -60,6 +60,10 @@ python -m pip install -e .
 ```
 
 ## Notes
+- For the updated Run Configuration and a no-image/no-device local simulation,
+  follow [Fresh-clone simulation setup](docs/fresh-simulation-setup.md).
+  It covers local RabbitMQ configuration, optional Grafana, and the launcher's
+  permanent cleanup of previously finished managed simulation sessions.
 - Keep generated Python bytecode files out of commits and release packages.
 - `.dockerignore` excludes local environments and caches from Docker build context.
 - Central and Controller use the shared application image. GSensor uses its own image so Torch/Kornia and the pinned LoFTR checkpoint do not enlarge the other services.

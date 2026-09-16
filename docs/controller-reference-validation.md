@@ -138,6 +138,82 @@ baseline-compatible and corrected-behavior tests.
 - `CONTROLLER_OPCUA_WRITE_ENABLED=false` is a separate, default-deny write gate.
   Shadow mode may read live state but its write-call count must remain zero.
 
+### R2021a adaptation strategy audit — 2026-09-09 (NOT fully accepted)
+
+The requested change preserves the frozen MATLAB adaptation strategy, rather
+than introducing positive-sigma sample filtering or continuing a failed cycle
+as a valid controller output. Baseline/default parameters were not edited.
+
+- Keep the original selection order: `to_adapt`, non-NaN G, positive G,
+  most-recent window, `abs(sigma)<1e-15` replacement, minimum count 30.
+- Evaluate the original `log(k0 * sigma.^n * exp(-EA/R/T))` objective, including
+  complex arithmetic. The former `n*log(sigma)` form and blanket sigma/T domain
+  rejection did not reproduce all reference inputs (e.g. negative sigma with
+  fixed even integer n). Initial objective/finite-difference errors now carry
+  the observed MATLAB identifiers. These are compatibility diagnostics; Python
+  does not actually invoke fmincon.
+- Failed adaptation leaves caller params/count unchanged, but preserves the
+  already updated histories, controller/growth EKFs, integrals and simulated
+  setpoint. It logs a warning, skips subsequent parameter recording, returns an
+  invalid result (no device write), and permits the next tick. When recording
+  resumes, MATLAB's indexed-assignment gaps in kinetic histories are zero-filled.
+- State schema is now **2** to represent partial parameter histories. Old
+  schema-1 checkpoints are rejected, not silently resumed under changed failure
+  semantics. Restart a simulation to generate a new checkpoint; old evidence is
+  retained. Other optimization/input safety handling is unchanged by this patch.
+
+Actual reference runtime: `/home/laniakea/.local/MATLAB/R2021a/bin/matlab`,
+R2021a Update 8. The separate `/usr/local/MATLAB/R2021a` installation lacks the
+required toolbox implementations and was not used to produce the oracles.
+
+New frozen fixtures:
+
+- `tests/controller/fixtures/matlab_r2021a_adaptation_edges.mat`: 70 direct
+  calls of the unchanged MATLAB function, 10 cases × seven modes. Includes
+  the same Python tick-62 input, 29/30 gates, negative sigma with integer n,
+  tiny negative/zero sigma, NaN sigma/T, zero T and recent-window truncation.
+- `tests/controller/fixtures/matlab_r2021a_adaptation_partial_state.mat`:
+  original MATLAB adaptation/recording snippets with supplied histories;
+  verifies partial state and zero-filled gaps across failures. This is NOT a
+  full MATLAB closed-loop trajectory replay.
+
+Results: **70/70 outcome/count/error-category matches**. Of 38 successful MATLAB
+function cases, **25 meet the existing rtol=1e-5 parameter gate; 13 fail it**.
+The existing nine numeric-parity tests still pass. The full controller suite
+has **201 passed, 13 failed**. The failing tests are retained as real failures,
+not skipped/xfail; tolerances were not relaxed.
+
+A read-only comparison with the pre-change HEAD implementation found that 12
+of these numerical failures already existed on the same newly added inputs.
+Across 35 previously accepted cases, old/new Python parameter differences were
+at most 1.28e-16 relative. The remaining failed case is a fixed-integer-n input
+that the former blanket sigma rejection did not allow to fit at all.
+
+Remaining acceptance blocker: SciPy bounded minimization is not MATLAB
+`fmincon`'s interior-point optimizer. It has different iterations and stopping
+behavior. Initial-domain checks and ignoring a finite iterate's success flag
+do not make the solvers identical. No fixture-specific corrections were added.
+Exact fmincon-backed runtime execution would introduce a MATLAB dependency and
+requires a separate deployment decision. Full shared-input/noise/seed MATLAB
+closed-loop acceptance is still **NOT RUN**, pending this solver decision.
+
+The repeated Python-only 22-scenario audit remains 15 PASS / 7 FAIL. All seven
+default adaptation cases still fail starting at tick 62; replaying the identical
+tick-62 input in MATLAB also fails with `optim:barrier:UsrObjUndefAtX0`.
+Do not confuse successful failure reproduction with successful parameter fitting.
+
+Reproduce the Python checks from the project root:
+
+```bash
+.venv/bin/python -B -m pytest tests/controller -q -p no:cacheprovider
+.venv/bin/python -B scripts/report_adaptation_reference.py --output .runtime/new-comparison.json
+.venv/bin/python -B scripts/run_controller_simulation.py --output .runtime/new-simulation
+```
+
+All three commands intentionally exit nonzero while the respective failed gates
+remain. Simulation outputs include source hashes; previous reports were not
+overwritten. No real experiment, service deployment, commit or push was performed.
+
 ## Verification gates
 
 Algebra uses `rtol=1e-10, atol=1e-12`; ODE/EKF uses `rtol=1e-6` plus

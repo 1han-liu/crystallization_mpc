@@ -69,6 +69,18 @@ class ControllerAdapter(ABC):
 
         return None
 
+    def runtime_configuration(self) -> Mapping[str, Any] | None:
+        """Return actual editable settings, or None when unsupported."""
+        return None
+
+    def update_runtime(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Atomically apply validated settings; never report a no-op as success."""
+        raise NotImplementedError("This Controller adapter does not support runtime updates.")
+
+    def adaptation_status(self) -> Mapping[str, Any] | None:
+        """Report actual fitting progress when supported, not merely enablement."""
+        return None
+
     def export_state(self) -> Mapping[str, Any] | None:
         """Return restart-safe algorithm state, or ``None`` if unsupported."""
 

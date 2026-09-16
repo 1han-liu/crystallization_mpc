@@ -81,6 +81,19 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     ) -> None:
         self.controller.set_adaptation(enabled, mode, event)
 
+    def runtime_configuration(self) -> Mapping[str, Any] | None:
+        if not self.controller.configured:
+            return None
+        return self.controller.runtime_configuration()
+
+    def update_runtime(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.controller.update_runtime(changes)
+
+    def adaptation_status(self) -> Mapping[str, Any] | None:
+        if not self.controller.configured:
+            return None
+        return self.controller.adaptation_status()
+
     def export_state(self) -> Mapping[str, Any] | None:
         return self.controller.export_state()
 

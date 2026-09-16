@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import copy
 import math
+import logging
 from typing import Any, Mapping
 
 import numpy as np
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
+from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
 
 from .adaptation import AdaptationError, adapt_growth_parameters
 from .control import (
@@ -37,7 +39,8 @@ from .thermodynamics import calc_G, calc_relative_sigma, calc_sigma
 
 
 BASELINE_COMMIT = "ce885a13e0a3e95ac0509e06eebf9d7cd1d418b0"
-ALGORITHM_STATE_SCHEMA_VERSION = 1
+ALGORITHM_STATE_SCHEMA_VERSION = 2
+logger = logging.getLogger(__name__)
 
 HISTORY_KEYS = (
     "t", "T", "T_KF", "T_j_set", "T_j", "dT_dt", "dT_dt_KF",
@@ -114,6 +117,10 @@ class CrystallizationController:
         self.ekf_k_0: ExtendedKalmanFilter | None = None
         self.ekf_E_A: ExtendedKalmanFilter | None = None
         self.last_adaptation_pause_reason: str | None = None
+        self.adaptation_diagnostics: dict[str, Any] = {
+            "last_status": "not_run", "fit_count": 0, "failure_count": 0,
+            "last_tick": None, "last_mode": None,
+        }
 
     def configure(self, params: Mapping[str, Any], run_id: str) -> None:
         if not isinstance(params, Mapping):
@@ -444,6 +451,13 @@ class CrystallizationController:
                     self.history["to_adapt"], int(self.params["max_num_adapt"]),
                     int(self.params["min_num_adapt"]), self.adaptation_mode,
                 )
+                fitted = self.num_adapt >= int(self.params["min_num_adapt"])
+                self.adaptation_diagnostics.update(
+                    last_status="fit_succeeded" if fitted else "waiting_for_samples",
+                    last_tick=self.frame_index, last_mode=self.adaptation_mode,
+                )
+                if fitted:
+                    self.adaptation_diagnostics["fit_count"] += 1
                 self.ekf.transition = lambda value: state_transition_function(self.params, value, dt)
                 self.ekf.measurement = lambda value: np.array([value[0], value[2]])
             else:
@@ -451,7 +465,15 @@ class CrystallizationController:
                 self.history["to_adapt"].append(False)
                 if self.adaptation_enabled:
                     self.last_adaptation_pause_reason = pause_reason or "adaptation_not_allowed"
+                    self.adaptation_diagnostics.update(
+                        last_status="waiting_for_samples", last_tick=self.frame_index,
+                        last_mode=self.adaptation_mode,
+                    )
             for key in ("n", "k_0", "E_A"):
+                # MATLAB indexed assignment fills intervening unassigned
+                # elements with zero after failed adaptation cycles. Do not
+                # invent a parameter record during a failed cycle itself.
+                self.history[key].extend([0.0] * (len(self.history["t"]) - 1 - len(self.history[key])))
                 self.history[key].append(float(self.params[key]))
 
             numerical = (T_j_set, sigma, G_model, objective, self.params["n"],
@@ -470,7 +492,21 @@ class CrystallizationController:
                 k_0=float(self.params["k_0"]), n=float(self.params["n"]),
                 t_lag=lag, t_lag_perc=lag_percentage,
             )
-        except (OptimizationError, AdaptationError, FloatingPointError) as exc:
+        except AdaptationError as exc:
+            # controller_for_gui's outer catch does not undo earlier control,
+            # history, integral or EKF changes. Failed function output assignment
+            # leaves caller params/num_adapt unchanged, and skips later recording
+            # and device writes. The next tick continues with those partial states.
+            self.last_adaptation_pause_reason = str(exc)
+            self.adaptation_diagnostics.update(
+                last_status="fit_failed", last_tick=self.frame_index,
+                last_mode=self.adaptation_mode,
+            )
+            self.adaptation_diagnostics["failure_count"] += 1
+            self.adaptation_diagnostics["last_failure_reason"] = str(exc)
+            logger.warning("Parameter adaptation failed at tick %s: %s", self.frame_index, exc)
+            return ControllerStepResult(valid=False, error=str(exc))
+        except (OptimizationError, FloatingPointError) as exc:
             if rollback_state is not None:
                 self._restore_numeric_state(rollback_state)
             return ControllerStepResult(valid=False, error=str(exc))
@@ -484,6 +520,60 @@ class CrystallizationController:
         if not isinstance(event, Mapping):
             raise TypeError("Seed event must be a mapping.")
         self.pending_seed = True
+
+    def runtime_configuration(self) -> dict[str, Any]:
+        return {
+            "control_target": self.params["target"],
+            "sigma_set": (
+                self.params["target_set"] if self.params["target"] == "sigma"
+                else self.params["sigma_set"]
+            ),
+            "G_set": (
+                self.params["target_set"] if self.params["target"] == "G"
+                else self.params["G_set"]
+            ),
+            "adaptation_enabled": self.adaptation_enabled,
+            "adaptation_mode": self.adaptation_mode,
+        }
+
+    def adaptation_status(self) -> dict[str, Any]:
+        return {
+            **copy.deepcopy(self.adaptation_diagnostics),
+            "enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
+            "sample_count": self.num_adapt,
+            "minimum_samples": int(self.params["min_num_adapt"]),
+            "pause_reason": self.last_adaptation_pause_reason,
+        }
+
+    def update_runtime(self, changes: Mapping[str, Any]) -> dict[str, Any]:
+        """Change only runtime settings, preserving every numerical state."""
+        if not self.running:
+            raise RuntimeError("Cannot update a Controller that is not running.")
+        patch = validate_runtime_changes(changes)
+        configuration = {**self.runtime_configuration(), **patch}
+        # Validate the whole candidate before mutating anything.
+        validate_runtime_changes(configuration)
+        candidate = dict(self.params)
+        candidate["sigma_set"] = configuration["sigma_set"]
+        candidate["G_set"] = configuration["G_set"]
+        target = configuration["control_target"]
+        target_changed = target != self.params["target"]
+        candidate["target"] = target
+        if target_changed or f"{target}_set" in patch:
+            candidate["target_set"] = configuration[f"{target}_set"]
+        if target_changed:
+            # Do not recalculate T_init, steps or seed_time during an experiment.
+            for key in ("K_P_T", "K_I_T", "dT_dt_min", "dT_dt_max", "t_lag_threshold_perc"):
+                value = float(candidate[f"{key}_{target}"])
+                if not math.isfinite(value):
+                    raise ValueError(f"{key}_{target} must be finite.")
+                candidate[key] = value
+            if candidate["dT_dt_min"] > candidate["dT_dt_max"]:
+                raise ValueError("Target temperature gradient bounds are inverted.")
+        self.params = candidate
+        self.adaptation_enabled = configuration["adaptation_enabled"]
+        self.adaptation_mode = configuration["adaptation_mode"]
+        return self.runtime_configuration()
 
     def set_adaptation(
         self, enabled: bool, mode: str, event: Mapping[str, Any] | None = None
@@ -523,7 +613,8 @@ class CrystallizationController:
             "filters": filters,
             "adaptation": {"enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
                            "num_adapt": self.num_adapt,
-                           "pause_reason": self.last_adaptation_pause_reason},
+                           "pause_reason": self.last_adaptation_pause_reason,
+                           "diagnostics": copy.deepcopy(self.adaptation_diagnostics)},
         })
 
     def restore_state(
@@ -550,8 +641,11 @@ class CrystallizationController:
                 raise ValueError("Recovery history is incompatible.")
             frame_index = int(state["frame_index"])
             restored = {key: list(history[key]) for key in HISTORY_KEYS}
-            history_lengths = {len(values) for values in restored.values()}
-            if len(history_lengths) != 1 or next(iter(history_lengths)) > frame_index:
+            history_lengths = {len(values) for key, values in restored.items() if key not in {"n", "k_0", "E_A"}}
+            parameter_lengths = {len(restored[key]) for key in ("n", "k_0", "E_A")}
+            if (len(history_lengths) != 1 or next(iter(history_lengths)) > frame_index
+                    or len(parameter_lengths) != 1
+                    or next(iter(parameter_lengths)) > next(iter(history_lengths))):
                 raise ValueError("Recovery history lengths are incompatible.")
             self.history = restored
             for key, values in self.history.items():
@@ -573,6 +667,18 @@ class CrystallizationController:
             self.set_adaptation(bool(adaptation["enabled"]), str(adaptation["mode"]))
             self.num_adapt = int(adaptation["num_adapt"])
             self.last_adaptation_pause_reason = adaptation.get("pause_reason")
+            diagnostics = adaptation.get("diagnostics")
+            if diagnostics is not None:
+                if not isinstance(diagnostics, dict):
+                    raise ValueError("Adaptation diagnostics must be an object.")
+                if diagnostics.get("last_status") not in {
+                    "not_run", "waiting_for_samples", "fit_succeeded", "fit_failed"
+                }:
+                    raise ValueError("Unsupported adaptation diagnostic status.")
+                for key in ("fit_count", "failure_count"):
+                    if type(diagnostics.get(key)) is not int or diagnostics[key] < 0:
+                        raise ValueError("Invalid adaptation diagnostic count.")
+                self.adaptation_diagnostics = copy.deepcopy(diagnostics)
             # Rebuild closures after restoring possibly adapted E_A/k_0/n;
             # then restore the numerical state and covariance below.
             initial_T = (

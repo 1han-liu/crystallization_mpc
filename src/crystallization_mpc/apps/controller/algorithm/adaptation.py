@@ -23,16 +23,48 @@ ADAPTATION_MODES = (
 class AdaptationError(RuntimeError):
     """Expected numerical failure during parameter adaptation."""
 
+    def __init__(self, message: str, *, reference_identifier: str | None = None):
+        super().__init__(message)
+        self.reference_identifier = reference_identifier
 
-def _bounded_minimum(function, lower: float, upper: float) -> float:
+
+def _bounded_minimum(function, lower: float, upper: float, *, initial: float) -> float:
+    # R2021a fmincon evaluates the objective and forward-difference derivative
+    # at the supplied initial guess. In particular, negative sigma with an
+    # integer n can have a real objective but an undefined derivative in n.
+    def defined(value):
+        return bool(np.isfinite(value) and np.imag(value) == 0)
+
+    value = function(initial)
+    if not defined(value):
+        raise AdaptationError(
+            "Objective function is undefined at initial point. Fmincon cannot continue.",
+            reference_identifier="optim:barrier:UsrObjUndefAtX0",
+        )
+    delta = np.sqrt(np.finfo(float).eps) * max(abs(initial), 1.0)
+    shifted = initial + delta if initial + delta <= upper else initial - delta
+    if not defined(function(shifted)):
+        raise AdaptationError(
+            "Finite difference derivatives at initial point contain Inf, NaN, or complex values. Fmincon cannot continue.",
+            reference_identifier="optim:barrier:DerivUndefAtX0",
+        )
+
+    def real_objective(x):
+        result = function(x)
+        # A non-finite trial is not an input sample filter. The solver may
+        # move away from it, as opposed to rejecting the initial objective.
+        return float(np.real(result)) if defined(result) else math.inf
+
     result = minimize_scalar(
-        function,
+        real_objective,
         bounds=(float(lower), float(upper)),
         method="bounded",
         options={"maxiter": 100, "xatol": 1e-8},
     )
-    if not result.success or not math.isfinite(float(result.x)):
+    if not math.isfinite(float(result.x)) or not math.isfinite(float(result.fun)):
         raise AdaptationError(f"Growth adaptation failed: {result.message}")
+    # The MATLAB caller requests b_min only, not exitflag. Do not add an
+    # independent success-flag gate for a finite returned iterate.
     return float(result.x)
 
 
@@ -70,22 +102,15 @@ def adapt_growth_parameters(
     updated = dict(params)
     if count < int(min_num_adapt):
         return updated, count
-    if not np.isfinite(sigma).all() or not np.isfinite(temperature).all():
-        raise AdaptationError("Adaptation inputs contain non-finite sigma or temperature.")
-    if np.any(sigma <= 0):
-        raise AdaptationError(
-            "Adaptation requires positive supersaturation for the logarithmic model."
-        )
-    if np.any(temperature <= 0):
-        raise AdaptationError("Adaptation temperatures must be positive kelvin.")
-
-    log_growth = np.log(growth)
     R = float(updated["R"])
 
-    def residual(n: float, log_k_0: float, E_A: float) -> float:
-        predicted_log = log_k_0 + n * np.log(sigma) - E_A / R / temperature
-        value = float(np.sum((predicted_log - log_growth) ** 2))
-        return value if math.isfinite(value) else math.inf
+    def residual(n: float, log_k_0: float, E_A: float):
+        # Preserve log(k0 * sigma.^n * exp(...)), including MATLAB's complex
+        # power/log semantics. n*log(sigma) is not equivalent for negative
+        # sigma and changes both domain failures and underflow behavior.
+        with np.errstate(all="ignore"):
+            prediction = np.exp(log_k_0) * np.emath.power(sigma, n) * np.exp(-E_A / R / temperature)
+            return np.sum((np.emath.log(prediction) - np.log(growth)) ** 2)
 
     if adaptive_mode in {"E_A", "E_A_and_k_0", "E_A_and_n", "all"}:
         current = float(updated["E_A"])
@@ -96,6 +121,7 @@ def adapt_growth_parameters(
                 ),
                 current / 2.0,
                 current * 2.0,
+                initial=current,
             )
         )
 
@@ -107,6 +133,7 @@ def adapt_growth_parameters(
             ),
             current / 2.0,
             current * 2.0,
+            initial=current,
         )
         updated["k_0"] = math.exp(optimum)
 
@@ -119,6 +146,7 @@ def adapt_growth_parameters(
                 ),
                 current / 2.0,
                 current * 2.0,
+                initial=current,
             )
         )
 

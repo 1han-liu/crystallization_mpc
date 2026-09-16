@@ -1,0 +1,11 @@
+{
+  "name": "Runtime configuration applied",
+  "enable": true,
+  "hide": false,
+  "iconColor": "#5794F2",
+  "datasource": {"type": "influxdb", "uid": "crystallization-influxdb"},
+  "target": {
+    "refId": "RuntimeEvents",
+    "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_runtime_event\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"text\")\n  |> rename(columns: {_value: \"text\"})\n  |> keep(columns: [\"_time\", \"text\", \"run_id\", \"event_id\"])\n  |> group()"
+  }
+}

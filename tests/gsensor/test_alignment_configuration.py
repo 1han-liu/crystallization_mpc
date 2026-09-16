@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from html.parser import HTMLParser
 
 import pytest
 
@@ -39,14 +40,27 @@ def test_capability_endpoint_reports_every_configured_method() -> None:
     assert all(isinstance(item["available"], bool) for item in methods)
 
 
-@pytest.mark.parametrize(
-    "relative_path",
-    [
-        "src/crystallization_mpc/apps/central/ui/static/app.js",
-        "src/crystallization_mpc/apps/gsensor/ui/static/app.js",
-    ],
-)
-def test_parameter_ui_renders_choice_metadata_as_select(relative_path: str) -> None:
-    source = (ROOT / relative_path).read_text(encoding="utf-8")
+def test_central_parameter_ui_renders_choice_metadata_as_select() -> None:
+    source = (ROOT / "src/crystallization_mpc/apps/central/ui/static/app.js").read_text(encoding="utf-8")
     assert "Array.isArray(meta.choices)" in source
     assert 'document.createElement("select")' in source
+
+
+def test_gsensor_has_dedicated_initialization_selector() -> None:
+    # GSensor now uses a dedicated selector, not Central's parameter editor.
+    # Its availability/draft/confirmation behavior is exercised in alignment_ui.test.cjs.
+    class Elements(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.elements = []
+
+        def handle_starttag(self, tag, attrs):
+            self.elements.append((tag, dict(attrs)))
+
+    document = Elements()
+    document.feed((ROOT / "src/crystallization_mpc/apps/gsensor/ui/static/index.html").read_text())
+    matches = [(tag, attrs) for tag, attrs in document.elements if attrs.get("id") == "alignment-method-select"]
+    assert len(matches) == 1
+    tag, attrs = matches[0]
+    assert tag == "select" and "disabled" in attrs  # Fail closed before status/capabilities arrive.
+    assert any(tag == "label" and attrs.get("for") == "alignment-method-select" for tag, attrs in document.elements)

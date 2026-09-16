@@ -12,6 +12,20 @@
         "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts",
         "type": "dashboard"
+      },
+      {
+        "name": "Runtime configuration applied",
+        "enable": true,
+        "hide": false,
+        "iconColor": "#5794F2",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "crystallization-influxdb"
+        },
+        "target": {
+          "refId": "RuntimeEvents",
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_runtime_event\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"text\")\n  |> rename(columns: {_value: \"text\"})\n  |> keep(columns: [\"_time\", \"text\", \"run_id\", \"event_id\"])\n  |> group()"
+        }
       }
     ]
   },
@@ -72,7 +86,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -91,7 +105,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "T [°C]"
+                "value": "T [\u00b0C]"
               }
             ]
           },
@@ -103,7 +117,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "T · ${__field.labels.run_id}"
+                "value": "T \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -122,7 +136,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "T_KF · ${__field.labels.run_id}"
+                "value": "T_KF \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -151,7 +165,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "T_j · ${__field.labels.run_id}"
+                "value": "T_j \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -170,7 +184,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "T_j,set · ${__field.labels.run_id}"
+                "value": "T_j,set \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -227,7 +241,7 @@
       ],
       "title": "Reactor & jacket temperature",
       "type": "timeseries",
-      "description": "反应器温度、滤波温度、夹套温度和夹套设定值。温度由 K 换算为 °C。T_j_set 是计算设定值，不代表设备已执行。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u53cd\u5e94\u5668\u6e29\u5ea6\u3001\u6ee4\u6ce2\u6e29\u5ea6\u3001\u5939\u5957\u6e29\u5ea6\u548c\u5939\u5957\u8bbe\u5b9a\u503c\u3002\u6e29\u5ea6\u7531 K \u6362\u7b97\u4e3a \u00b0C\u3002T_j_set \u662f\u8ba1\u7b97\u8bbe\u5b9a\u503c\uff0c\u4e0d\u4ee3\u8868\u8bbe\u5907\u5df2\u6267\u884c\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -279,7 +293,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -298,7 +312,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "T [°C]"
+                "value": "T [\u00b0C]"
               }
             ]
           },
@@ -310,7 +324,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "T · ${__field.labels.run_id}"
+                "value": "T \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -329,7 +343,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "T_KF · ${__field.labels.run_id}"
+                "value": "T_KF \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -386,7 +400,7 @@
       ],
       "title": "Reactor temperature",
       "type": "timeseries",
-      "description": "反应器温度 T 与滤波值 T_KF，显示单位 °C。滤波曲线需要 Controller 实际输出。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u53cd\u5e94\u5668\u6e29\u5ea6 T \u4e0e\u6ee4\u6ce2\u503c T_KF\uff0c\u663e\u793a\u5355\u4f4d \u00b0C\u3002\u6ee4\u6ce2\u66f2\u7ebf\u9700\u8981 Controller \u5b9e\u9645\u8f93\u51fa\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -438,7 +452,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -469,7 +483,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "dT/dt · ${__field.labels.run_id}"
+                "value": "dT/dt \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -488,7 +502,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "dT_KF/dt · ${__field.labels.run_id}"
+                "value": "dT_KF/dt \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -517,7 +531,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "dT_set/dt · ${__field.labels.run_id}"
+                "value": "dT_set/dt \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -574,7 +588,7 @@
       ],
       "title": "Temperature gradient",
       "type": "timeseries",
-      "description": "温度变化率及设定值，单位 K/s；这里的温差变化率不减 273.15。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u6e29\u5ea6\u53d8\u5316\u7387\u53ca\u8bbe\u5b9a\u503c\uff0c\u5355\u4f4d K/s\uff1b\u8fd9\u91cc\u7684\u6e29\u5dee\u53d8\u5316\u7387\u4e0d\u51cf 273.15\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -626,7 +640,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -637,7 +651,7 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "suffix:g/gH₂O"
+                "value": "suffix:g/gH\u2082O"
               },
               {
                 "id": "decimals",
@@ -645,7 +659,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "c [g/gH₂O]"
+                "value": "c [g/gH\u2082O]"
               }
             ]
           },
@@ -657,7 +671,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "c · ${__field.labels.run_id}"
+                "value": "c \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -676,7 +690,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "c_KF · ${__field.labels.run_id}"
+                "value": "c_KF \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -733,7 +747,7 @@
       ],
       "title": "Concentration",
       "type": "timeseries",
-      "description": "浓度及滤波值，按项目约定显示 g/gH₂O；设备接入时需要保证传入值遵守这一单位。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u6d53\u5ea6\u53ca\u6ee4\u6ce2\u503c\uff0c\u6309\u9879\u76ee\u7ea6\u5b9a\u663e\u793a g/gH\u2082O\uff1b\u8bbe\u5907\u63a5\u5165\u65f6\u9700\u8981\u4fdd\u8bc1\u4f20\u5165\u503c\u9075\u5b88\u8fd9\u4e00\u5355\u4f4d\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -785,7 +799,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -796,7 +810,7 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "suffix:(g/gH₂O)/s"
+                "value": "suffix:(g/gH\u2082O)/s"
               },
               {
                 "id": "decimals",
@@ -804,7 +818,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "dc/dt [(g/gH₂O)/s]"
+                "value": "dc/dt [(g/gH\u2082O)/s]"
               }
             ]
           },
@@ -816,7 +830,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "dc/dt · ${__field.labels.run_id}"
+                "value": "dc/dt \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -835,7 +849,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "dc_KF/dt · ${__field.labels.run_id}"
+                "value": "dc_KF/dt \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -892,7 +906,7 @@
       ],
       "title": "Concentration gradient",
       "type": "timeseries",
-      "description": "浓度变化率及滤波值，单位 (g/gH₂O)/s。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u6d53\u5ea6\u53d8\u5316\u7387\u53ca\u6ee4\u6ce2\u503c\uff0c\u5355\u4f4d (g/gH\u2082O)/s\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -944,7 +958,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -963,7 +977,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "σ [-]"
+                "value": "\u03c3 [-]"
               }
             ]
           },
@@ -975,7 +989,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "σ · ${__field.labels.run_id}"
+                "value": "\u03c3 \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -994,7 +1008,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "σ_set · ${__field.labels.run_id}"
+                "value": "\u03c3_set \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1023,7 +1037,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "objective · ${__field.labels.run_id}"
+                "value": "objective \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1050,7 +1064,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Absolute target error · ${__field.labels.run_id}"
+                "value": "Absolute target error \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1107,7 +1121,7 @@
       ],
       "title": "Target & obj. fun (sigma)",
       "type": "timeseries",
-      "description": "只显示明确标记为 sigma 目标的记录。左轴：实际目标、设定值与绝对误差；右轴：优化目标函数值 objective。没有目标类型标签的历史记录不在此图显示。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u53ea\u663e\u793a\u660e\u786e\u6807\u8bb0\u4e3a sigma \u76ee\u6807\u7684\u8bb0\u5f55\u3002\u5de6\u8f74\uff1a\u5b9e\u9645\u76ee\u6807\u3001\u8bbe\u5b9a\u503c\u4e0e\u7edd\u5bf9\u8bef\u5dee\uff1b\u53f3\u8f74\uff1a\u4f18\u5316\u76ee\u6807\u51fd\u6570\u503c objective\u3002\u6ca1\u6709\u76ee\u6807\u7c7b\u578b\u6807\u7b7e\u7684\u5386\u53f2\u8bb0\u5f55\u4e0d\u5728\u6b64\u56fe\u663e\u793a\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -1159,7 +1173,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -1170,7 +1184,7 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "suffix:μm/s"
+                "value": "suffix:\u03bcm/s"
               },
               {
                 "id": "decimals",
@@ -1178,7 +1192,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "G [μm/s]"
+                "value": "G [\u03bcm/s]"
               }
             ]
           },
@@ -1190,7 +1204,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G · ${__field.labels.run_id}"
+                "value": "G \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1209,7 +1223,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_set · ${__field.labels.run_id}"
+                "value": "G_set \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1238,7 +1252,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "objective · ${__field.labels.run_id}"
+                "value": "objective \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1273,7 +1287,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Absolute target error · ${__field.labels.run_id}"
+                "value": "Absolute target error \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1330,7 +1344,7 @@
       ],
       "title": "Target & obj. fun (G)",
       "type": "timeseries",
-      "description": "只显示明确标记为 G 目标的记录。左轴由 m/s 换算为 μm/s；右轴为优化目标函数值 objective，保持原值。没有目标类型标签的历史记录不在此图显示。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u53ea\u663e\u793a\u660e\u786e\u6807\u8bb0\u4e3a G \u76ee\u6807\u7684\u8bb0\u5f55\u3002\u5de6\u8f74\u7531 m/s \u6362\u7b97\u4e3a \u03bcm/s\uff1b\u53f3\u8f74\u4e3a\u4f18\u5316\u76ee\u6807\u51fd\u6570\u503c objective\uff0c\u4fdd\u6301\u539f\u503c\u3002\u6ca1\u6709\u76ee\u6807\u7c7b\u578b\u6807\u7b7e\u7684\u5386\u53f2\u8bb0\u5f55\u4e0d\u5728\u6b64\u56fe\u663e\u793a\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -1382,7 +1396,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -1401,7 +1415,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "σ [-]"
+                "value": "\u03c3 [-]"
               }
             ]
           },
@@ -1413,7 +1427,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "σ · ${__field.labels.run_id}"
+                "value": "\u03c3 \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1460,7 +1474,7 @@
       ],
       "title": "Relative supersaturation",
       "type": "timeseries",
-      "description": "相对过饱和度 sigma，无量纲。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u76f8\u5bf9\u8fc7\u9971\u548c\u5ea6 sigma\uff0c\u65e0\u91cf\u7eb2\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -1512,7 +1526,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -1523,7 +1537,7 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "suffix:μm/s"
+                "value": "suffix:\u03bcm/s"
               },
               {
                 "id": "decimals",
@@ -1531,7 +1545,7 @@
               },
               {
                 "id": "custom.axisLabel",
-                "value": "G [μm/s]"
+                "value": "G [\u03bcm/s]"
               }
             ]
           },
@@ -1543,7 +1557,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G · ${__field.labels.run_id}"
+                "value": "G \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1562,7 +1576,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_u · ${__field.labels.run_id}"
+                "value": "G_u \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1581,7 +1595,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_u,KF · ${__field.labels.run_id}"
+                "value": "G_u,KF \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1610,7 +1624,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_v · ${__field.labels.run_id}"
+                "value": "G_v \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1629,7 +1643,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_v,KF · ${__field.labels.run_id}"
+                "value": "G_v,KF \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1658,7 +1672,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_measure · ${__field.labels.run_id}"
+                "value": "G_measure \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1677,7 +1691,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "G_measure,KF · ${__field.labels.run_id}"
+                "value": "G_measure,KF \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1742,7 +1756,7 @@
       ],
       "title": "Growth rate",
       "type": "timeseries",
-      "description": "Controller 的模型与测量生长率，以及 GSensor 的 u/v 原始和滤波生长率，统一显示 μm/s。G_measure_KF 只在满足自适应条件时输出。两服务分别使用计算/处理时间，未强行对齐采样点。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Controller \u7684\u6a21\u578b\u4e0e\u6d4b\u91cf\u751f\u957f\u7387\uff0c\u4ee5\u53ca GSensor \u7684 u/v \u539f\u59cb\u548c\u6ee4\u6ce2\u751f\u957f\u7387\uff0c\u7edf\u4e00\u663e\u793a \u03bcm/s\u3002G_measure_KF \u53ea\u5728\u6ee1\u8db3\u81ea\u9002\u5e94\u6761\u4ef6\u65f6\u8f93\u51fa\u3002\u4e24\u670d\u52a1\u5206\u522b\u4f7f\u7528\u8ba1\u7b97/\u5904\u7406\u65f6\u95f4\uff0c\u672a\u5f3a\u884c\u5bf9\u9f50\u91c7\u6837\u70b9\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -1794,7 +1808,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -1813,7 +1827,7 @@
               },
               {
                 "id": "displayName",
-                "value": "Device count · ${__field.labels.run_id}"
+                "value": "Device count \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "custom.axisLabel",
@@ -1857,7 +1871,7 @@
       ],
       "title": "Count",
       "type": "timeseries",
-      "description": "显示设备返回的 process_count_middle 原始计数；具体计数口径和单位待设备/算法负责人确认。只有启用过程读取且设备返回该值时才有数据。按窗口取最后值，不做累加。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u663e\u793a\u8bbe\u5907\u8fd4\u56de\u7684 process_count_middle \u539f\u59cb\u8ba1\u6570\uff1b\u5177\u4f53\u8ba1\u6570\u53e3\u5f84\u548c\u5355\u4f4d\u5f85\u8bbe\u5907/\u7b97\u6cd5\u8d1f\u8d23\u4eba\u786e\u8ba4\u3002\u53ea\u6709\u542f\u7528\u8fc7\u7a0b\u8bfb\u53d6\u4e14\u8bbe\u5907\u8fd4\u56de\u8be5\u503c\u65f6\u624d\u6709\u6570\u636e\u3002\u6309\u7a97\u53e3\u53d6\u6700\u540e\u503c\uff0c\u4e0d\u505a\u7d2f\u52a0\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -1909,7 +1923,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0\u6570\u636e"
         },
         "overrides": [
           {
@@ -1940,7 +1954,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "n × 100 · ${__field.labels.run_id}"
+                "value": "n \u00d7 100 \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1963,7 +1977,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "k₀ / 10¹⁴ · ${__field.labels.run_id}"
+                "value": "k\u2080 / 10\u00b9\u2074 \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -1986,7 +2000,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "E_A [kJ/mol] · ${__field.labels.run_id}"
+                "value": "E_A [kJ/mol] \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -2037,7 +2051,7 @@
       ],
       "title": "Growth parameters",
       "type": "timeseries",
-      "description": "保留原图缩放：n × 100、k₀ / 10¹⁴、E_A / 1000（kJ/mol），用于同图比较。当前接口没有 n_KF、k_0_KF、E_A_KF，暂不绘制这三条滤波曲线。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "\u4fdd\u7559\u539f\u56fe\u7f29\u653e\uff1an \u00d7 100\u3001k\u2080 / 10\u00b9\u2074\u3001E_A / 1000\uff08kJ/mol\uff09\uff0c\u7528\u4e8e\u540c\u56fe\u6bd4\u8f83\u3002\u5f53\u524d\u63a5\u53e3\u6ca1\u6709 n_KF\u3001k_0_KF\u3001E_A_KF\uff0c\u6682\u4e0d\u7ed8\u5236\u8fd9\u4e09\u6761\u6ee4\u6ce2\u66f2\u7ebf\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {
@@ -2089,7 +2103,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无 Lag 数据"
+          "noValue": "\u6240\u9009\u5b9e\u9a8c / \u65f6\u6bb5\u6682\u65e0 Lag \u6570\u636e"
         },
         "overrides": [
           {
@@ -2100,7 +2114,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "t_lag · ${__field.labels.run_id}"
+                "value": "t_lag \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -2135,7 +2149,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Lag increase · ${__field.labels.run_id}"
+                "value": "Lag increase \u00b7 ${__field.labels.run_id}"
               },
               {
                 "id": "color",
@@ -2216,7 +2230,7 @@
       ],
       "title": "Lag time & increase percentage",
       "type": "timeseries",
-      "description": "原 MATLAB 第 12 图的两条曲线：蓝色实线为动态滞后时间 t_lag，左轴单位秒；粉色点线为相对基础滞后时间的增加百分比 (t_lag_perc - 1) × 100，右轴单位 %。t_lag_perc 是 Controller 本次计算的倍率，不是配置中的增加比例。只展示已写入的计算结果；更新前未保存这些字段的历史实验不会补零或补画。无数据时，请检查所选实验和右上角时间范围。"
+      "description": "\u539f MATLAB \u7b2c 12 \u56fe\u7684\u4e24\u6761\u66f2\u7ebf\uff1a\u84dd\u8272\u5b9e\u7ebf\u4e3a\u52a8\u6001\u6ede\u540e\u65f6\u95f4 t_lag\uff0c\u5de6\u8f74\u5355\u4f4d\u79d2\uff1b\u7c89\u8272\u70b9\u7ebf\u4e3a\u76f8\u5bf9\u57fa\u7840\u6ede\u540e\u65f6\u95f4\u7684\u589e\u52a0\u767e\u5206\u6bd4 (t_lag_perc - 1) \u00d7 100\uff0c\u53f3\u8f74\u5355\u4f4d %\u3002t_lag_perc \u662f Controller \u672c\u6b21\u8ba1\u7b97\u7684\u500d\u7387\uff0c\u4e0d\u662f\u914d\u7f6e\u4e2d\u7684\u589e\u52a0\u6bd4\u4f8b\u3002\u53ea\u5c55\u793a\u5df2\u5199\u5165\u7684\u8ba1\u7b97\u7ed3\u679c\uff1b\u66f4\u65b0\u524d\u672a\u4fdd\u5b58\u8fd9\u4e9b\u5b57\u6bb5\u7684\u5386\u53f2\u5b9e\u9a8c\u4e0d\u4f1a\u8865\u96f6\u6216\u8865\u753b\u3002\u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\u3002"
     }
   ],
   "refresh": "10s",
@@ -2245,7 +2259,7 @@
         "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"run_id\", predicate: (r) => r._measurement == \"controller_measurement\" or r._measurement == \"gsensor_measurement\", start: v.timeRangeStart, stop: v.timeRangeStop)",
         "hide": 0,
         "includeAll": true,
-        "label": "有数据的实验",
+        "label": "\u6709\u6570\u636e\u7684\u5b9e\u9a8c",
         "multi": true,
         "name": "run_id",
         "options": [],
@@ -2255,7 +2269,7 @@
         "skipUrlSync": false,
         "sort": 2,
         "type": "query",
-        "description": "列出当前时间范围内已写入 Controller 或 GSensor 数据的实验；尚未产生数据的实验不会出现在列表中。"
+        "description": "\u5217\u51fa\u5f53\u524d\u65f6\u95f4\u8303\u56f4\u5185\u5df2\u5199\u5165 Controller \u6216 GSensor \u6570\u636e\u7684\u5b9e\u9a8c\uff1b\u5c1a\u672a\u4ea7\u751f\u6570\u636e\u7684\u5b9e\u9a8c\u4e0d\u4f1a\u51fa\u73b0\u5728\u5217\u8868\u4e2d\u3002"
       }
     ]
   },
@@ -2269,5 +2283,5 @@
   "uid": "crystallization-mpc-analysis",
   "version": 4,
   "weekStart": "",
-  "description": "原 12 图实验看板。先选择有数据的实验，再调整右上角时间范围；图例保留实验编号。没有输出的曲线不补零。参数 KF 的缺项详见对应图说明。"
+  "description": "\u539f 12 \u56fe\u5b9e\u9a8c\u770b\u677f\u3002\u5148\u9009\u62e9\u6709\u6570\u636e\u7684\u5b9e\u9a8c\uff0c\u518d\u8c03\u6574\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u56fe\u4f8b\u4fdd\u7559\u5b9e\u9a8c\u7f16\u53f7\u3002\u6ca1\u6709\u8f93\u51fa\u7684\u66f2\u7ebf\u4e0d\u8865\u96f6\u3002\u53c2\u6570 KF \u7684\u7f3a\u9879\u8be6\u89c1\u5bf9\u5e94\u56fe\u8bf4\u660e\u3002"
 }

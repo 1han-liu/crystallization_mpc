@@ -80,6 +80,7 @@
             <span id="run-configuration-status" class="status idle">loading</span>
           </div>
 
+          <h4 class="configuration-group-heading">Run setup <small>Locked after start</small></h4>
           <div class="run-configuration-grid">
             <label class="run-configuration-field" for="run-type">
               <span>Run Type</span>
@@ -97,35 +98,6 @@
               </select>
             </label>
 
-            <label class="run-configuration-field" for="control-target">
-              <span>Control Target</span>
-              <select id="control-target">
-                <option value="sigma">Relative Supersaturation (sigma)</option>
-                <option value="G">Growth Rate (G)</option>
-              </select>
-            </label>
-
-            <label class="run-configuration-field" for="adaptation-enabled">
-              <span>Adaptation at Start</span>
-              <select id="adaptation-enabled">
-                <option value="false">Disabled</option>
-                <option value="true">Enabled</option>
-              </select>
-            </label>
-
-            <label class="run-configuration-field" for="adaptation-mode">
-              <span>Adaptive Mode</span>
-              <select id="adaptation-mode">
-                <option value="E_A">E_A</option>
-                <option value="k_0">k_0</option>
-                <option value="n">n</option>
-                <option value="E_A_and_k_0">E_A and k_0</option>
-                <option value="E_A_and_n">E_A and n</option>
-                <option value="k_0_and_n">k_0 and n</option>
-                <option value="all">All</option>
-              </select>
-            </label>
-
             <label class="run-configuration-field" for="growth-rate-source">
               <span>Growth-rate Source</span>
               <select id="growth-rate-source">
@@ -135,10 +107,74 @@
               </select>
             </label>
           </div>
+          <h4 class="configuration-group-heading">Runtime controls <small>Changes are submitted automatically</small></h4>
+          <div class="run-configuration-grid">
+            <label class="run-configuration-field" for="control-target">
+              <span>Control Target</span>
+              <select id="control-target">
+                <option value="sigma">Relative Supersaturation (sigma)</option>
+                <option value="G">Growth Rate (G)</option>
+              </select>
+              <small id="feedback-control_target" class="runtime-field-feedback" aria-live="polite"></small>
+            </label>
 
+            <label class="run-configuration-field" for="adaptation-enabled">
+              <span id="adaptation-enable-label">Adaptation at Start</span>
+              <select id="adaptation-enabled">
+                <option value="false">Disabled</option>
+                <option value="true">Enabled</option>
+              </select>
+              <small id="feedback-adaptation_enabled" class="runtime-field-feedback" aria-live="polite"></small>
+            </label>
+
+            <fieldset class="run-configuration-field adaptation-options">
+              <legend>Adaptive Mode</legend>
+              <input type="hidden" id="adaptation-mode" value="E_A">
+              <div class="adaptation-checkboxes">
+                <label><input type="checkbox" data-adaptive-parameter="E_A" checked> E_A</label>
+                <label><input type="checkbox" data-adaptive-parameter="k_0"> k_0</label>
+                <label><input type="checkbox" data-adaptive-parameter="n"> n</label>
+              </div>
+              <small>Select one or more parameters. Disable Adaptation to stop fitting.</small>
+              <small id="feedback-adaptation_mode" class="runtime-field-feedback" aria-live="polite"></small>
+            </fieldset>
+          </div>
+          <div id="runtime-fitting" class="runtime-fitting" aria-live="polite">Fitting diagnostics unavailable.</div>
+
+          <div class="runtime-setpoints">
+            <label class="run-configuration-field" for="runtime-sigma-set">
+              <span>σ_set (dimensionless)</span>
+              <input id="runtime-sigma-set" type="text" inputmode="decimal" autocomplete="off" disabled>
+              <small id="role-sigma_set" class="setpoint-role"></small>
+              <small id="conversion-sigma_set"></small>
+              <small id="feedback-sigma_set" class="runtime-field-feedback" aria-live="polite"></small>
+            </label>
+            <label class="run-configuration-field" for="runtime-g-set">
+              <span>G_set (m/s)</span>
+              <input id="runtime-g-set" type="text" inputmode="decimal" autocomplete="off" disabled>
+              <small id="role-G_set" class="setpoint-role"></small>
+              <small id="conversion-G_set"></small>
+              <small id="feedback-G_set" class="runtime-field-feedback" aria-live="polite"></small>
+            </label>
+            <p>Positive values only. Press Enter or leave the field to submit. Each target retains its own value.</p>
+          </div>
+          <button id="retry-runtime-update" type="button" class="ghost" hidden>Retry same request</button>
           <p id="run-configuration-message" class="run-configuration-message" role="status" aria-live="polite">
             Changes are saved automatically and locked when the run starts.
           </p>
+          <details id="runtime-history">
+            <summary>Configuration change history</summary>
+            <p>Submission time is not application time. Effective tick is the first scheduled control cycle using the new configuration.</p>
+            <p id="runtime-history-status" aria-live="polite">Open to load history.</p>
+            <div class="runtime-history-scroll">
+              <table class="runtime-history-table">
+                <thead><tr><th>Submitted</th><th>Controller applied / processed</th><th>Changes</th><th>Outcome</th><th>Grafana sync</th></tr></thead>
+                <tbody id="runtime-history-rows"></tbody>
+              </table>
+            </div>
+            <button id="runtime-history-refresh" type="button" class="ghost">Refresh history</button>
+            <button id="runtime-history-older" type="button" class="ghost" hidden>Load older changes</button>
+          </details>
         </section>
 
         <section class="panel experiment-panel" aria-labelledby="experiment-heading">
@@ -254,8 +290,7 @@
                     <span>Mode</span>
                     <strong id="controller-adaptation-mode">E_A</strong>
                   </div>
-                  <button id="toggle-adaptation" class="primary" type="button" disabled>Start Adaptation</button>
-                  <p class="runtime-action-help">Starts or stops the Controller algorithm's online parameter-adaptation hook.</p>
+                  <p class="runtime-action-help">Use Adaptation in Run Configuration above. Enablement does not mean a fit has succeeded.</p>
                   <p id="adaptation-action-message" class="runtime-action-message" role="status" aria-live="polite"></p>
                 </div>
                 <p id="controller-live-error" class="service-error" hidden></p>
@@ -321,6 +356,6 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260910-state-sync-2"></script>
+    <script src="/static/app.js?v=20260910-runtime-controls-1"></script>
   </body>
 </html>

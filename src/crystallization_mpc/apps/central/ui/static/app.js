@@ -28,11 +28,14 @@ const state = {
   pendingSeedEventId: null,
   seedActionMessage: "",
   seedActionError: false,
-  adaptationActionInFlight: false,
-  adaptationActionRunId: null,
-  pendingAdaptationEventId: null,
-  adaptationActionMessage: "",
-  adaptationActionError: false,
+  runtimeInFlight: false,
+  runtimeRequest: null,
+  runtimeError: "",
+  runtimeHistory: [],
+  runtimeHistoryError: "",
+  historyRunId: null,
+  historyCursor: null,
+  historyLoading: false,
   systemStatusFresh: false,
   systemStatusInFlight: 0,
   experimentRequestId: 0,
@@ -90,7 +93,6 @@ const addSeedButton = document.querySelector("#add-seed");
 const seedActionMessage = document.querySelector("#seed-action-message");
 const controllerAdaptationStatus = document.querySelector("#controller-adaptation-status");
 const controllerAdaptationMode = document.querySelector("#controller-adaptation-mode");
-const toggleAdaptationButton = document.querySelector("#toggle-adaptation");
 const adaptationActionMessage = document.querySelector("#adaptation-action-message");
 const controllerLiveError = document.querySelector("#controller-live-error");
 const centralOverlayImage = document.querySelector("#central-overlay-image");
@@ -104,6 +106,17 @@ const controlTargetSelect = document.querySelector("#control-target");
 const adaptationEnabledSelect = document.querySelector("#adaptation-enabled");
 const adaptationModeSelect = document.querySelector("#adaptation-mode");
 const growthRateSourceSelect = document.querySelector("#growth-rate-source");
+const adaptationEnableLabel = document.querySelector("#adaptation-enable-label");
+const adaptiveCheckboxes = [...document.querySelectorAll("[data-adaptive-parameter]")];
+const sigmaSetInput = document.querySelector("#runtime-sigma-set");
+const growthSetInput = document.querySelector("#runtime-g-set");
+const retryRuntimeButton = document.querySelector("#retry-runtime-update");
+const setpointInputs = { sigma_set: sigmaSetInput, G_set: growthSetInput };
+const adaptiveCombinations = {
+  E_A: ["E_A"], k_0: ["k_0"], n: ["n"],
+  E_A_and_k_0: ["E_A", "k_0"], E_A_and_n: ["E_A", "n"],
+  k_0_and_n: ["k_0", "n"], all: ["E_A", "k_0", "n"],
+};
 
 const runConfigurationControls = [
   runTypeSelect,
@@ -117,7 +130,7 @@ const runConfigurationControls = [
 function mutationInFlight() {
   return state.experimentActionInFlight || state.parameterActionInFlight
     || state.runConfigurationInFlight || state.seedActionInFlight
-    || state.adaptationActionInFlight;
+    || state.runtimeInFlight;
 }
 
 function invalidatePendingReads() {
@@ -199,6 +212,268 @@ function collectRunConfiguration() {
   };
 }
 
+function runtimeRunActive() {
+  const status = currentExperiment()?.status;
+  return Boolean(status) && !["created", "completed", "error"].includes(status);
+}
+
+function runtimeReady() {
+  const controller = state.controllerStatus;
+  return runtimeRunActive() && currentExperiment()?.status !== "stopping"
+    && state.systemStatusFresh && controller?.available
+    && controller.current_run_id === state.currentRunId
+    && controller.status === "running" && controller.runtime_controls?.supported;
+}
+
+function runtimeUnconfirmed(request = state.runtimeRequest) {
+  return Boolean(request) && !["applied", "rejected"].includes(request.status);
+}
+
+function runtimeSessionKey(runId) { return `central-runtime:${runId}`; }
+
+function rememberRuntimeRequest(request) {
+  state.runtimeRequest = request;
+  if (!request?.command?.run_id) return;
+  try {
+    if (runtimeUnconfirmed(request)) {
+      sessionStorage.setItem(runtimeSessionKey(request.command.run_id), JSON.stringify(request));
+    } else {
+      sessionStorage.removeItem(runtimeSessionKey(request.command.run_id));
+    }
+  } catch (_) { /* Central also journals delivered requests; memory remains usable. */ }
+}
+
+function observeRuntimeRequest(remote) {
+  let local = state.runtimeRequest;
+  if (local?.command?.run_id !== state.currentRunId) {
+    local = null;
+    state.runtimeError = "";
+    try { local = JSON.parse(sessionStorage.getItem(runtimeSessionKey(state.currentRunId))); } catch (_) {}
+  }
+  if (local?.status === "rejected" && remote?.command?.event_id !== local.command.event_id) {
+    rememberRuntimeRequest(local); // Do not relabel a rejected edit using an older successful request.
+  } else if (!runtimeUnconfirmed(local) || remote?.command?.event_id === local?.command?.event_id
+      || (remote && runtimeUnconfirmed(remote))) {
+    rememberRuntimeRequest(remote || local);
+  } else {
+    rememberRuntimeRequest(local);
+  }
+}
+
+function renderAdaptiveSelection(mode, disabled) {
+  const selected = adaptiveCombinations[mode] || [];
+  adaptiveCheckboxes.forEach((box) => {
+    box.checked = selected.includes(box.dataset.adaptiveParameter);
+    box.disabled = disabled;
+  });
+  adaptationModeSelect.value = mode;
+}
+
+function renderSetpoints(configuration, disabled) {
+  Object.entries(setpointInputs).forEach(([key, input]) => {
+    if (document.activeElement !== input || input.dataset.dirty !== "true") {
+      input.value = configuration?.[key] ?? "";
+    }
+    input.disabled = disabled;
+  });
+}
+
+function renderSetpointExplanation(key) {
+  const input = setpointInputs[key];
+  const text = input.value.trim();
+  const value = Number(text);
+  // Do not interpret incomplete exponents, hex, Infinity or other non-decimal input.
+  const decimal = /^[+]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text);
+  const converted = value * (key === "sigma_set" ? 100 : 1e6);
+  const element = document.querySelector(`#conversion-${key}`);
+  element.textContent = decimal && value > 0 && Number.isFinite(converted)
+    ? `${input.dataset.dirty === "true" ? "Editing preview: " : ""}${Number(converted.toPrecision(8))}${key === "sigma_set" ? "% relative supersaturation" : " μm/s"}`
+    : "Enter a finite positive decimal value.";
+}
+
+function runtimeChangeDescription(entry, key) {
+  const result = entry.result || {};
+  const before = result.before || entry.before || {};
+  const after = result.configuration || entry.command?.changes || {};
+  const label = { control_target: "Control Target", adaptation_enabled: "Adaptation",
+    adaptation_mode: "Adaptive Mode", sigma_set: "σ_set", G_set: "G_set" }[key];
+  const display = value => value === undefined ? "unavailable" : String(value);
+  let description = `${label}: ${display(before[key])} → ${display(after[key])}.`;
+  if (key === "control_target" && after.control_target) {
+    const selected = after.control_target === "G" ? "G_set" : "sigma_set";
+    description += ` Using ${selected} = ${display(after[selected])}.`;
+  }
+  if ((key === "G_set" && after.control_target === "sigma")
+      || (key === "sigma_set" && after.control_target === "G")) {
+    description += " Standby value updated; control target unchanged.";
+  }
+  return description;
+}
+
+function renderConfigurationDetails(configuration, live) {
+  const current = live ? configuration?.control_target : state.runConfiguration?.control_target;
+  Object.keys(setpointInputs).forEach(key => {
+    const target = key === "sigma_set" ? "sigma" : "G";
+    const element = document.querySelector(`#role-${key}`);
+    element.textContent = !current ? "Target status unconfirmed" : current === target
+      ? (live ? "Current target value" : "Selected startup target value")
+      : `Standby value — used after switching to ${target}`;
+    element.classList.toggle("active", current === target);
+    renderSetpointExplanation(key);
+  });
+  const entries = [...state.runtimeHistory];
+  if (state.runtimeRequest?.command?.run_id === state.currentRunId) {
+    const index = entries.findIndex(item => item.command.event_id === state.runtimeRequest.command.event_id);
+    if (index >= 0) entries[index] = state.runtimeRequest;
+    else if (!entries.length || runtimeUnconfirmed() || state.runtimeError) entries.unshift(state.runtimeRequest);
+  }
+  const keys = ["control_target", "sigma_set", "G_set", "adaptation_enabled", "adaptation_mode"];
+  keys.forEach(key => {
+    const element = document.querySelector(`#feedback-${key}`);
+    const entry = live && entries.find(item => item.command?.run_id === state.currentRunId
+      && Object.hasOwn(item.command?.changes || {}, key));
+    element.textContent = "";
+    element.classList.remove("error");
+    if (!entry) return;
+    const result = entry.result || {};
+    const identity = result.event_id === entry.command.event_id && result.run_id === state.currentRunId;
+    if (entry.status === "applied" && identity) {
+      const saved = state.controllerStatus?.recovery?.status !== "persistence_error" && !entry.persistence_error;
+      element.textContent = `${saved ? "Applied" : "Applied, but not durably saved"}: ${runtimeChangeDescription(entry, key)} Revision ${result.revision}; effective tick ${result.effective_tick ?? "unavailable"}.`;
+      if (state.controllerStatus?.runtime_controls?.history_error) element.textContent += " History persistence incomplete.";
+      if (entry.persistence_error) element.textContent += ` ${entry.persistence_error}`;
+      element.classList.toggle("error", !saved);
+    } else if (entry.status === "rejected") {
+      element.textContent = `Rejected: ${result.reason || entry.transport_error || "Update was not accepted."}`;
+      element.classList.add("error");
+    } else {
+      element.textContent = `${entry.status === "timeout" ? "Confirmation timed out. " : ""}Waiting for Controller confirmation.${entry.transport_error ? " " + entry.transport_error : ""}`;
+    }
+  });
+  const panel = document.querySelector("#runtime-fitting");
+  const status = state.controllerStatus;
+  const adaptation = live && status?.available && status.current_run_id === state.currentRunId
+    ? status.adaptation : null;
+  if (!adaptation) {
+    panel.textContent = "Fitting diagnostics unavailable. No confirmed live Controller data.";
+    panel.classList.remove("error");
+    return;
+  }
+  const fitting = adaptation.fitting;
+  const modes = adaptiveCombinations[adaptation.mode]?.join(", ") || "unavailable";
+  const states = { not_run: "Not run", waiting_for_samples: "Waiting for samples",
+    fit_succeeded: "Last fit succeeded", fit_failed: "Last fit failed" };
+  const value = field => fitting?.[field] ?? "unavailable";
+  panel.textContent = `Adaptation ${adaptation.enabled ? "enabled" : "disabled"}. Selected parameters: ${modes}. `
+    + (!adaptation.enabled ? "Parameter updates stopped; control continues with existing parameters. Historical fitting results: " : "")
+    + (fitting ? `${states[fitting.last_status] || "Status unavailable"}. Samples ${value("sample_count")}/${value("minimum_samples")}; completed fits ${value("fit_count")}; failures ${value("failure_count")}. Last successful fit: ${fitting.last_success_at ? formatExperimentTime(fitting.last_success_at) : "unavailable"}.`
+      + (fitting.last_failure_reason ? ` Last failure: ${fitting.last_failure_reason}.` : "")
+      + (fitting.pause_reason ? ` Current reason: ${fitting.pause_reason}.` : "") : "Fitting diagnostics unavailable.");
+  panel.classList.toggle("error", adaptation.enabled && fitting?.last_status === "fit_failed");
+}
+
+async function loadRuntimeHistory(older = false) {
+  const runId = state.currentRunId;
+  const message = document.querySelector("#runtime-history-status");
+  const rows = document.querySelector("#runtime-history-rows");
+  if (!runId || state.historyLoading) return;
+  state.historyLoading = true;
+  document.querySelector("#runtime-history-older").disabled = true;
+  document.querySelector("#runtime-history-refresh").disabled = true;
+  message.textContent = "Loading confirmed and pending changes…";
+  try {
+    const query = new URLSearchParams({ run_id: runId, limit: "30" });
+    if (older && state.historyRunId === runId && state.historyCursor) query.set("before", state.historyCursor);
+    const page = await fetchJson(`/api/operation/controller/runtime/history?${query}`);
+    if (state.currentRunId !== runId) return;
+    if (!older || state.historyRunId !== runId) rows.replaceChildren();
+    state.historyRunId = runId;
+    state.historyCursor = page.next_cursor;
+    for (const entry of page.entries || []) {
+      const result = entry.result || {};
+      const tr = document.createElement("tr");
+      const changes = Object.keys(entry.command.changes).map(key => runtimeChangeDescription(entry, key)).join(" ");
+      const outcome = `${entry.status}; revision ${result.revision ?? "unavailable"}; effective tick ${result.effective_tick ?? "unavailable"}${result.reason ? "; " + result.reason : ""}${entry.persistence === "persistence_error" ? "; active state not durably saved" : ""}`;
+      const sync = !page.grafana_enabled ? "Not configured" : (entry.grafana_sync === "synced" ? "Synced"
+        : entry.grafana_sync === "not_applicable" ? "No change annotation" : `Incomplete: ${entry.grafana_error || entry.grafana_sync || "pending"}`);
+      for (const text of [formatExperimentTime(entry.command.requested_at),
+        result.applied_at ? `Applied: ${formatExperimentTime(result.applied_at)}`
+          : result.processed_at ? `${result.source === "central" ? "Central decision" : "Controller processed"}: ${formatExperimentTime(result.processed_at)}; not an application timestamp`
+            : "Not confirmed", changes, outcome, sync]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.append(td);
+      }
+      rows.append(tr);
+    }
+    message.textContent = page.error || page.grafana_error || "Available recorded history only; missing legacy events are not reconstructed.";
+    message.classList.toggle("error", Boolean(page.error || page.grafana_error));
+    document.querySelector("#runtime-history-older").hidden = !page.next_cursor;
+  } catch (error) {
+    if (state.currentRunId === runId) { message.textContent = `History unavailable: ${error.message}`; message.classList.add("error"); }
+  } finally {
+    state.historyLoading = false;
+    document.querySelector("#runtime-history-older").disabled = false;
+    document.querySelector("#runtime-history-refresh").disabled = false;
+  }
+}
+
+function renderLiveConfiguration() {
+  const runtime = state.systemStatusFresh && state.controllerStatus?.available && state.controllerStatus?.current_run_id === state.currentRunId
+    ? state.controllerStatus?.runtime_controls : null;
+  const configuration = runtime?.configuration;
+  runConfigurationControls.forEach((control) => { control.disabled = true; });
+  adaptationEnableLabel.textContent = "Adaptation";
+  const disabled = !runtimeReady() || mutationInFlight() || runtimeUnconfirmed();
+  if (configuration) {
+    controlTargetSelect.value = configuration.control_target;
+    adaptationEnabledSelect.value = String(configuration.adaptation_enabled);
+  } else {
+    controlTargetSelect.value = "";
+    adaptationEnabledSelect.value = "";
+  }
+  controlTargetSelect.disabled = disabled;
+  adaptationEnabledSelect.disabled = disabled;
+  renderAdaptiveSelection(configuration?.adaptation_mode || "", disabled);
+  renderSetpoints(configuration, disabled);
+  renderConfigurationDetails(configuration, true);
+  const request = state.runtimeRequest;
+  const timedOut = runtimeUnconfirmed() && Date.now() / 1000 - (request.created_at || 0) >= 30;
+  retryRuntimeButton.hidden = !runtimeUnconfirmed();
+  retryRuntimeButton.disabled = !runtimeReady() || mutationInFlight();
+  let label = "live";
+  let message = `Actual Controller settings · revision ${runtime?.revision ?? "—"}. Changes affect this run only.`;
+  if (!runtimeReady()) {
+    label = "unconfirmed";
+    message = "Controller is unavailable, stopped or belongs to another run. Editing is locked.";
+  } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
+    label = timedOut || request?.status === "timeout" ? "confirmation timeout" : "awaiting confirmation";
+    message = `Request ${request?.command?.event_id || "…"}: Controller application is not yet confirmed. Retry uses the same event.`;
+    if (request?.transport_error) message += ` ${request.transport_error}`;
+  } else if (request?.status === "applied") {
+    label = "applied";
+    message += ` Last request applied at revision ${request.result.revision}, effective tick ${request.result.effective_tick}.`;
+  } else if (request?.status === "rejected") {
+    label = "rejected";
+    message = request.result?.reason || "Controller rejected the update; prior settings remain.";
+  }
+  const persistenceFailed = runtimeReady() && state.controllerStatus?.recovery?.status === "persistence_error";
+  if (persistenceFailed) {
+    if (label === "applied" || label === "live") label = "active — not saved";
+    message += " Controller state could not be saved. Active settings are not guaranteed to survive a restart; resolve the storage error before restarting.";
+  }
+  if (state.runtimeError) message += ` ${state.runtimeError}`;
+  if (state.runtimeHistoryError) {
+    if (label === "applied" || label === "live") label = "active — history incomplete";
+    message += ` ${state.runtimeHistoryError} Controller settings remain authoritative; history may be incomplete.`;
+  }
+  runConfigurationStatus.textContent = label;
+  runConfigurationStatus.className = ["rejected", "unconfirmed", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
+    ? "status error" : (label === "applied" ? "status success" : "status running");
+  runConfigurationMessage.textContent = message;
+  runConfigurationMessage.classList.toggle("error", Boolean(state.runtimeError || state.runtimeHistoryError) || label === "rejected" || persistenceFailed);
+}
+
 function applyRunConfigurationPayload(payload) {
   if (!payload) {
     return;
@@ -222,14 +497,20 @@ function renderRunConfiguration() {
   adaptationEnabledSelect.value = String(configuration.adaptation_enabled);
   adaptationModeSelect.value = configuration.adaptation_mode;
   growthRateSourceSelect.value = configuration.growth_rate_source;
+  if (runtimeRunActive()) {
+    renderLiveConfiguration();
+    return;
+  }
+  adaptationEnableLabel.textContent = "Adaptation at Start";
+  retryRuntimeButton.hidden = true;
 
   const locked = runConfigurationLocked();
   runConfigurationControls.forEach((control) => {
     control.disabled = state.runConfigurationInFlight || locked;
   });
-  adaptationModeSelect.disabled = state.runConfigurationInFlight
-    || locked
-    || !configuration.adaptation_enabled;
+  renderAdaptiveSelection(configuration.adaptation_mode, locked);
+  renderSetpoints(state.params?.controller, locked || !state.params);
+  renderConfigurationDetails(state.params?.controller, false);
 
   growthRateSourceSelect.querySelectorAll("[data-development-source]").forEach((option) => {
     const selected = option.value === configuration.growth_rate_source;
@@ -507,7 +788,9 @@ async function fetchJson(url, options = {}) {
       const message = Array.isArray(detail)
         ? detail.map((item) => `${(item.loc || []).join(".")}: ${item.msg || "Invalid value"}`).join("; ")
         : (typeof detail === "string" ? detail : `Request failed (HTTP ${response.status}).`);
-      throw new Error(message);
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
     if (payload === null) throw new Error("The server returned an unreadable response.");
     return payload;
@@ -679,6 +962,11 @@ function renderExperiments() {
   const blocked = !state.systemStatusFresh || mutationInFlight();
   if (state.lastRenderedRunId !== current?.run_id) {
     clearCentralOverlay();
+    document.querySelector("#runtime-history-rows").replaceChildren();
+    document.querySelector("#runtime-history-status").textContent = "Refresh history for the selected run.";
+    document.querySelector("#runtime-history-older").hidden = true;
+    state.historyRunId = null;
+    state.historyCursor = null;
   }
 
   experimentStatus.textContent = current?.status || "not selected";
@@ -757,21 +1045,15 @@ function renderSystemStatus(payload) {
     && gsensor.last_status?.run_id === current.run_id;
   const gsensorStatus = gsensorMatchesRun ? gsensor.last_status : {};
   state.controllerStatus = controller;
+  state.runtimeHistory = payload.runtime_history || [];
+  state.runtimeHistoryError = payload.runtime_history_error || "";
+  observeRuntimeRequest(payload.runtime_request || null);
 
   if (state.seedActionRunId && state.seedActionRunId !== current?.run_id) {
     state.seedActionRunId = null;
     state.pendingSeedEventId = null;
     state.seedActionMessage = "";
     state.seedActionError = false;
-  }
-  if (
-    state.adaptationActionRunId
-    && state.adaptationActionRunId !== current?.run_id
-  ) {
-    state.adaptationActionRunId = null;
-    state.pendingAdaptationEventId = null;
-    state.adaptationActionMessage = "";
-    state.adaptationActionError = false;
   }
 
   systemRefreshStatus.textContent = "online";
@@ -798,8 +1080,13 @@ function renderSystemStatus(payload) {
   controllerSeedCount.textContent = String(controller.seed_events?.count || 0);
   controllerLastSeedAt.textContent = formatExperimentTime(controller.seed_events?.last?.added_at);
   const adaptation = controller.adaptation || {};
-  controllerAdaptationStatus.textContent = adaptation.active ? "active" : "inactive";
+  controllerAdaptationStatus.textContent = adaptation.enabled ? "enabled" : "disabled";
   controllerAdaptationMode.textContent = adaptation.mode || "E_A";
+  const fitting = adaptation.fitting;
+  adaptationActionMessage.textContent = fitting
+    ? `Last fitting status: ${fitting.last_status}; mode ${fitting.last_mode || "—"}; tick ${fitting.last_tick ?? "—"}. Samples ${fitting.sample_count}/${fitting.minimum_samples}; completed fits ${fitting.fit_count}; failures ${fitting.failure_count}.${fitting.pause_reason ? " " + fitting.pause_reason : ""}`
+    : "Fitting diagnostics unavailable.";
+  adaptationActionMessage.classList.toggle("error", fitting?.last_status === "fit_failed");
   const previousConnectionError = !controller.error
     && typeof controller.last_error === "string"
     && controller.last_error.startsWith("RabbitMQ consumer error:")
@@ -826,23 +1113,6 @@ function renderSystemStatus(payload) {
     state.seedActionError = true;
   }
 
-  const lastAdaptationEventId = adaptation.last_event?.event_id || null;
-  if (
-    state.pendingAdaptationEventId
-    && lastAdaptationEventId === state.pendingAdaptationEventId
-  ) {
-    state.pendingAdaptationEventId = null;
-    state.adaptationActionMessage = `${adaptation.enabled ? "Adaptation started" : "Adaptation stopped"} at ${formatExperimentTime(adaptation.last_event.requested_at)}.`;
-    state.adaptationActionError = false;
-  } else if (
-    state.pendingAdaptationEventId
-    && lastControllerEventId === state.pendingAdaptationEventId
-    && controller.last_message_result?.accepted === false
-  ) {
-    state.pendingAdaptationEventId = null;
-    state.adaptationActionMessage = controller.last_message_result.reason || "Controller rejected the adaptation change.";
-    state.adaptationActionError = true;
-  }
 
   renderRuntimeControls();
 
@@ -868,18 +1138,12 @@ function renderRuntimeControls() {
     && controller.status === "running"
     && controller.current_run_id === current?.run_id;
   const runtimeActionInFlight = mutationInFlight()
-    || Boolean(state.pendingSeedEventId || state.pendingAdaptationEventId);
+    || Boolean(state.pendingSeedEventId);
   addSeedButton.disabled = runtimeActionInFlight || !activeExperiment || !controllerReady;
   addSeedButton.textContent = state.seedActionInFlight ? "Recording..." : "Add Seed";
   seedActionMessage.textContent = state.seedActionMessage;
   seedActionMessage.classList.toggle("error", state.seedActionError);
-  toggleAdaptationButton.disabled = runtimeActionInFlight || !activeExperiment || !controllerReady;
-  toggleAdaptationButton.textContent = state.adaptationActionInFlight
-    ? "Applying..."
-    : (adaptation.active ? "Stop Adaptation" : "Start Adaptation");
-  adaptationActionMessage.textContent = state.adaptationActionMessage;
-  adaptationActionMessage.classList.toggle("error", state.adaptationActionError);
-
+  renderRunConfiguration();
 }
 
 async function loadSystemStatus({ forceOverlay = false } = {}) {
@@ -1095,59 +1359,97 @@ async function addSeed() {
   }
 }
 
-async function toggleAdaptation() {
-  const current = currentExperiment();
-  const adaptation = state.controllerStatus?.adaptation || {};
-  if (!current || toggleAdaptationButton.disabled) {
-    return;
-  }
-  const enabled = !Boolean(adaptation.enabled);
-  const action = enabled ? "Start" : "Stop";
-  const confirmed = window.confirm(
-    `${action} Controller parameter adaptation in ${adaptation.mode || "E_A"} mode?`,
-  );
-  if (!confirmed) {
-    return;
-  }
 
-  state.adaptationActionInFlight = true;
+async function submitRuntimeUpdate(changes, retryCommand = null) {
+  if (!runtimeReady() || mutationInFlight() || (runtimeUnconfirmed() && !retryCommand)) {
+    renderRunConfiguration();
+    return;
+  }
+  const command = retryCommand || {
+    run_id: state.currentRunId, event_id: crypto.randomUUID(),
+    expected_revision: state.controllerStatus.runtime_controls.revision,
+    changes, requested_at: new Date().toISOString(),
+  };
+  if (command.run_id !== state.currentRunId) return;
+  const request = retryCommand ? state.runtimeRequest : {
+    command, status: "pending", created_at: Date.now() / 1000, result: null,
+    before: { ...state.controllerStatus.runtime_controls.configuration },
+  };
+  rememberRuntimeRequest(request);
+  state.runtimeError = "";
+  state.runtimeInFlight = true;
   invalidatePendingReads();
-  state.adaptationActionRunId = current.run_id;
-  state.adaptationActionMessage = `${enabled ? "Starting" : "Stopping"} adaptation...`;
-  state.adaptationActionError = false;
   renderMutationState();
-  let sent = false;
   try {
-    const result = await fetchJson("/api/operation/controller/adaptation", {
-      method: "POST",
-      body: JSON.stringify({ enabled, expected_run_id: current.run_id }),
+    const response = await fetchJson("/api/operation/controller/runtime", {
+      method: "POST", body: JSON.stringify(command),
     });
-    sent = true;
-    if (state.currentRunId !== current.run_id) return;
-    if (result.requested) {
-      state.pendingAdaptationEventId = result.event.event_id;
-      state.adaptationActionMessage = "Adaptation change sent. Waiting for Controller confirmation...";
-    } else {
-      state.pendingAdaptationEventId = null;
-      state.adaptationActionMessage = `Adaptation is already ${enabled ? "active" : "inactive"}.`;
-    }
+    if (state.currentRunId === command.run_id) rememberRuntimeRequest(response.runtime_request);
   } catch (error) {
-    if (state.currentRunId === current.run_id) {
-      state.pendingAdaptationEventId = null;
-      state.adaptationActionMessage = `${error.message} Check Controller status before retrying.`;
-      state.adaptationActionError = true;
+    if (state.currentRunId === command.run_id) {
+      state.runtimeError = error.message;
+      if ([400, 403, 404, 409, 422].includes(error.status)) {
+        rememberRuntimeRequest({ ...request, status: "rejected", result: { reason: error.message } });
+      } else {
+        rememberRuntimeRequest({ ...request, transport_error: "HTTP delivery is unconfirmed." });
+      }
     }
   } finally {
-    state.adaptationActionInFlight = false;
+    state.runtimeInFlight = false;
+    try { await loadSystemStatus(); } catch (error) { state.runtimeError = error.message; }
+    renderMutationState();
+  }
+}
+
+async function commitSetpoint(key, input) {
+  if (input.disabled || input.dataset.dirty !== "true") return;
+  input.dataset.dirty = "false"; // Enter followed by blur is one operation.
+  const text = input.value.trim();
+  const value = Number(text);
+  if (!/^[+]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text) || !Number.isFinite(value) || value <= 0) {
+    input.setCustomValidity("Enter a finite number greater than zero.");
+    input.reportValidity();
+    if (runtimeRunActive()) state.runtimeError = "Setpoint rejected: enter a finite positive number.";
+    else state.runConfigurationError = "Setpoint rejected: enter a finite positive number.";
+    renderRunConfiguration();
+    return;
+  }
+  input.setCustomValidity("");
+  if (runtimeRunActive()) {
+    const revision = String(state.controllerStatus?.runtime_controls?.revision);
+    if (input.dataset.editRunId !== state.currentRunId || input.dataset.editRevision !== revision) {
+      state.runtimeError = "Settings changed while you were typing. Review the current values and edit again.";
+      renderRunConfiguration();
+      return;
+    }
+    if (state.controllerStatus.runtime_controls.configuration[key] === value) return;
+    await submitRuntimeUpdate({ [key]: value });
+  } else {
+    if (runConfigurationLocked() || !state.params) return;
+    if (state.parameterUnsavedCount) {
+      state.runConfigurationError = "Save or discard parameter drawer edits before changing a setpoint here.";
+      renderRunConfiguration();
+      return;
+    }
+    if (state.params.controller[key] === value) return;
+    const draft = {
+      version: state.params.version, expected_run_id: state.currentRunId,
+      shared: { ...state.params.shared }, gsensor: { ...state.params.gsensor },
+      controller: { ...state.params.controller, [key]: value },
+    };
+    state.parameterActionInFlight = true;
+    state.runConfigurationError = null;
+    invalidatePendingReads();
     renderMutationState();
     try {
-      await loadSystemStatus();
+      state.params = await fetchJson("/api/params", { method: "POST", body: JSON.stringify(draft) });
+      renderParameterForms();
+      await loadOperationState();
     } catch (error) {
-      if (state.currentRunId === current.run_id) {
-        state.adaptationActionMessage = `${sent ? "Adaptation request was accepted; confirmation is still pending." : state.adaptationActionMessage} Status refresh failed: ${error.message} Confirm the status before retrying.`;
-        state.adaptationActionError = true;
-        renderRuntimeControls();
-      }
+      state.runConfigurationError = error.message;
+    } finally {
+      state.parameterActionInFlight = false;
+      renderMutationState();
     }
   }
 }
@@ -1361,9 +1663,6 @@ addSeedButton.addEventListener("click", async () => {
   await addSeed();
 });
 
-toggleAdaptationButton.addEventListener("click", async () => {
-  await toggleAdaptation();
-});
 
 copyCameraPathButton.addEventListener("click", async () => {
   await copyCameraPath();
@@ -1383,6 +1682,17 @@ centralOverlayImage.addEventListener("error", () => {
 
 runConfigurationControls.forEach((control) => {
   control.addEventListener("change", () => {
+    if (runtimeRunActive()) {
+      const key = {
+        "control-target": "control_target", "adaptation-enabled": "adaptation_enabled",
+        "adaptation-mode": "adaptation_mode",
+      }[control.id];
+      if (key) submitRuntimeUpdate({
+        [key]: key === "adaptation_enabled" ? control.value === "true" : control.value,
+      });
+      else renderRunConfiguration();
+      return;
+    }
     saveRunConfiguration().catch((error) => {
       state.runConfigurationError = error.message;
       state.runConfigurationInFlight = false;
@@ -1390,6 +1700,52 @@ runConfigurationControls.forEach((control) => {
     });
   });
 });
+
+adaptiveCheckboxes.forEach((box) => {
+  box.addEventListener("change", () => {
+    const selected = adaptiveCheckboxes.filter((item) => item.checked).map((item) => item.dataset.adaptiveParameter);
+    const mode = Object.keys(adaptiveCombinations).find((name) =>
+      adaptiveCombinations[name].length === selected.length
+      && adaptiveCombinations[name].every((name) => selected.includes(name)));
+    if (!mode) {
+      box.checked = true;
+      if (runtimeRunActive()) state.runtimeError = "Keep at least one parameter selected; use Adaptation to stop fitting.";
+      else state.runConfigurationError = "Keep at least one parameter selected.";
+      renderRunConfiguration();
+      return;
+    }
+    adaptationModeSelect.value = mode;
+    adaptationModeSelect.dispatchEvent(new Event("change"));
+  });
+});
+
+Object.entries(setpointInputs).forEach(([key, input]) => {
+  input.addEventListener("focus", () => {
+    input.dataset.editRevision = String(state.controllerStatus?.runtime_controls?.revision);
+    input.dataset.editRunId = state.currentRunId || "";
+  });
+  input.addEventListener("input", () => {
+    if (input.dataset.dirty !== "true") {
+      input.dataset.editRevision = String(state.controllerStatus?.runtime_controls?.revision);
+      input.dataset.editRunId = state.currentRunId || "";
+    }
+    input.dataset.dirty = "true";
+    input.setCustomValidity("");
+    renderSetpointExplanation(key);
+  });
+  input.addEventListener("blur", () => { commitSetpoint(key, input); });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); commitSetpoint(key, input); }
+  });
+});
+retryRuntimeButton.addEventListener("click", () => {
+  if (runtimeUnconfirmed()) submitRuntimeUpdate(null, state.runtimeRequest.command);
+});
+document.querySelector("#runtime-history").addEventListener("toggle", event => {
+  if (event.target.open) loadRuntimeHistory();
+});
+document.querySelector("#runtime-history-refresh").addEventListener("click", () => loadRuntimeHistory());
+document.querySelector("#runtime-history-older").addEventListener("click", () => loadRuntimeHistory(true));
 
 async function bootstrap() {
   await loadUiConfig();

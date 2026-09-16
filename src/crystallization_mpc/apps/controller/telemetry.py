@@ -28,6 +28,7 @@ class ControllerMeasurementRecord:
     process_write_attempted: bool = False
     process_write_error: str | None = None
     control_target: str | None = None
+    runtime_revision: int = 0
 
     def __post_init__(self) -> None:
         if not str(self.run_id).strip():
@@ -86,6 +87,7 @@ class ControllerMeasurementRecord:
                 }
             )
         fields.update(self.result.fields())
+        fields["runtime_revision"] = self.runtime_revision
         if self.process_state is not None:
             fields.update(
                 {

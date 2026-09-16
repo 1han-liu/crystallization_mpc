@@ -117,7 +117,7 @@ def test_state_export_is_json_safe_and_restore_is_continuous() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("algorithm_state_schema_version", 2),
+        ("algorithm_state_schema_version", 1),
         ("baseline_commit", "wrong"),
         ("run_id", "other-run"),
         ("params_digest", "wrong"),

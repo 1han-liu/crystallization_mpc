@@ -19,6 +19,7 @@ dist/
 # Local deployment configuration (commit only the example templates)
 .env
 config/influxdb.env
+config/rabbitmq.env
 !.env.example
 !config/influxdb.env.example
 

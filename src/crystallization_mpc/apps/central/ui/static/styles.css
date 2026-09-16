@@ -858,3 +858,32 @@ textarea:disabled {
     width: 100%;
   }
 }
+/* Runtime controls reuse the existing configuration panel. */
+.adaptation-options { margin: 0; padding: 0; border: 0; min-width: 0; }
+.adaptation-options legend { margin-bottom: 8px; font-size: 13px; color: #64748b; }
+.adaptation-checkboxes { display: flex; flex-wrap: wrap; gap: 20px; padding: 10px 0; }
+.adaptation-checkboxes label { display: flex; align-items: center; gap: 6px; }
+.adaptation-checkboxes input { width: auto; }
+.adaptation-options small, .runtime-setpoints p { color: #64748b; font-size: 12px; }
+.runtime-setpoints { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 18px; }
+.runtime-setpoints p { grid-column: 1 / -1; margin: 0; }
+.runtime-setpoints input { box-sizing: border-box; width: 100%; min-height: 40px; padding: 9px 12px; border: 1px solid #dce0e5; border-radius: 4px; font: inherit; }
+.runtime-setpoints input:disabled { background: #f8f9fa; color: #64748b; }
+#retry-runtime-update[hidden] { display: none; }
+@media (max-width: 600px) { .runtime-setpoints { grid-template-columns: 1fr; } }
+:root {
+  --runtime-accent: #25639a;
+}
+
+.configuration-group-heading { margin: 1.2rem 0 .7rem; }
+.configuration-group-heading small { font-weight: normal; color: #64748b; margin-left: .5rem; }
+.setpoint-role { color: #64748b; }
+.setpoint-role.active { color: var(--runtime-accent); font-weight: 600; }
+.runtime-field-feedback { display: block; overflow-wrap: anywhere; min-height: 1em; }
+.runtime-fitting { padding: .8rem; margin-top: .8rem; border-left: 3px solid var(--runtime-accent); background: #f5f8fc; line-height: 1.6; }
+.runtime-history-scroll { overflow-x: auto; }
+.runtime-history-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.runtime-history-table th, .runtime-history-table td { text-align: left; vertical-align: top; padding: .6rem; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; min-width: 9rem; }
+#runtime-history { margin-top: 1rem; }
+#runtime-history summary { cursor: pointer; font-weight: 600; }
+#runtime-history-older[hidden] { display: none !important; }

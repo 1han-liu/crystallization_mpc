@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from crystallization_mpc.infra.runtime_history import RuntimeHistory
+
 import copy
 import json
 import logging
@@ -41,6 +43,7 @@ from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
     CONTROLLER_ADD_SEED_COMMAND,
     CONTROLLER_ADAPTATION_SET_COMMAND,
+    CONTROLLER_RUNTIME_UPDATE_COMMAND,
     EXPERIMENT_START_COMMAND,
     EXPERIMENT_STOP_COMMAND,
     GROWTH_RATE_SAMPLE_MESSAGE,
@@ -54,6 +57,9 @@ from crystallization_mpc.messaging.contracts import (
     GrowthRateSamplePayload,
 )
 from crystallization_mpc.messaging.routing import bindings_for
+from crystallization_mpc.messaging.controller_runtime import (
+    ControllerRuntimeUpdatePayload, validate_runtime_changes,
+)
 from crystallization_mpc.messaging.schema import utc_ts
 
 ROLE = "controller"
@@ -159,10 +165,16 @@ class ControllerService:
         self._processed_seed_event_ids: set[str] = set()
         self.adaptation_enabled = False
         self.adaptation_mode = "E_A"
+        self.last_fit_success_at: str | None = None
         self.adaptation_event_count = 0
         self.duplicate_adaptation_event_count = 0
         self.last_adaptation_event: dict[str, Any] | None = None
         self._processed_adaptation_event_ids: set[str] = set()
+        self.runtime_revision = 0
+        self.runtime_configuration_current: dict[str, Any] | None = None
+        self.runtime_events: dict[str, dict[str, Any]] = {}
+        self.runtime_last_result: dict[str, Any] | None = None
+        self.runtime_history_error: str | None = None
         self.recovery_status = "disabled"
         self.recovery_error: str | None = None
         self.state_path = (
@@ -173,6 +185,29 @@ class ControllerService:
         )
         if self.state_path is not None:
             self._restore_persisted_state()
+        self.runtime_history = RuntimeHistory(self.state_path.parent / ".controller_runtime_history.json") if self.state_path else None
+        for entry in self.runtime_events.values():
+            self._archive_runtime_event(entry["command"], entry["result"])
+
+    def _archive_runtime_event(self, command, result):
+        if self.runtime_history is None:
+            return
+        try:
+            self.runtime_history.save({"command": command, "status": result["status"],
+                                       "result": result, "persistence": self.recovery_status})
+            self.runtime_history_error = None
+        except (OSError, ValueError) as exc:
+            self.runtime_history_error = f"Runtime history persistence failed: {type(exc).__name__}"
+
+    def runtime_history_page(self, run_id: str, before: int | None = None,
+                             after: int | None = None, limit: int = 50):
+        with self._lock:
+            # Replay in-memory outcomes after a temporary journal failure.
+            for entry in self.runtime_events.values():
+                self._archive_runtime_event(entry["command"], entry["result"])
+            page = self.runtime_history.page(run_id, before=before, after=after, limit=limit) if self.runtime_history else {"entries": [], "next_cursor": None}
+            return {**page, "error": self.runtime_history_error,
+                    "persistence_enabled": self.runtime_history is not None}
 
     def _build_process_adapter(self) -> ProcessAdapter:
         if not self.settings.opcua_enabled:
@@ -210,6 +245,12 @@ class ControllerService:
             "state": self.state.value,
             "parameters": copy.deepcopy(self.parameters),
             "parameter_version": self.parameter_version,
+            "runtime_controls": {
+                "revision": self.runtime_revision,
+                "configuration": copy.deepcopy(self.runtime_configuration_current),
+                "events": copy.deepcopy(self.runtime_events),
+                "last_result": copy.deepcopy(self.runtime_last_result),
+            },
             "current_run_id": self.current_run_id,
             "started_at": self.started_at,
             "stopped_at": self.stopped_at,
@@ -254,6 +295,7 @@ class ControllerService:
             "adaptation": {
                 "enabled": self.adaptation_enabled,
                 "mode": self.adaptation_mode,
+                "last_success_at": self.last_fit_success_at,
                 "event_count": self.adaptation_event_count,
                 "duplicate_count": self.duplicate_adaptation_event_count,
                 "last_event": copy.deepcopy(self.last_adaptation_event),
@@ -290,17 +332,20 @@ class ControllerService:
                 f".{self.state_path.name}.{uuid4().hex}.tmp"
             )
             try:
-                temporary.write_text(
-                    json.dumps(
+                serialized = json.dumps(
                         document,
                         indent=2,
                         ensure_ascii=False,
                         allow_nan=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
+                    ) + "\n"
+                with temporary.open("w", encoding="utf-8") as stream:
+                    stream.write(serialized)
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 os.replace(temporary, self.state_path)
+                if self.recovery_status == "persistence_error":
+                    self.recovery_status = "saved"
+                    self.recovery_error = None
             finally:
                 if temporary.exists():
                     temporary.unlink()
@@ -333,6 +378,7 @@ class ControllerService:
             adaptation = document.get("adaptation") or {}
             if not isinstance(adaptation, dict):
                 raise ValueError("Controller recovery adaptation must be an object.")
+            self.last_fit_success_at = adaptation.get("last_success_at")
             control_output = document.get("control_output") or {}
             if not isinstance(control_output, dict):
                 raise ValueError("Controller recovery control output must be an object.")
@@ -510,6 +556,39 @@ class ControllerService:
                 self._next_tick_monotonic = now + float(
                     self.parameters.get("dt", 5.0)
                 )
+            runtime = document.get("runtime_controls")
+            actual_configuration = self.adapter.runtime_configuration() if state == ControllerState.RUNNING else None
+            if runtime is not None:
+                if not isinstance(runtime, dict):
+                    raise ValueError("Invalid runtime controls recovery document.")
+                revision = runtime.get("revision")
+                if type(revision) is not int or revision < 0:
+                    raise ValueError("Invalid runtime controls revision.")
+                saved_configuration = runtime.get("configuration")
+                if saved_configuration is not None:
+                    saved_configuration = validate_runtime_changes(saved_configuration)
+                    if state == ControllerState.RUNNING and saved_configuration != actual_configuration:
+                        raise ValueError("Runtime controls disagree with recovered algorithm state.")
+                events = runtime.get("events")
+                if not isinstance(events, dict):
+                    raise ValueError("Invalid runtime event journal.")
+                for event_id, entry in events.items():
+                    event = ControllerRuntimeUpdatePayload.from_mapping(entry["command"])
+                    if event_id != event.event_id or event.run_id != self.current_run_id:
+                        raise ValueError("Runtime event journal belongs to another run.")
+                    if not isinstance(entry.get("result"), dict):
+                        raise ValueError("Runtime event result is missing.")
+                self.runtime_revision = revision
+                self.runtime_configuration_current = copy.deepcopy(saved_configuration)
+                self.runtime_events = copy.deepcopy(events)
+                self.runtime_last_result = copy.deepcopy(runtime.get("last_result"))
+            else:
+                # Old archives already contain the algorithm's actual parameters
+                # and adaptation settings. No migration of GSensor state is needed.
+                self.runtime_configuration_current = (
+                    copy.deepcopy(dict(actual_configuration))
+                    if actual_configuration is not None else None
+                )
             self.recovery_status = "restored"
             self.recovery_error = None
         except Exception as exc:
@@ -637,10 +716,16 @@ class ControllerService:
                 if result.get("accepted"):
                     self.accepted_message_count += 1
                     self.last_error = None
+                else:
+                    self.rejected_message_count += 1
+                    self.last_error = result.get("reason")
 
         with self._lock:
             self.last_message_result = copy.deepcopy(result)
             self._try_persist_state_locked()
+            if result.get("kind") == "runtime" and result.get("event_id") in self.runtime_events:
+                event = self.runtime_events[result["event_id"]]
+                self._archive_runtime_event(event["command"], event["result"])
         return result
 
     def _dispatch(self, message: Mapping[str, Any]) -> dict[str, Any]:
@@ -680,6 +765,11 @@ class ControllerService:
             if source != "central":
                 raise ValueError("controller.adaptation.set must come from Central.")
             return self._set_adaptation(payload)
+
+        if msg_type == "command" and name == CONTROLLER_RUNTIME_UPDATE_COMMAND:
+            if source != "central":
+                raise ValueError("controller.runtime.update must come from Central.")
+            return self._update_runtime(payload)
 
         if msg_type == "measurement" and name == GROWTH_RATE_SAMPLE_MESSAGE:
             if source != "gsensor":
@@ -767,10 +857,15 @@ class ControllerService:
             self._processed_seed_event_ids.clear()
             self.adaptation_enabled = command.adaptation_enabled
             self.adaptation_mode = command.adaptation_mode
+            self.last_fit_success_at = None
             self.adaptation_event_count = 0
             self.duplicate_adaptation_event_count = 0
             self.last_adaptation_event = None
             self._processed_adaptation_event_ids.clear()
+            self.runtime_revision = 0
+            self.runtime_events.clear()
+            self.runtime_last_result = None
+            self.runtime_configuration_current = None
 
             try:
                 self.adapter.configure(copy.deepcopy(self.parameters), command.run_id)
@@ -802,6 +897,10 @@ class ControllerService:
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter start failed: {exc}") from exc
             self.state = ControllerState.RUNNING
+            configuration = self.adapter.runtime_configuration()
+            self.runtime_configuration_current = (
+                copy.deepcopy(dict(configuration)) if configuration is not None else None
+            )
             now = self._monotonic_clock()
             self._run_started_monotonic = now
             self._next_tick_monotonic = now + float(self.parameters.get("dt", 5.0))
@@ -883,7 +982,8 @@ class ControllerService:
                 raise ValueError(
                     "controller.adaptation.set run_id does not match current experiment."
                 )
-            if event.event_id in self._processed_adaptation_event_ids:
+            if (event.event_id in self._processed_adaptation_event_ids
+                    and event.event_id not in self.runtime_events):
                 self.duplicate_adaptation_event_count += 1
                 return {
                     "accepted": True,
@@ -894,40 +994,69 @@ class ControllerService:
             if self.state != ControllerState.RUNNING:
                 raise ValueError("Controller is not running an experiment.")
 
-            event_document = event.to_dict()
-            no_change = (
-                self.adaptation_enabled == event.enabled
-                and self.adaptation_mode == event.mode
+            # Compatibility transport only: same atomic path and unsupported-
+            # adapter rejection as the new runtime command.
+            prior = self.runtime_events.get(event.event_id)
+            revision = (
+                prior["command"]["expected_revision"] if prior else self.runtime_revision
             )
-            if not no_change:
-                try:
-                    self.adapter.set_adaptation(
-                        event.enabled,
-                        event.mode,
-                        copy.deepcopy(event_document),
-                    )
-                except Exception as exc:
-                    self.adapter_error_count += 1
-                    self.state = ControllerState.ERROR
-                    raise RuntimeError(
-                        f"Controller adapter adaptation change failed: {exc}"
-                    ) from exc
+            return self._update_runtime(ControllerRuntimeUpdatePayload(
+                event.run_id, event.event_id, revision,
+                {"adaptation_enabled": event.enabled, "adaptation_mode": event.mode},
+                event.requested_at,
+            ).to_dict())
 
-            self.adaptation_enabled = event.enabled
-            self.adaptation_mode = event.mode
-            self._processed_adaptation_event_ids.add(event.event_id)
-            self.adaptation_event_count += 1
-            self.last_adaptation_event = event_document
-
-        return {
-            "accepted": True,
-            "kind": "adaptation",
-            "event_id": event.event_id,
-            "enabled": event.enabled,
-            "mode": event.mode,
-            "no_change": no_change,
-            "adapter_called": not no_change,
-        }
+    def _update_runtime(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        event = ControllerRuntimeUpdatePayload.from_mapping(payload)
+        with self._lock:
+            if event.run_id != self.current_run_id:
+                raise ValueError("Runtime run_id does not match current experiment.")
+            command = event.to_dict()
+            prior = self.runtime_events.get(event.event_id)
+            if prior:
+                if prior["command"] != command:
+                    raise ValueError("Runtime event_id was reused with different content.")
+                result = {**copy.deepcopy(prior["result"]), "duplicate": True}
+                self.runtime_last_result = result
+                return result
+            before = copy.deepcopy(self.runtime_configuration_current)
+            result = {
+                "kind": "runtime", "event_id": event.event_id, "run_id": event.run_id,
+                "requested_at": event.requested_at, "processed_at": utc_ts(),
+                "revision": self.runtime_revision, "before": before,
+            }
+            try:
+                if self.state != ControllerState.RUNNING:
+                    raise ValueError("Controller is not running an experiment.")
+                if event.expected_revision != self.runtime_revision:
+                    raise ValueError("Runtime configuration revision conflict.")
+                if before is None:
+                    raise ValueError("This Controller adapter does not support runtime updates.")
+                after = dict(self.adapter.update_runtime(event.changes))
+            except (ValueError, TypeError, NotImplementedError) as exc:
+                result.update(accepted=False, status="rejected", reason=str(exc),
+                              configuration=before)
+            else:
+                self.runtime_revision += 1
+                self.runtime_configuration_current = copy.deepcopy(after)
+                self.adaptation_enabled = after["adaptation_enabled"]
+                self.adaptation_mode = after["adaptation_mode"]
+                if {"adaptation_enabled", "adaptation_mode"} & event.changes.keys():
+                    self.adaptation_event_count += 1
+                    self._processed_adaptation_event_ids.add(event.event_id)
+                    self.last_adaptation_event = {
+                        "run_id": event.run_id, "event_id": event.event_id,
+                        "enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
+                        "requested_at": event.requested_at,
+                    }
+                result.update(accepted=True, status="applied", revision=self.runtime_revision,
+                              configuration=after, effective_tick=self.control_tick_count + 1,
+                              no_change=before == after, applied_at=utc_ts())
+            self.runtime_events[event.event_id] = {
+                "command": command, "result": copy.deepcopy(result),
+            }
+            self.runtime_last_result = copy.deepcopy(result)
+            return result
 
     def _accept_sample(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         _positive_int(payload.get("frame_seq"), "frame_seq")
@@ -1021,7 +1150,11 @@ class ControllerService:
                 process_state=process_state,
             )
             try:
+                fits_before = (self.adapter.adaptation_status() or {}).get("fit_count")
                 output = self.adapter.step(tick)
+                fits_after = (self.adapter.adaptation_status() or {}).get("fit_count")
+                if fits_before is not None and fits_after is not None and fits_after > fits_before:
+                    self.last_fit_success_at = utc_ts()
                 if output is not None and not isinstance(output, ControllerStepResult):
                     raise TypeError(
                         "Controller adapter step() must return ControllerStepResult or None."
@@ -1109,7 +1242,12 @@ class ControllerService:
             process_write_attempted=process_write_attempted,
             process_write_error=process_write_error,
             # The tick, run ID, and its parameter snapshot share the service lock.
-            control_target=_configured_control_target(self.parameters),
+            control_target=(
+                self.runtime_configuration_current["control_target"]
+                if self.runtime_configuration_current is not None
+                else _configured_control_target(self.parameters)
+            ),
+            runtime_revision=self.runtime_revision,
         )
         if self.measurement_writer is not None:
             try:
@@ -1152,6 +1290,8 @@ class ControllerService:
             ),
             "growth_sample_age_s": tick.growth_sample_age_s,
             "computed_at": computed_at,
+            "runtime_configuration": copy.deepcopy(self.runtime_configuration_current),
+            "runtime_revision": self.runtime_revision,
             "result": output.to_dict(),
             "process_state": (
                 process_state.to_dict() if process_state is not None else None
@@ -1219,6 +1359,18 @@ class ControllerService:
                 "current_run_id": self.current_run_id,
                 "parameter_version": self.parameter_version,
                 "parameter_count": len(self.parameters),
+                "runtime_controls": {
+                    "supported": self.runtime_configuration_current is not None,
+                    "history_supported": self.runtime_history is not None,
+                    "revision": self.runtime_revision,
+                    "configuration": copy.deepcopy(self.runtime_configuration_current),
+                    "last_result": copy.deepcopy(self.runtime_last_result),
+                    "recent_events": [
+                        copy.deepcopy(entry["result"])
+                        for entry in list(self.runtime_events.values())[-50:]
+                    ],
+                    "history_error": self.runtime_history_error,
+                },
                 "parameters": copy.deepcopy(self.parameters),
                 "started_at": self.started_at,
                 "stopped_at": self.stopped_at,
@@ -1251,6 +1403,8 @@ class ControllerService:
                     "last": copy.deepcopy(self.last_seed_event),
                 },
                 "adaptation": {
+                    "fitting": ({**copy.deepcopy(self.adapter.adaptation_status()), "last_success_at": self.last_fit_success_at}
+                                if self.adapter.adaptation_status() is not None else None),
                     "enabled": self.adaptation_enabled,
                     "active": (
                         self.state == ControllerState.RUNNING

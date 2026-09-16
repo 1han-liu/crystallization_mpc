@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from functools import wraps
@@ -14,13 +15,14 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
+from crystallization_mpc.apps.central.runtime_controls import RuntimeRequestStore
 from crystallization_mpc.apps.central.params import (
     ParameterValidationError,
     apply_derived_params,
@@ -56,6 +58,7 @@ from crystallization_mpc.messaging.idgen import next_seq
 from crystallization_mpc.messaging.commands import (
     CONTROLLER_ADD_SEED_COMMAND,
     CONTROLLER_ADAPTATION_SET_COMMAND,
+    CONTROLLER_RUNTIME_UPDATE_COMMAND,
     EXPERIMENT_MODE_LIVE,
     EXPERIMENT_SELECT_COMMAND,
     EXPERIMENT_START_COMMAND,
@@ -74,6 +77,7 @@ from crystallization_mpc.messaging.contracts import (
 )
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for, route
 from crystallization_mpc.messaging.schema import build_envelope, utc_ts
+from crystallization_mpc.messaging.controller_runtime import ControllerRuntimeUpdatePayload
 
 ROLE = "central"
 TARGET_VALUES = ("sigma", "G")
@@ -129,6 +133,15 @@ class RunConfigurationUpdate(ExperimentContext):
 class OperationValueUpdate(ExperimentContext):
     key: str
     value: Any
+
+
+class ControllerRuntimeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    run_id: str
+    event_id: str
+    expected_revision: int
+    changes: Dict[str, Any]
+    requested_at: str
 
 
 class ExperimentCreateRequest(ExperimentContext):
@@ -428,6 +441,17 @@ class CentralApp:
         )
         return env
 
+    def publish_controller_runtime_command(
+        self, payload: ControllerRuntimeUpdatePayload,
+    ) -> Dict[str, Any]:
+        env = build_envelope(
+            src=ROLE, dst="controller", msg_type="command",
+            name=CONTROLLER_RUNTIME_UPDATE_COMMAND, seq=next_seq(),
+            payload=payload.to_dict(),
+        )
+        self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
+        return env
+
     def build_experiment_select_command(
         self,
         run_id: str,
@@ -517,6 +541,83 @@ class CentralService:
         self.status_rejection_count = 0
         self._consumer_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self.runtime_request_store = RuntimeRequestStore(self.experiment_root)
+        self._runtime_history_cursors: dict[str, int] = {}
+        self.runtime_history_error: str | None = None
+        self._runtime_monitor_stop = threading.Event()
+        self._runtime_monitor_thread: threading.Thread | None = None
+        self.runtime_export_error: str | None = None
+        self.runtime_export_enabled = os.getenv("CENTRAL_RUNTIME_INFLUX_ENABLED", os.getenv("CONTROLLER_INFLUX_ENABLED", "false")).lower() == "true"
+
+    def _sync_runtime_history(self, run_id: str, controller: dict[str, Any], *, all_pages=False):
+        self.runtime_history_error = None
+        if not (controller.get("available") and (controller.get("runtime_controls") or {}).get("history_supported")):
+            return
+        try:
+            if all_pages:
+                self._runtime_history_cursors[run_id] = 0
+            while True:
+                cursor = self._runtime_history_cursors.get(run_id, 0)
+                query = urllib.parse.urlencode({"run_id": run_id, "after": cursor, "limit": 100})
+                url = self.controller_status_url.rsplit("/", 1)[0] + "/runtime-history?" + query
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    page = json.load(response)
+                if page.get("error"):
+                    raise ValueError(page["error"])
+                for entry in page["entries"]:
+                    if entry["command"]["run_id"] != run_id:
+                        raise ValueError("History run mismatch.")
+                    sequence = entry["sequence"]
+                    # Central assigns its own ordering, since it also has pending requests.
+                    self.runtime_request_store.history.save({k: v for k, v in entry.items()
+                                                            if k not in {"sequence", "grafana_sync", "grafana_error"}})
+                    self._runtime_history_cursors[run_id] = sequence
+                self.runtime_history_error = None
+                if not all_pages or page.get("next_cursor") is None:
+                    break
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.runtime_history_error = f"History synchronization incomplete: {type(exc).__name__}"
+
+    @_locked_service_state
+    def runtime_history_page(self, run_id: str, before: int | None = None, limit: int = 50):
+        self.experiments.registry.get(run_id)
+        self._sync_runtime_history(run_id, self.controller_status(), all_pages=True)
+        try:
+            page = self.runtime_request_store.history.page(run_id, before=before, limit=limit)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            page = {"entries": [], "next_cursor": None}
+            self.runtime_history_error = f"History unavailable: {type(exc).__name__}"
+        return {**page,
+                "error": self.runtime_history_error, "grafana_enabled": self.runtime_export_enabled,
+                "grafana_error": self.runtime_export_error}
+
+    def _runtime_monitor(self):
+        from crystallization_mpc.apps.central.runtime_telemetry import export_pending
+        from crystallization_mpc.infra.influxdb.client import InfluxSettings
+        from crystallization_mpc.infra.influxdb.write import InfluxWriter
+        writer = None
+        try:
+            while not self._runtime_monitor_stop.is_set():
+                try:
+                    with self._lock:
+                        runs = self.experiments.list().get("experiments", [])
+                        controller = self.controller_status()
+                        for run in runs:
+                            self._sync_runtime_history(run["run_id"], controller)
+                            self.runtime_request_store.observe(run["run_id"], controller)
+                    if self.runtime_export_enabled:
+                        if writer is None:
+                            writer = InfluxWriter(InfluxSettings(
+                                url=os.environ["CONTROLLER_INFLUX_URL"], token=os.environ["CONTROLLER_INFLUX_TOKEN"],
+                                org=os.environ["CONTROLLER_INFLUX_ORG"], bucket=os.environ["CONTROLLER_INFLUX_BUCKET"]))
+                        export_pending(self.runtime_request_store.history, writer)
+                    self.runtime_export_error = None
+                except Exception as exc:
+                    self.runtime_export_error = f"Runtime event synchronization incomplete: {type(exc).__name__}"
+                self._runtime_monitor_stop.wait(2)
+        finally:
+            if writer is not None:
+                writer.close()
 
     def _active_params_path(self) -> Path:
         if self.params_path.exists():
@@ -621,6 +722,10 @@ class CentralService:
 
     def start(self) -> None:
         self.publisher.connect()
+        if not self._runtime_monitor_thread or not self._runtime_monitor_thread.is_alive():
+            self._runtime_monitor_stop.clear()
+            self._runtime_monitor_thread = threading.Thread(target=self._runtime_monitor, name="central-runtime-events", daemon=True)
+            self._runtime_monitor_thread.start()
         if self._consumer_thread and self._consumer_thread.is_alive():
             return
         self._consumer_thread = threading.Thread(
@@ -631,6 +736,9 @@ class CentralService:
         self._consumer_thread.start()
 
     def stop(self) -> None:
+        self._runtime_monitor_stop.set()
+        if self._runtime_monitor_thread:
+            self._runtime_monitor_thread.join(timeout=3)
         self.publisher.close()
 
     def _consume_forever(self) -> None:
@@ -817,11 +925,24 @@ class CentralService:
                 "message_count": self.status_message_count,
                 "rejection_count": self.status_rejection_count,
             }
+        controller = self.controller_status()
+        if current_run_id:
+            self._sync_runtime_history(current_run_id, controller)
+        request = self.runtime_request_store.observe(current_run_id, controller)
+        errors = [self.runtime_history_error, self.runtime_request_store.observation_error]
+        try:
+            history = self.runtime_request_store.history.latest_fields(current_run_id) if current_run_id else []
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            history = []
+            errors.append(f"History unavailable: {type(exc).__name__}")
         return {
             "current_experiment": current,
             "experiments": experiments,
             "gsensor": gsensor,
-            "controller": self.controller_status(),
+            "controller": controller,
+            "runtime_request": request,
+            "runtime_history": history,
+            "runtime_history_error": "; ".join(dict.fromkeys(filter(None, errors))) or None,
         }
     def overlay_path(self, run_id: str, kind: str) -> Path:
         if kind not in {"latest", "final"}:
@@ -1274,24 +1395,62 @@ class CentralService:
         """Start or stop Controller parameter adaptation for the current run."""
 
         run_id, controller = self._require_running_controller("Adaptation")
-        current_enabled = bool(controller.get("adaptation", {}).get("enabled", False))
-        if current_enabled == enabled:
-            return {
-                "requested": False,
-                "unchanged": True,
-                "adaptation": dict(controller.get("adaptation", {})),
-            }
+        runtime = controller.get("runtime_controls") or {}
+        result = self.update_controller_runtime(ControllerRuntimeUpdatePayload(
+            run_id, uuid4().hex, runtime.get("revision", 0),
+            {"adaptation_enabled": enabled}, utc_ts(),
+        ))
+        # Keep existing clients working while the top-level runtime controls
+        # replace the old duplicate button.
+        result["event"] = result["runtime_request"]["command"]
+        return result
 
-        command = self.publisher.publish_controller_adaptation_command(
-            run_id,
-            enabled=enabled,
-            mode=self.run_configuration.adaptation_mode,
-        )
-        return {
-            "requested": True,
-            "event": dict(command["payload"]),
-            "command": command,
-        }
+    @_locked_service_state
+    def update_controller_runtime(self, event: ControllerRuntimeUpdatePayload) -> Dict[str, Any]:
+        run_id, controller = self._require_running_controller("Runtime controls")
+        if event.run_id != run_id:
+            raise InvalidExperimentStateError("Runtime run_id does not match the current experiment.")
+        runtime = controller.get("runtime_controls") or {}
+        if not runtime.get("supported"):
+            raise InvalidExperimentStateError("Controller does not support runtime updates.")
+        prior = self.runtime_request_store.observe(run_id, controller)
+        if prior and prior["command"]["event_id"] == event.event_id:
+            if prior["command"] != event.to_dict():
+                raise InvalidExperimentStateError("Runtime event_id was reused with different content.")
+            if prior["status"] in {"applied", "rejected"}:
+                return {"requested": False, "runtime_request": prior}
+            entry = prior
+        else:
+            if prior and prior["status"] not in {"applied", "rejected"}:
+                self._record_runtime_rejection(event, runtime, "A runtime request is unconfirmed; retry that same event.")
+            if event.expected_revision != runtime.get("revision"):
+                self._record_runtime_rejection(event, runtime, "Runtime revision changed; refresh before editing.")
+            entry = {
+                "command": event.to_dict(), "status": "pending",
+                "created_at": time.time(), "result": None, "transport_error": None,
+            }
+        # Persist the exact event before delivery; an interrupted request can be
+        # recovered after refresh or Central restart without a new event ID.
+        self.runtime_request_store.save(run_id, entry)
+        try:
+            self.publisher.publish_controller_runtime_command(event)
+        except Exception as exc:
+            entry["transport_error"] = f"Delivery not confirmed: {type(exc).__name__}"
+        else:
+            entry["transport_error"] = None
+        self.runtime_request_store.save(run_id, entry)
+        return {"requested": True, "runtime_request": entry}
+
+    def _record_runtime_rejection(self, event, runtime, reason):
+        # Preserve the existing in-flight request; record this separate refusal
+        # only in history. Central rejection is not a Controller application.
+        self.runtime_request_store.history.save({
+            "command": event.to_dict(), "status": "rejected", "created_at": time.time(),
+            "result": {"run_id": event.run_id, "event_id": event.event_id, "status": "rejected",
+                       "source": "central", "reason": reason, "processed_at": utc_ts(),
+                       "revision": runtime.get("revision"), "before": runtime.get("configuration"),
+                       "configuration": runtime.get("configuration")}})
+        raise InvalidExperimentStateError(reason)
 
     def _require_running_controller(
         self,
@@ -1538,6 +1697,24 @@ def add_seed(payload: ExperimentContext | None = None) -> Dict[str, Any]:
     try:
         with service.ui_action(payload):
             return service.add_seed()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/operation/controller/runtime")
+def update_controller_runtime(payload: ControllerRuntimeRequest) -> Dict[str, Any]:
+    try:
+        event = ControllerRuntimeUpdatePayload.from_mapping(payload.model_dump())
+        with service.ui_action(ExperimentContext(expected_run_id=event.run_id)):
+            return service.update_controller_runtime(event)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.get("/api/operation/controller/runtime/history")
+def runtime_history(run_id: str, before: int | None = Query(None, ge=1), limit: int = Query(50, ge=1, le=100)):
+    try:
+        return service.runtime_history_page(run_id, before, limit)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
