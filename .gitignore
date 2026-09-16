@@ -29,7 +29,15 @@ references_local/
 # Local Gsensor Hough/DSCGR comparison outputs
 /dscgr_runs*/
 
-# Verification suites and golden fixtures are release artifacts and are tracked.
+# Tests, reference fixtures, and diagnostic/demo tools are local-only.
+/tests/
+/scripts/capture_adaptation_reference_inputs.py
+/scripts/report_adaptation_reference.py
+/scripts/run_controller_simulation.py
+/scripts/run_runtime_browser_acceptance.py
+/scripts/run_runtime_control_demo.py
+/scripts/verify_runtime_observability.py
+/scripts/run_*_influx_test.py
 
 # Local development notes and experiment plans
 /agent.md

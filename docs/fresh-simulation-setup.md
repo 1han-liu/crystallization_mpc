@@ -97,6 +97,10 @@ Create Experiment 后检查参数，再 Start Experiment；Controller 应为当�
 
 ## 测试与已知限制
 
+测试代码、MATLAB 参考数据和测试/演示脚本仅在本地保留，不随 Git 上传。
+以下测试命令仅适用于已具备这些文件的开发目录，新克隆的项目不能直接执行；
+上面的正常仿真启动步骤不依赖这些测试文件。
+
 运行 Python 测试需要 pytest；完整 GSensor 测试还需要 `requirements-gsensor.txt`。
 MATLAB 对照测试使用固定 Python/NumPy/SciPy 版本，参见
 [Controller 基准说明](controller-reference-validation.md)。现有 13 项数值容差失败未被本次修复隐藏。

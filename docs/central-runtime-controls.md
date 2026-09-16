@@ -1,5 +1,10 @@
 # Central runtime controls: implementation and acceptance record
 
+> Distribution note: tests, reference fixtures, and diagnostic/demo scripts are
+> local-only and excluded from Git. Test/demo commands and paths below document
+> the development checkout; they are not available in a fresh clone without
+> those local files. Production runtime and startup tools remain tracked.
+
 ## Objective and boundary
 
 Within one experiment, reuse Central's control target, adaptive parameter

@@ -1,5 +1,9 @@
 # Source Baseline
 
+> Historical provenance: test fixtures and MATLAB harness files mentioned below
+> are now local-only and excluded from Git; their paths describe the original
+> baseline, not files shipped with the current branch.
+
 This standalone working copy was created from the tracked working-tree files of
 `MPCrystal_original_python` before alignment integration began.
 

@@ -1,5 +1,10 @@
 # Run Configuration observability
 
+> Distribution note: test suites and acceptance/demo scripts are local-only
+> and excluded from Git. Verification commands below require those local files;
+> they are not available in a fresh clone. Runtime telemetry and Grafana
+> configuration tools remain part of the repository.
+
 ## Contract
 
 Run setup (Run Type, Controller Mode, Growth-rate Source) is locked after start.

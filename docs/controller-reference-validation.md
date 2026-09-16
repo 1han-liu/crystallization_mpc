@@ -1,5 +1,10 @@
 # Controller reference validation
 
+> Distribution note: the test suite, MATLAB fixtures/harness, and numerical
+> audit scripts described here are local-only and excluded from Git. References
+> below preserve validation provenance; reproduction requires those local
+> development files and is not available from a fresh clone alone.
+
 ## Frozen baseline
 
 The only numerical oracle for this validation is
