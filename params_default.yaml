@@ -42,7 +42,7 @@ params:
     default: 5
   controller:
   - key: sigma_set
-    default: 0.12
+    default: 0.035
   - key: G_set
     default: 3.0e-08
   - key: params.var_dT_dt
@@ -116,9 +116,9 @@ params:
   - key: T_j_max
     default: 453.15
   - key: min_num_adapt
-    default: 30
+    default: 15
   - key: max_num_adapt
-    default: 1000
+    default: 50
   - key: min_count_adapt
     default: 30
   - key: q2_G_measure
