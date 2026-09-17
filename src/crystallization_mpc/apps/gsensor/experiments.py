@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from crystallization_mpc.experiments import ExperimentRegistry
+from crystallization_mpc.experiments import (
+    TERMINAL_EXPERIMENT_STATUSES,
+    ExperimentRegistry,
+)
 from crystallization_mpc.messaging.commands import EXPERIMENT_MODE_LIVE
 
 GSENSOR_STATE_FILENAME = ".gsensor_experiment_state.json"
@@ -175,6 +178,43 @@ class GsensorExperimentManager:
         _atomic_write_json(path, document)
         return path
 
+    def save_reinitialization_snapshot(
+        self,
+        run_id: str,
+        document: Mapping[str, Any],
+        *,
+        kind: str,
+    ) -> Path:
+        """Append one immutable runtime reinitialization history record."""
+
+        if kind not in {"initialization", "processing"}:
+            raise ValueError(
+                "Reinitialization snapshot kind must be initialization or processing."
+            )
+        if not isinstance(document, Mapping):
+            raise ValueError("Reinitialization snapshot must be an object.")
+        current = self.require_current()
+        if current["run_id"] != run_id:
+            raise ValueError(
+                "Reinitialization snapshot run_id does not match the selected experiment."
+            )
+        manifest = self.registry.get(run_id)
+        if manifest.status in TERMINAL_EXPERIMENT_STATUSES:
+            raise RuntimeError(
+                "Reinitialization history cannot be changed after the experiment ends."
+            )
+        snapshot = dict(document)
+        if snapshot.get("run_id") != run_id:
+            raise ValueError(
+                "Reinitialization snapshot document run_id does not match experiment."
+            )
+
+        history_directory = self.registry.image_dir(run_id).parent / "gsensor_history"
+        history_directory.mkdir(parents=True, exist_ok=True)
+        path = history_directory / f"{kind}_{uuid4().hex}.json"
+        _atomic_write_json_once(path, snapshot)
+        return path
+
     def processing_state_path(self, run_id: str) -> Path:
         return self.registry.image_dir(run_id).parent / GSENSOR_PROCESSING_STATE_FILENAME
 
@@ -275,6 +315,32 @@ def _atomic_write_json(path: Path, document: Mapping[str, Any]) -> None:
             encoding="utf-8",
         )
         os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _atomic_write_json_once(path: Path, document: Mapping[str, Any]) -> None:
+    """Atomically publish a new JSON file without replacing an existing record."""
+
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    dict(document),
+                    indent=2,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        # A hard link publishes the fully written inode only if the immutable
+        # destination does not already exist. Unlike replace(), this cannot
+        # overwrite history even if a UUID collision is forced in a test.
+        os.link(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()

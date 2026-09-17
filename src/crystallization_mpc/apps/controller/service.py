@@ -11,6 +11,7 @@ import math
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -46,7 +47,10 @@ from crystallization_mpc.messaging.commands import (
     CONTROLLER_RUNTIME_UPDATE_COMMAND,
     EXPERIMENT_START_COMMAND,
     EXPERIMENT_STOP_COMMAND,
+    GSENSOR_DISABLE_COMMAND,
+    GSENSOR_ENABLE_COMMAND,
     GROWTH_RATE_SAMPLE_MESSAGE,
+    GROWTH_RATE_STATUS_MESSAGE,
     PARAMS_UPDATE_MESSAGE,
 )
 from crystallization_mpc.messaging.contracts import (
@@ -54,7 +58,9 @@ from crystallization_mpc.messaging.contracts import (
     ControllerAdaptationPayload,
     ExperimentStartPayload,
     ExperimentStopPayload,
+    GrowthRateStatusPayload,
     GrowthRateSamplePayload,
+    GsensorActivationPayload,
 )
 from crystallization_mpc.messaging.routing import bindings_for
 from crystallization_mpc.messaging.controller_runtime import (
@@ -89,6 +95,7 @@ class ControllerService:
         measurement_writer: InfluxWriter | None = None,
         process_adapter: ProcessAdapter | None = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.settings = settings or ControllerSettings.from_env()
         self.adapter = adapter or load_controller_adapter(self.settings.adapter_spec)
@@ -100,6 +107,7 @@ class ControllerService:
         self._control_stop = threading.Event()
         self._control_wakeup = threading.Event()
         self._monotonic_clock = monotonic_clock
+        self._wall_clock = wall_clock
         self._lock = threading.RLock()
 
         self.state = ControllerState.IDLE
@@ -113,6 +121,23 @@ class ControllerService:
         self.last_sample: dict[str, Any] | None = None
         self.last_valid_sample: GrowthRateSamplePayload | None = None
         self.last_valid_sample_received_monotonic: float | None = None
+        self.last_valid_sample_arrival_age_s: float | None = None
+        # A running live experiment starts with GSensor explicitly disabled.
+        # The cache remains unusable until Central's ordered activation command,
+        # a matching GSensor status acknowledgement, and a fresh valid sample.
+        self.gsensor_desired_enabled = False
+        self.gsensor_enabled = False
+        self.gsensor_measurement_ready = False
+        self.gsensor_control_revision = 0
+        self.gsensor_control_event_id: str | None = None
+        self.gsensor_last_command_enabled: bool | None = None
+        self.gsensor_last_command_requested_at: str | None = None
+        self.gsensor_initialization_generation = 0
+        self.gsensor_alignment_revision = 0
+        self.gsensor_sample_floor_frame_seq = 0
+        self.gsensor_transition_occurred_at: str | None = None
+        self.gsensor_last_status_at: str | None = None
+        self.gsensor_gate_reason = "no_experiment"
         self.control_tick_count = 0
         self.control_tick_error_count = 0
         self.last_growth_sample_age_s: float | None = None
@@ -261,6 +286,21 @@ class ControllerService:
                 if self.last_valid_sample is not None
                 else None
             ),
+            "gsensor": {
+                "desired_enabled": self.gsensor_desired_enabled,
+                "enabled": self.gsensor_enabled,
+                "measurement_ready": self.gsensor_measurement_ready,
+                "control_revision": self.gsensor_control_revision,
+                "control_event_id": self.gsensor_control_event_id,
+                "last_command_enabled": self.gsensor_last_command_enabled,
+                "last_command_requested_at": self.gsensor_last_command_requested_at,
+                "initialization_generation": self.gsensor_initialization_generation,
+                "alignment_revision": self.gsensor_alignment_revision,
+                "sample_floor_frame_seq": self.gsensor_sample_floor_frame_seq,
+                "transition_occurred_at": self.gsensor_transition_occurred_at,
+                "last_status_at": self.gsensor_last_status_at,
+                "gate_reason": self.gsensor_gate_reason,
+            },
             "last_message": copy.deepcopy(self.last_message),
             "last_message_result": copy.deepcopy(self.last_message_result),
             "last_error": self.last_error,
@@ -403,9 +443,77 @@ class ControllerService:
                 if isinstance(last_valid_sample, Mapping)
                 else None
             )
-            # Monotonic timestamps cannot survive a process restart. A restored
-            # sample starts stale and must be replaced before adaptation.
+            gsensor = document.get("gsensor") or {}
+            if not isinstance(gsensor, Mapping):
+                raise ValueError("Controller recovery GSensor state must be an object.")
+            control_revision = gsensor.get("control_revision", 0)
+            initialization_generation = gsensor.get("initialization_generation", 0)
+            alignment_revision = gsensor.get("alignment_revision", 0)
+            sample_floor = gsensor.get("sample_floor_frame_seq", 0)
+            for name, value in (
+                ("control_revision", control_revision),
+                ("initialization_generation", initialization_generation),
+                ("alignment_revision", alignment_revision),
+                ("sample_floor_frame_seq", sample_floor),
+            ):
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"Controller recovery GSensor {name} is invalid.")
+            control_event_id = gsensor.get("control_event_id")
+            if control_event_id is not None and (
+                not isinstance(control_event_id, str) or not control_event_id.strip()
+            ):
+                raise ValueError("Controller recovery GSensor event ID is invalid.")
+            last_command_enabled = gsensor.get("last_command_enabled")
+            if last_command_enabled is not None and type(last_command_enabled) is not bool:
+                raise ValueError("Controller recovery GSensor command state is invalid.")
+            for name in (
+                "last_command_requested_at",
+                "transition_occurred_at",
+                "last_status_at",
+            ):
+                timestamp = gsensor.get(name)
+                if timestamp is not None:
+                    _timestamp_value(timestamp, f"gsensor.{name}")
+            self.gsensor_control_revision = control_revision
+            self.gsensor_control_event_id = control_event_id
+            self.gsensor_last_command_enabled = last_command_enabled
+            self.gsensor_last_command_requested_at = gsensor.get(
+                "last_command_requested_at"
+            )
+            self.gsensor_initialization_generation = initialization_generation
+            self.gsensor_alignment_revision = alignment_revision
+            self.gsensor_sample_floor_frame_seq = max(
+                sample_floor,
+                self.last_frame_seq or 0,
+            )
+            self.gsensor_transition_occurred_at = gsensor.get(
+                "transition_occurred_at"
+            )
+            self.gsensor_last_status_at = gsensor.get("last_status_at")
+            desired_enabled = gsensor.get("desired_enabled", False)
+            if type(desired_enabled) is not bool:
+                raise ValueError("Controller recovery GSensor desired state is invalid.")
+            # Permission can survive a Controller-only restart while the GSensor
+            # process keeps running. Availability and sample freshness cannot.
+            self.gsensor_desired_enabled = desired_enabled
+            self.gsensor_enabled = False
+            self.gsensor_measurement_ready = False
+            self.gsensor_gate_reason = (
+                "restart_waiting_for_fresh_status"
+                if desired_enabled
+                else "disabled"
+            )
+            restart_barrier = _utc_timestamp(self._wall_clock())
+            prior_barrier = self.gsensor_transition_occurred_at
+            if prior_barrier is None or _timestamp_value(
+                restart_barrier,
+                "restart barrier",
+            ) >= _timestamp_value(prior_barrier, "saved GSensor transition occurred_at"):
+                self.gsensor_transition_occurred_at = restart_barrier
+            self.gsensor_last_status_at = None
+            self.last_valid_sample = None
             self.last_valid_sample_received_monotonic = None
+            self.last_valid_sample_arrival_age_s = None
             self.last_message = copy.deepcopy(document.get("last_message"))
             self.last_message_result = copy.deepcopy(
                 document.get("last_message_result")
@@ -771,6 +879,22 @@ class ControllerService:
                 raise ValueError("controller.runtime.update must come from Central.")
             return self._update_runtime(payload)
 
+        if msg_type == "command" and name in {
+            GSENSOR_ENABLE_COMMAND,
+            GSENSOR_DISABLE_COMMAND,
+        }:
+            if source != "central":
+                raise ValueError(f"{name} must come from Central.")
+            return self._set_gsensor_enabled(
+                payload,
+                enabled=name == GSENSOR_ENABLE_COMMAND,
+            )
+
+        if msg_type == "status" and name == GROWTH_RATE_STATUS_MESSAGE:
+            if source != "gsensor":
+                raise ValueError("growth_rate.status must come from Gsensor.")
+            return self._accept_growth_status(payload)
+
         if msg_type == "measurement" and name == GROWTH_RATE_SAMPLE_MESSAGE:
             if source != "gsensor":
                 raise ValueError("growth_rate.sample must come from Gsensor.")
@@ -833,6 +957,20 @@ class ControllerService:
             self.last_sample = None
             self.last_valid_sample = None
             self.last_valid_sample_received_monotonic = None
+            self.last_valid_sample_arrival_age_s = None
+            self.gsensor_desired_enabled = False
+            self.gsensor_enabled = False
+            self.gsensor_measurement_ready = False
+            self.gsensor_control_revision = 0
+            self.gsensor_control_event_id = None
+            self.gsensor_last_command_enabled = None
+            self.gsensor_last_command_requested_at = None
+            self.gsensor_initialization_generation = 0
+            self.gsensor_alignment_revision = 0
+            self.gsensor_sample_floor_frame_seq = 0
+            self.gsensor_transition_occurred_at = command.started_at
+            self.gsensor_last_status_at = None
+            self.gsensor_gate_reason = "disabled"
             self.control_tick_count = 0
             self.control_tick_error_count = 0
             self.last_growth_sample_age_s = None
@@ -927,6 +1065,13 @@ class ControllerService:
                 self.process_adapter.disconnect()
             self.state = ControllerState.STOPPED
             self.stopped_at = command.stopped_at
+            self._invalidate_growth_input_locked(
+                reason="experiment_stopped",
+                frame_seq=self.last_frame_seq,
+                occurred_at=command.stopped_at,
+            )
+            self.gsensor_desired_enabled = False
+            self.gsensor_enabled = False
             self._next_tick_monotonic = None
             self._control_wakeup.set()
 
@@ -1000,11 +1145,14 @@ class ControllerService:
             revision = (
                 prior["command"]["expected_revision"] if prior else self.runtime_revision
             )
-            return self._update_runtime(ControllerRuntimeUpdatePayload(
+            result = self._update_runtime(ControllerRuntimeUpdatePayload(
                 event.run_id, event.event_id, revision,
                 {"adaptation_enabled": event.enabled, "adaptation_mode": event.mode},
                 event.requested_at,
             ).to_dict())
+            if result.get("duplicate"):
+                self.duplicate_adaptation_event_count += 1
+            return result
 
     def _update_runtime(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         event = ControllerRuntimeUpdatePayload.from_mapping(payload)
@@ -1058,14 +1206,259 @@ class ControllerService:
             self.runtime_last_result = copy.deepcopy(result)
             return result
 
+    def _invalidate_growth_input_locked(
+        self,
+        *,
+        reason: str,
+        frame_seq: int | None = None,
+        occurred_at: str | None = None,
+    ) -> None:
+        """Close the live-G gate and move both replay barriers forward."""
+
+        self.last_valid_sample = None
+        self.last_valid_sample_received_monotonic = None
+        self.last_valid_sample_arrival_age_s = None
+        self.last_growth_sample_age_s = None
+        self.gsensor_measurement_ready = False
+        self.gsensor_gate_reason = reason
+        if frame_seq is not None:
+            self.gsensor_sample_floor_frame_seq = max(
+                self.gsensor_sample_floor_frame_seq,
+                int(frame_seq),
+            )
+        if occurred_at is not None:
+            candidate = _timestamp_value(occurred_at, "GSensor transition occurred_at")
+            current = (
+                _timestamp_value(
+                    self.gsensor_transition_occurred_at,
+                    "saved GSensor transition occurred_at",
+                )
+                if self.gsensor_transition_occurred_at is not None
+                else None
+            )
+            if current is None or candidate >= current:
+                self.gsensor_transition_occurred_at = occurred_at
+
+    def _set_gsensor_enabled(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        command = GsensorActivationPayload.from_mapping(payload)
+        _timestamp_value(command.requested_at, "requested_at")
+        with self._lock:
+            if self.state != ControllerState.RUNNING:
+                raise ValueError("Controller is not running an experiment.")
+            if command.run_id != self.current_run_id:
+                raise ValueError("GSensor activation run_id does not match current experiment.")
+            if command.experiment_started_at != self.started_at:
+                raise ValueError(
+                    "GSensor activation experiment_started_at does not match current experiment."
+                )
+            if command.revision < self.gsensor_control_revision:
+                raise ValueError("GSensor activation revision is stale.")
+            if command.revision == self.gsensor_control_revision:
+                if (
+                    command.event_id == self.gsensor_control_event_id
+                    and enabled == self.gsensor_last_command_enabled
+                ):
+                    return {
+                        "accepted": True,
+                        "duplicate": True,
+                        "kind": "gsensor_activation",
+                        "enabled": self.gsensor_enabled,
+                        "requested_enabled": self.gsensor_desired_enabled,
+                        "measurement_ready": self.gsensor_measurement_ready,
+                        "control_revision": self.gsensor_control_revision,
+                    }
+                raise ValueError("GSensor activation revision conflicts with its prior event.")
+            if command.event_id == self.gsensor_control_event_id:
+                raise ValueError("A new GSensor activation revision requires a new event_id.")
+
+            self.gsensor_control_revision = command.revision
+            self.gsensor_control_event_id = command.event_id
+            self.gsensor_last_command_enabled = enabled
+            self.gsensor_last_command_requested_at = command.requested_at
+            self.gsensor_desired_enabled = enabled
+            # Central's request closes the gate immediately. Enabling still
+            # requires a matching GSensor status acknowledgement.
+            self.gsensor_enabled = False
+            self._invalidate_growth_input_locked(
+                reason="awaiting_gsensor_status" if enabled else "disabled",
+                frame_seq=self.last_frame_seq,
+                occurred_at=command.requested_at,
+            )
+            return {
+                "accepted": True,
+                "kind": "gsensor_activation",
+                "enabled": False,
+                "requested_enabled": enabled,
+                "measurement_ready": False,
+                "control_revision": command.revision,
+                "control_event_id": command.event_id,
+            }
+
+    def _accept_growth_status(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        status = GrowthRateStatusPayload.from_mapping(payload)
+        required = {
+            "enabled": status.enabled,
+            "control_revision": status.control_revision,
+            "experiment_started_at": status.experiment_started_at,
+            "initialization_generation": status.initialization_generation,
+            "alignment_revision": status.alignment_revision,
+            "measurement_ready": status.measurement_ready,
+            "frame_seq": status.frame_seq,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                "growth_rate.status is missing live identity field(s): "
+                + ", ".join(missing)
+            )
+        status_time = _timestamp_value(status.occurred_at, "occurred_at")
+        with self._lock:
+            if self.state != ControllerState.RUNNING:
+                raise ValueError("Controller is not running an experiment.")
+            if status.run_id != self.current_run_id:
+                raise ValueError("growth_rate.status run_id does not match current experiment.")
+            if status.experiment_started_at != self.started_at:
+                raise ValueError(
+                    "growth_rate.status experiment_started_at does not match current experiment."
+                )
+            if status.control_revision != self.gsensor_control_revision:
+                raise ValueError("growth_rate.status control revision is stale or unexpected.")
+            if self.gsensor_control_revision > 0:
+                if status.control_event_id != self.gsensor_control_event_id:
+                    raise ValueError("growth_rate.status control event does not match current request.")
+            elif status.control_event_id is not None:
+                raise ValueError("growth_rate.status has an unexpected control event.")
+            if status.enabled and not self.gsensor_desired_enabled:
+                raise ValueError("growth_rate.status reports enabled without current authorization.")
+            if status.measurement_ready and not status.enabled:
+                raise ValueError("growth_rate.status cannot be ready while GSensor is disabled.")
+            if self.gsensor_transition_occurred_at is not None and status_time < _timestamp_value(
+                self.gsensor_transition_occurred_at,
+                "saved GSensor transition occurred_at",
+            ):
+                raise ValueError("growth_rate.status predates the active transition barrier.")
+            if self.gsensor_last_status_at is not None and status_time < _timestamp_value(
+                self.gsensor_last_status_at,
+                "saved GSensor status occurred_at",
+            ):
+                raise ValueError("growth_rate.status is older than the last accepted status.")
+            assert status.initialization_generation is not None
+            assert status.alignment_revision is not None
+            if (
+                status.initialization_generation < self.gsensor_initialization_generation
+                or status.alignment_revision < self.gsensor_alignment_revision
+            ):
+                raise ValueError("growth_rate.status processing context regressed.")
+
+            context_changed = (
+                status.initialization_generation
+                != self.gsensor_initialization_generation
+                or status.alignment_revision != self.gsensor_alignment_revision
+            )
+            self.gsensor_initialization_generation = status.initialization_generation
+            self.gsensor_alignment_revision = status.alignment_revision
+            self.gsensor_last_status_at = status.occurred_at
+            self.gsensor_enabled = bool(status.enabled)
+            if context_changed or not status.enabled or not status.measurement_ready:
+                reason = (
+                    "processing_context_changed"
+                    if context_changed
+                    else "gsensor_not_enabled"
+                    if not status.enabled
+                    else "measurement_not_ready"
+                )
+                self._invalidate_growth_input_locked(
+                    reason=reason,
+                    frame_seq=status.frame_seq,
+                    occurred_at=status.occurred_at,
+                )
+                if status.enabled and status.measurement_ready:
+                    self.gsensor_measurement_ready = True
+                    self.gsensor_gate_reason = "waiting_for_fresh_valid_sample"
+            else:
+                # Same-context ready notices are emitted before samples. They
+                # acknowledge availability but must not move replay barriers.
+                self.gsensor_measurement_ready = True
+                self.gsensor_gate_reason = (
+                    "ready"
+                    if self.last_valid_sample is not None
+                    else "waiting_for_fresh_valid_sample"
+                )
+            return {
+                "accepted": True,
+                "kind": "growth_status",
+                "enabled": self.gsensor_enabled,
+                "measurement_ready": self.gsensor_measurement_ready,
+                "control_revision": self.gsensor_control_revision,
+                "initialization_generation": self.gsensor_initialization_generation,
+                "alignment_revision": self.gsensor_alignment_revision,
+            }
+
     def _accept_sample(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         _positive_int(payload.get("frame_seq"), "frame_seq")
         sample = GrowthRateSamplePayload.from_mapping(payload)
+        processed_time = _timestamp_value(sample.processed_at, "processed_at")
         with self._lock:
             if self.state != ControllerState.RUNNING:
                 raise ValueError("Controller is not running an experiment.")
             if sample.run_id != self.current_run_id:
                 raise ValueError("growth_rate.sample run_id does not match current experiment.")
+            identity = {
+                "experiment_started_at": sample.experiment_started_at,
+                "control_revision": sample.control_revision,
+                "initialization_generation": sample.initialization_generation,
+                "alignment_revision": sample.alignment_revision,
+            }
+            missing = [name for name, value in identity.items() if value is None]
+            if missing:
+                raise ValueError(
+                    "growth_rate.sample is missing live identity field(s): "
+                    + ", ".join(missing)
+                )
+            if sample.experiment_started_at != self.started_at:
+                raise ValueError(
+                    "growth_rate.sample experiment_started_at does not match current experiment."
+                )
+            if not self.gsensor_desired_enabled or not self.gsensor_enabled:
+                raise ValueError("growth_rate.sample arrived while GSensor is disabled or unacknowledged.")
+            if sample.control_revision != self.gsensor_control_revision:
+                raise ValueError("growth_rate.sample control revision is stale.")
+            if sample.initialization_generation != self.gsensor_initialization_generation:
+                raise ValueError("growth_rate.sample initialization generation is stale.")
+            if sample.alignment_revision != self.gsensor_alignment_revision:
+                raise ValueError("growth_rate.sample alignment revision is stale.")
+            diagnostic_at_transition = (
+                not sample.valid
+                and not self.gsensor_measurement_ready
+                and sample.frame_seq == self.gsensor_sample_floor_frame_seq
+            )
+            if not self.gsensor_measurement_ready and not diagnostic_at_transition:
+                raise ValueError("growth_rate.sample arrived before measurement became ready.")
+            if (
+                sample.frame_seq < self.gsensor_sample_floor_frame_seq
+                or (
+                    sample.frame_seq == self.gsensor_sample_floor_frame_seq
+                    and not diagnostic_at_transition
+                )
+            ):
+                raise ValueError("growth_rate.sample frame is behind the active transition floor.")
+            if (
+                not diagnostic_at_transition
+                and self.gsensor_transition_occurred_at is not None
+                and processed_time <= _timestamp_value(
+                    self.gsensor_transition_occurred_at,
+                    "saved GSensor transition occurred_at",
+                )
+            ):
+                raise ValueError("growth_rate.sample predates the active transition barrier.")
+            arrival_age = max(0.0, self._wall_clock() - processed_time)
+            if arrival_age > 2.0 * float(self.parameters.get("dt_G", 15.0)):
+                raise ValueError("growth_rate.sample was already stale when received.")
             if self.last_frame_seq is not None and sample.frame_seq <= self.last_frame_seq:
                 self.duplicate_sample_count += 1
                 return {
@@ -1081,6 +1474,12 @@ class ControllerService:
             self.last_sample = sample.to_dict()
             if not sample.valid:
                 self.invalid_sample_count += 1
+                self.last_valid_sample = None
+                self.last_valid_sample_received_monotonic = None
+                self.last_valid_sample_arrival_age_s = None
+                self.last_growth_sample_age_s = None
+                if self.gsensor_measurement_ready:
+                    self.gsensor_gate_reason = "waiting_for_fresh_valid_sample"
                 return {
                     "accepted": True,
                     "kind": "sample",
@@ -1090,6 +1489,8 @@ class ControllerService:
                 }
             self.last_valid_sample = sample
             self.last_valid_sample_received_monotonic = self._monotonic_clock()
+            self.last_valid_sample_arrival_age_s = arrival_age
+            self.gsensor_gate_reason = "ready"
             self.valid_sample_count += 1
 
         result = {
@@ -1101,6 +1502,49 @@ class ControllerService:
             "cached": True,
         }
         return result
+
+    def _uses_live_growth_locked(self) -> bool:
+        source = self.parameters.get(
+            "growth_rate_source",
+            self.parameters.get("exp_sim_G"),
+        )
+        if source is None:
+            # Live experiment.start is the service contract. Older minimal
+            # parameter snapshots therefore fail closed rather than silently
+            # accepting identity-free GSensor traffic.
+            return True
+        return str(source).strip().lower() not in {"simulation", "simulated"}
+
+    def _growth_input_availability_locked(
+        self,
+        *,
+        now: float | None = None,
+    ) -> tuple[bool, str, float | None]:
+        if self.state != ControllerState.RUNNING:
+            return False, "not_running", None
+        if not self._uses_live_growth_locked():
+            return True, "simulated_source", None
+        if not self.gsensor_desired_enabled:
+            return False, "disabled", None
+        if not self.gsensor_enabled:
+            return False, self.gsensor_gate_reason or "awaiting_gsensor_status", None
+        if not self.gsensor_measurement_ready:
+            return False, self.gsensor_gate_reason or "measurement_not_ready", None
+        if self.last_valid_sample is None:
+            return False, "waiting_for_fresh_valid_sample", None
+        if self.last_valid_sample_received_monotonic is None:
+            return False, "restart_requires_fresh_valid_sample", None
+        if self.last_valid_sample_arrival_age_s is None:
+            return False, "restart_requires_fresh_valid_sample", None
+        now_value = self._monotonic_clock() if now is None else float(now)
+        age = self.last_valid_sample_arrival_age_s + max(
+            0.0,
+            now_value - self.last_valid_sample_received_monotonic,
+        )
+        maximum_age = 2.0 * float(self.parameters.get("dt_G", 15.0))
+        if age > maximum_age:
+            return False, "stale_growth_sample", age
+        return True, "ready", age
 
     def _control_tick_once(self, *, now: float | None = None) -> dict[str, Any]:
         """Execute one scheduler tick; exposed for deterministic integration tests."""
@@ -1117,14 +1561,16 @@ class ControllerService:
             tick_seq = self.control_tick_count
             elapsed = tick_seq * dt
             sample = self.last_valid_sample
-            age: float | None = None
-            if sample is not None:
-                if self.last_valid_sample_received_monotonic is None:
-                    # Do not reuse a pre-restart sample for numerical adaptation.
-                    sample = None
-                else:
-                    age = max(0.0, now_value - self.last_valid_sample_received_monotonic)
-            self.last_growth_sample_age_s = age
+            growth_available, growth_reason, age = self._growth_input_availability_locked(
+                now=now_value
+            )
+            observed_growth_age = age
+            self.last_growth_sample_age_s = observed_growth_age
+            if self._uses_live_growth_locked() and not growth_available:
+                # Never forward an unusable live sample to an arbitrary adapter.
+                # Its total age remains visible in service status/tick results.
+                sample = None
+                age = None
 
             process_state: ProcessState | None = None
             if self.settings.opcua_enabled:
@@ -1211,7 +1657,9 @@ class ControllerService:
                 "executed": True,
                 "tick_seq": tick_seq,
                 "growth_frame_seq": sample.frame_seq if sample is not None else None,
-                "growth_sample_age_s": age,
+                "growth_sample_age_s": observed_growth_age,
+                "growth_input_available": growth_available,
+                "growth_input_reason": growth_reason,
                 "output_generated": output is not None,
             }
             if output_status is not None:
@@ -1352,6 +1800,21 @@ class ControllerService:
             thread_alive = bool(
                 self._consumer_thread and self._consumer_thread.is_alive()
             )
+            growth_available, growth_reason, current_growth_age = (
+                self._growth_input_availability_locked()
+            )
+            control_target = (
+                self.runtime_configuration_current["control_target"]
+                if self.runtime_configuration_current is not None
+                else _configured_control_target(self.parameters)
+            )
+            control_hold_reason = (
+                growth_reason
+                if self._uses_live_growth_locked()
+                and control_target == "G"
+                and not growth_available
+                else None
+            )
             return {
                 "role": ROLE,
                 "status": self.state.value,
@@ -1359,6 +1822,7 @@ class ControllerService:
                 "current_run_id": self.current_run_id,
                 "parameter_version": self.parameter_version,
                 "parameter_count": len(self.parameters),
+                "control_target": control_target,
                 "runtime_controls": {
                     "supported": self.runtime_configuration_current is not None,
                     "history_supported": self.runtime_history is not None,
@@ -1381,6 +1845,24 @@ class ControllerService:
                     if self.last_valid_sample is not None
                     else None
                 ),
+                "growth_input": {
+                    "source": "live_gsensor" if self._uses_live_growth_locked() else "simulated",
+                    "available": growth_available,
+                    "reason": growth_reason,
+                    "control_hold_reason": control_hold_reason,
+                    "requested_enabled": self.gsensor_desired_enabled,
+                    "enabled": self.gsensor_enabled,
+                    "measurement_ready": self.gsensor_measurement_ready,
+                    "control_revision": self.gsensor_control_revision,
+                    "control_event_id": self.gsensor_control_event_id,
+                    "last_command_enabled": self.gsensor_last_command_enabled,
+                    "initialization_generation": self.gsensor_initialization_generation,
+                    "alignment_revision": self.gsensor_alignment_revision,
+                    "sample_floor_frame_seq": self.gsensor_sample_floor_frame_seq,
+                    "transition_occurred_at": self.gsensor_transition_occurred_at,
+                    "last_status_at": self.gsensor_last_status_at,
+                    "sample_age_s": current_growth_age,
+                },
                 "scheduler": {
                     "thread_alive": bool(
                         self._control_thread and self._control_thread.is_alive()
@@ -1409,6 +1891,10 @@ class ControllerService:
                     "active": (
                         self.state == ControllerState.RUNNING
                         and self.adaptation_enabled
+                        and (
+                            not self._uses_live_growth_locked()
+                            or growth_available
+                        )
                     ),
                     "mode": self.adaptation_mode,
                     "event_count": self.adaptation_event_count,
@@ -1474,6 +1960,29 @@ def _positive_int(value: Any, name: str) -> int:
     if value < 1:
         raise ValueError(f"{name} must be a positive integer.")
     return value
+
+
+def _timestamp_value(value: Any, name: str) -> float:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a timestamp string.")
+    text = value.strip()
+    try:
+        parsed = datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO-8601 timestamp.") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone.")
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _utc_timestamp(epoch_seconds: float) -> str:
+    return (
+        datetime.fromtimestamp(float(epoch_seconds), tz=timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 __all__ = [

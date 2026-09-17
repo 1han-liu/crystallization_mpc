@@ -15,6 +15,10 @@ const alignmentMethodSelect = document.querySelector("#alignment-method-select")
 const alignmentConfigurationStatus = document.querySelector("#alignment-configuration-status");
 const alignmentSelectionHelp = document.querySelector("#alignment-selection-help");
 const alignmentCapabilityNotes = document.querySelector("#alignment-capability-notes");
+const alignmentAppliedMethod = document.querySelector("#alignment-applied-method");
+const alignmentPreviewMethod = document.querySelector("#alignment-preview-method");
+const alignmentEffectiveAfter = document.querySelector("#alignment-effective-after");
+const alignmentActionFeedback = document.querySelector("#alignment-action-feedback");
 let parameterDialogOpener = null;
 
 const currentRunId = document.querySelector("#current-run-id");
@@ -25,6 +29,14 @@ const refreshImagesButton = document.querySelector("#refresh-images");
 const imageScanStatus = document.querySelector("#image-scan-status");
 const scanProcessedCount = document.querySelector("#scan-processed-count");
 const scanPendingCount = document.querySelector("#scan-pending-count");
+const scanLatestDiscovered = document.querySelector("#scan-latest-discovered");
+const scanLatestReady = document.querySelector("#scan-latest-ready");
+const scanSequenceWatermark = document.querySelector("#scan-sequence-watermark");
+const scanMissingCount = document.querySelector("#scan-missing-count");
+const scanLateCount = document.querySelector("#scan-late-count");
+const scanSequenceWarning = document.querySelector("#scan-sequence-warning");
+const scanSequenceWarningText = document.querySelector("#scan-sequence-warning-text");
+const confirmSequenceResetButton = document.querySelector("#confirm-sequence-reset");
 const scanLastImage = document.querySelector("#scan-last-image");
 const scanFileModifiedAt = document.querySelector("#scan-file-modified-at");
 const scanDetectedAt = document.querySelector("#scan-detected-at");
@@ -35,6 +47,11 @@ const baselineImage = document.querySelector("#baseline-image");
 const baselineUDistance = document.querySelector("#baseline-u-distance");
 const baselineVDistance = document.querySelector("#baseline-v-distance");
 const baselineEstablishedAt = document.querySelector("#baseline-established-at");
+const restartInitializationButton = document.querySelector("#restart-initialization");
+const reinitializationStatus = document.querySelector("#reinitialization-status");
+const markingCurrentImage = document.querySelector("#marking-current-image");
+const markingLatestReady = document.querySelector("#marking-latest-ready");
+const reinitializationFeedback = document.querySelector("#reinitialization-feedback");
 const undoInitButton = document.querySelector("#undo-init");
 const resetInitButton = document.querySelector("#reset-init");
 const initCanvas = document.querySelector("#init-canvas");
@@ -94,16 +111,25 @@ const state = {
   alignmentDraft: null,
   alignmentDraftScope: null,
   alignmentDraftEdited: false,
+  alignmentSelectionAction: null,
+  alignmentSelectionFeedback: null,
   alignmentCapabilitiesReady: false,
   alignmentCapabilitiesError: null,
   initialized: false,
   initialization: null,
+  gsensorActivation: null,
+  reinitialization: {},
+  reinitializationAction: null,
+  reinitializationFeedback: null,
   experimentSource: null,
   measurementActive: false,
   experimentLifecycleStatus: "not_started",
   sourceActionInFlight: false,
   liveStatusInFlight: false,
   statusAvailable: false,
+  imageScan: {},
+  sequenceResetAction: null,
+  sequenceResetFeedback: null,
   runId: undefined,
   contextRevision: 0,
   statusRequest: 0,
@@ -131,6 +157,7 @@ const state = {
     items: new Map(),
   },
   dscgrInFlight: false,
+  latestMeasurementResult: null,
   latestOverlayFrame: null,
   lastOverlayRefreshAt: 0,
   overlayRequest: 0,
@@ -207,6 +234,8 @@ function setStatusAvailable(available, message = "") {
   connectionStatus.textContent = available ? "" : `Status connection lost. Measurements, images and parameters may be outdated. Editing is disabled until status refresh succeeds. ${message}`;
   renderRunParameters();
   renderInitialization(state.initialization);
+  renderImageScan(state.imageScan);
+  renderReinitialization();
   refreshOverlayButton.disabled = !available || !state.latestOverlayFrame;
 }
 
@@ -220,13 +249,23 @@ function adoptExperiment(payload) {
   state.initializationRevision += 1;
   state.initializationAction = null;
   state.initializationFeedback = null;
+  state.gsensorActivation = null;
+  state.reinitialization = {};
+  state.reinitializationAction = null;
+  state.reinitializationFeedback = null;
   state.confirmedSessionId = null;
+  state.imageScan = {};
+  state.sequenceResetAction = null;
+  state.sequenceResetFeedback = null;
   state.experimentParameters = null;
   state.alignmentConfiguration = null;
   state.alignmentDraft = null;
   state.alignmentDraftScope = null;
   state.alignmentDraftEdited = false;
+  state.alignmentSelectionAction = null;
+  state.alignmentSelectionFeedback = null;
   state.initialized = false;
+  state.latestMeasurementResult = null;
   state.sourceError = null;
   clearMeasurementOverlay();
   renderInitialization(null);
@@ -242,6 +281,8 @@ function renderStatus(payload, { includeInitialization = true } = {}) {
   state.measurementActive = Boolean(payload.active);
   state.experimentLifecycleStatus = payload.experiment_lifecycle_status || "not_started";
   state.initialized = Boolean(payload.initialized);
+  state.gsensorActivation = payload.gsensor_activation || null;
+  state.reinitialization = payload.reinitialization || {};
   state.alignmentConfiguration = payload.alignment_configuration || null;
   const snapshot = payload.experiment_parameters;
   // Only the run snapshot is authoritative. /api/params can be a later Central draft.
@@ -272,6 +313,8 @@ function renderStatus(payload, { includeInitialization = true } = {}) {
     experiment_selection_status: payload.experiment_selection_status || null,
     experiment_selection_error: payload.experiment_selection_error || null,
     image_scan: payload.image_scan || null,
+    gsensor_activation: payload.gsensor_activation || null,
+    reinitialization: payload.reinitialization || null,
   }, null, 2);
   renderImageScan(payload.image_scan || {});
   renderBaseline(payload.baseline || null);
@@ -286,6 +329,7 @@ function renderStatus(payload, { includeInitialization = true } = {}) {
   } else {
     renderInitialization(state.initialization);
   }
+  renderReinitialization();
 }
 
 function formatGrowthRate(value, unit = "m/s") {
@@ -333,6 +377,7 @@ function renderOnlineMeasurement(payload) {
   const processing = payload.growth_rate_processing || {};
   const candidateResult = processing.latest_result || null;
   const result = candidateResult && (!candidateResult.run_id || candidateResult.run_id === state.runId) ? candidateResult : null;
+  state.latestMeasurementResult = result;
   const publishing = payload.sample_publishing || {};
   const influx = payload.influx_persistence || {};
   const valid = Boolean(result?.valid);
@@ -351,7 +396,11 @@ function renderOnlineMeasurement(payload) {
   measurementValidCount.textContent = String(processing.valid_frame_count || 0);
   measurementInvalidCount.textContent = String(processing.invalid_frame_count || 0);
   const alignment = result?.alignment || null;
-  alignmentMethod.textContent = alignment?.method || "—";
+  const previewMethod = alignment?.method ? alignmentLabel(alignment.method) : "—";
+  alignmentMethod.textContent = previewMethod;
+  alignmentPreviewMethod.textContent = alignment
+    ? `${previewMethod} · frame ${result.frame_seq}`
+    : "—";
   alignmentStatus.textContent = alignment
     ? (alignment.success ? (alignment.fallback_used ? "fallback" : "success") : "failed")
     : "—";
@@ -388,7 +437,10 @@ function renderOnlineMeasurement(payload) {
 }
 
 function renderBaseline(baseline) {
-  const ready = Boolean(baseline && baseline.frame_seq === 0);
+  const ready = Boolean(baseline && (
+    baseline.segment_frame_seq === 0
+    || (baseline.segment_frame_seq == null && baseline.frame_seq === 0)
+  ));
   baselineStatus.textContent = ready ? "ready" : "not ready";
   baselineStatus.className = ready ? "status running" : "status idle";
   baselineFrameSeq.textContent = ready ? String(baseline.frame_seq) : "—";
@@ -399,18 +451,339 @@ function renderBaseline(baseline) {
 }
 
 function renderImageScan(scan) {
-  const scanStatus = scan.status || "stopped";
+  state.imageScan = scan && typeof scan === "object" ? scan : {};
+  const currentScan = state.imageScan;
+  const scanStatus = currentScan.status || "stopped";
   imageScanStatus.textContent = scanStatus;
   imageScanStatus.className = scanStatus === "error" ? "status error" : (
-    ["running", "waiting_for_image"].includes(scanStatus) ? "status running" : "status idle"
+    ["running", "waiting_for_image", "monitoring_during_initialization"].includes(scanStatus)
+      ? "status running" : "status idle"
   );
-  scanProcessedCount.textContent = String(scan.processed_count || 0);
-  scanPendingCount.textContent = String(scan.pending_image_count || 0);
-  scanLastImage.textContent = scan.last_detected_image || "—";
-  scanFileModifiedAt.textContent = scan.file_modified_at || "—";
-  scanDetectedAt.textContent = scan.detected_at || "—";
-  scanLastError.textContent = scan.error || "";
-  scanLastError.hidden = !scan.error;
+  scanProcessedCount.textContent = String(currentScan.processed_count || 0);
+  scanPendingCount.textContent = String(currentScan.pending_image_count || 0);
+  scanLatestDiscovered.textContent = formatSourceImage(currentScan.latest_discovered);
+  scanLatestReady.textContent = formatSourceImage(currentScan.latest_ready);
+
+  const sequenceHealth = currentScan.sequence_health || {};
+  const watermark = currentScan.watermark || null;
+  scanSequenceWatermark.textContent = formatWatermark(watermark, sequenceHealth.watermark_sequence);
+  const missingCount = Number(sequenceHealth.missing_count || 0);
+  const lateCount = Number(sequenceHealth.late_count || 0);
+  scanMissingCount.textContent = String(Number.isFinite(missingCount) ? missingCount : 0);
+  scanLateCount.textContent = String(Number.isFinite(lateCount) ? lateCount : 0);
+  scanMissingCount.classList.toggle("sequence-alert", missingCount > 0);
+  scanLateCount.classList.toggle("sequence-alert", lateCount > 0);
+  scanMissingCount.title = formatMissingRanges(sequenceHealth.missing_ranges);
+  scanLateCount.title = sequenceHealth.last_late
+    ? `Latest late image: ${formatSourceImage(sequenceHealth.last_late)}` : "";
+
+  const resetCandidate = sequenceHealth.reset_candidate || null;
+  const resetAvailable = sequenceHealth.reset_available === true
+    && Boolean(resetCandidate?.identity_key);
+  const resetAction = state.sequenceResetAction;
+  const visibleCandidate = resetAvailable ? resetCandidate : resetAction?.candidate;
+  if (state.sequenceResetFeedback?.kind === "success" && resetAvailable) {
+    state.sequenceResetFeedback = null;
+  }
+  const feedback = state.sequenceResetFeedback;
+  const showReset = Boolean(resetAvailable || resetAction);
+  scanSequenceWarning.hidden = !showReset && !feedback;
+  scanSequenceWarning.classList.toggle("pending", Boolean(resetAction));
+  scanSequenceWarning.classList.toggle("error", feedback?.kind === "error");
+  confirmSequenceResetButton.hidden = !showReset;
+  confirmSequenceResetButton.disabled = !state.statusAvailable
+    || Boolean(resetAction)
+    || Boolean(state.alignmentSelectionAction)
+    || state.alignmentConfiguration?.in_progress === true
+    || !state.runId
+    || !visibleCandidate?.identity_key;
+  confirmSequenceResetButton.textContent = resetAction
+    ? "Confirming numbering restart…" : "Confirm numbering restart";
+
+  if (resetAction) {
+    scanSequenceWarningText.textContent = `Confirming a new source-number sequence from ${formatSourceImage(visibleCandidate)}. The current marking image remains unchanged.`;
+  } else if (feedback) {
+    scanSequenceWarningText.textContent = feedback.message;
+  } else if (showReset) {
+    scanSequenceWarningText.textContent = `Possible camera numbering restart at ${formatSourceImage(visibleCandidate)}. Confirm only if the camera/source numbering actually restarted. A normally late image must remain classified as late.`;
+  } else {
+    scanSequenceWarningText.textContent = "";
+  }
+
+  scanLastImage.textContent = currentScan.last_detected_image || "—";
+  scanFileModifiedAt.textContent = currentScan.file_modified_at || "—";
+  scanDetectedAt.textContent = currentScan.detected_at || "—";
+  scanLastError.textContent = currentScan.error || "";
+  scanLastError.hidden = !currentScan.error;
+  renderReinitialization();
+}
+
+function formatSourceImage(image) {
+  if (!image || typeof image !== "object") return "—";
+  const name = image.image_name || "unnamed image";
+  return image.source_sequence == null ? name : `${name} · seq ${image.source_sequence}`;
+}
+
+function formatWatermark(watermark, fallbackSequence) {
+  if (watermark && typeof watermark === "object") {
+    if (watermark.image_name) return formatSourceImage(watermark);
+    if (watermark.source_sequence != null) return `seq ${watermark.source_sequence}`;
+  }
+  return fallbackSequence == null ? "—" : `seq ${fallbackSequence}`;
+}
+
+function formatMissingRanges(ranges) {
+  if (!Array.isArray(ranges) || ranges.length === 0) return "";
+  return ranges.map((range) => {
+    const start = range?.start;
+    const end = range?.end;
+    if (start == null || end == null) return null;
+    return start === end ? String(start) : `${start}–${end}`;
+  }).filter(Boolean).join(", ");
+}
+
+function currentInitializationSessionId() {
+  return state.initialization?.session_id ?? null;
+}
+
+function initializationImageName(value) {
+  if (typeof value !== "string" || !value) return "—";
+  return value.split(/[\\/]/).filter(Boolean).at(-1) || value;
+}
+
+function reinitializationActionAllowed() {
+  return state.statusAvailable
+    && Boolean(state.runId)
+    && state.reinitialization?.can_restart === true
+    && state.reinitialization?.in_progress !== true
+    && !state.reinitializationAction
+    && !state.initializationAction
+    && !state.alignmentSelectionAction
+    && state.alignmentConfiguration?.in_progress !== true
+    && !state.dscgrInFlight;
+}
+
+function renderReinitialization() {
+  const lifecycle = state.experimentLifecycleStatus;
+  const action = state.reinitializationAction;
+  const serverPending = state.reinitialization?.in_progress === true;
+  let localFeedback = state.reinitializationFeedback;
+  if (localFeedback?.kind === "success" && (
+    localFeedback.sessionId !== currentInitializationSessionId()
+    || lifecycle !== "initializing"
+    || state.initialized
+    || state.alignmentConfiguration?.confirmed
+  )) {
+    state.reinitializationFeedback = null;
+    localFeedback = null;
+  }
+  const serverError = state.reinitialization?.last_error;
+  const feedback = localFeedback || (serverError ? {
+    kind: "error",
+    message: `The latest image could not be selected. ${serverError}`,
+  } : null);
+
+  markingCurrentImage.textContent = initializationImageName(state.initialization?.selected_image);
+  markingLatestReady.textContent = formatSourceImage(state.imageScan?.latest_ready);
+
+  const measuring = lifecycle === "measuring" || lifecycle === "baseline_ready";
+  restartInitializationButton.textContent = action || serverPending
+    ? "Switching to latest image…"
+    : (measuring ? "Re-mark on latest image" : "Use latest image");
+  restartInitializationButton.disabled = !reinitializationActionAllowed();
+  restartInitializationButton.setAttribute("aria-busy", String(Boolean(action || serverPending)));
+
+  if (!state.statusAvailable) {
+    reinitializationStatus.textContent = "connection lost";
+    reinitializationStatus.className = "status error";
+  } else if (action || serverPending) {
+    reinitializationStatus.textContent = "switching";
+    reinitializationStatus.className = "status running";
+  } else if (state.reinitialization?.can_restart === true) {
+    reinitializationStatus.textContent = "ready";
+    reinitializationStatus.className = "status running";
+  } else {
+    reinitializationStatus.textContent = "unavailable";
+    reinitializationStatus.className = "status idle";
+  }
+
+  reinitializationFeedback.hidden = !feedback;
+  reinitializationFeedback.textContent = feedback?.message || "";
+  reinitializationFeedback.classList.toggle("error", feedback?.kind === "error");
+  reinitializationFeedback.classList.toggle("pending", feedback?.kind === "pending");
+}
+
+async function restartInitializationOnLatestImage() {
+  if (!reinitializationActionAllowed()) return;
+  const controlRevision = state.gsensorActivation?.control_revision;
+  if (!Number.isInteger(controlRevision) || controlRevision < 0) {
+    state.reinitializationFeedback = {
+      kind: "error",
+      message: "GSensor activation status is incomplete. Refresh status before switching the marking image.",
+    };
+    renderReinitialization();
+    return;
+  }
+
+  const latestReady = formatSourceImage(state.imageScan?.latest_ready);
+
+  const statusRequest = ++state.statusRequest;
+  const initializationRevision = ++state.initializationRevision;
+  const action = {
+    context: state.contextRevision,
+    runId: state.runId,
+    sessionId: currentInitializationSessionId(),
+    controlRevision,
+    statusRequest,
+    initializationRevision,
+    latestReady,
+  };
+  state.reinitializationAction = action;
+  state.reinitializationFeedback = {
+    kind: "pending",
+    message: `Switching the marking session to ${latestReady}. Waiting for the frozen image and cleared point set…`,
+  };
+  renderInitialization(state.initialization);
+  renderExperimentSource(state.experimentSource);
+
+  const current = () => state.reinitializationAction === action
+    && state.contextRevision === action.context
+    && state.runId === action.runId
+    && currentInitializationSessionId() === action.sessionId
+    && state.gsensorActivation?.control_revision === action.controlRevision
+    && state.statusRequest === action.statusRequest
+    && state.initializationRevision === action.initializationRevision;
+
+  try {
+    const payload = await fetchJson("/api/initialization/restart", {
+      method: "POST",
+      body: JSON.stringify({
+        run_id: action.runId,
+        session_id: action.sessionId,
+        control_revision: action.controlRevision,
+      }),
+    });
+    if (!current()) return;
+
+    const responseRunId = payload.current_run_id || payload.experiment?.run_id || null;
+    const responseControlRevision = payload.gsensor_activation?.control_revision;
+    if (responseRunId !== action.runId
+        || responseControlRevision !== action.controlRevision
+        || !payload.reinitialization
+        || !("initialization" in payload)) {
+      throw new Error("The switch response does not match the current experiment. Refresh status before trying again.");
+    }
+
+    state.reinitializationAction = null;
+    state.initializationRevision += 1;
+    renderStatus(payload, { includeInitialization: true });
+    state.reinitializationFeedback = {
+      kind: "success",
+      sessionId: currentInitializationSessionId(),
+      message: `Now marking ${initializationImageName(state.initialization?.selected_image)}. Previous points were cleared. Complete and confirm this marking before new G values resume.`,
+    };
+    renderReinitialization();
+  } catch (error) {
+    if (current()) {
+      state.reinitializationFeedback = {
+        kind: "error",
+        message: error.outcomeUnknown
+          ? `The switch outcome is unknown. Wait for status to reconnect before trying again. ${error.message}`
+          : `The marking image was not switched. ${error.message}`,
+      };
+      if (error.outcomeUnknown) setStatusAvailable(false, error.message);
+    }
+  } finally {
+    if (state.reinitializationAction === action) {
+      state.reinitializationAction = null;
+      if (state.reinitializationFeedback?.kind === "pending") {
+        state.reinitializationFeedback = null;
+      }
+      state.initializationRevision += 1;
+      renderInitialization(state.initialization);
+      renderExperimentSource(state.experimentSource);
+    }
+  }
+}
+
+async function confirmSequenceReset() {
+  const sequenceHealth = state.imageScan?.sequence_health || {};
+  const candidate = sequenceHealth.reset_candidate || null;
+  if (!state.statusAvailable || state.sequenceResetAction || state.alignmentSelectionAction
+      || state.alignmentConfiguration?.in_progress === true || !state.runId
+      || sequenceHealth.reset_available !== true || !candidate?.identity_key) {
+    return;
+  }
+
+  const accepted = window.confirm(
+    `Confirm camera/source numbering restart?\n\nCandidate: ${formatSourceImage(candidate)}\n\nThis accepts the current candidate as the start of restarted numbering and continues with its source number. Confirm only when numbering truly restarted; do not use this for a normally late image. The image currently open for marking will not change.`,
+  );
+  if (!accepted) return;
+
+  const action = {
+    context: state.contextRevision,
+    runId: state.runId,
+    candidateIdentityKey: candidate.identity_key,
+    candidate: { ...candidate },
+  };
+  state.sequenceResetAction = action;
+  state.sequenceResetFeedback = null;
+  renderImageScan(state.imageScan);
+  const current = () => state.sequenceResetAction === action
+    && state.contextRevision === action.context
+    && state.runId === action.runId;
+
+  try {
+    const payload = await fetchJson("/api/image-scan/confirm-sequence-reset", {
+      method: "POST",
+      body: JSON.stringify({
+        run_id: action.runId,
+        candidate_identity_key: action.candidateIdentityKey,
+      }),
+    });
+    if (!current()) return;
+
+    if (payload?.image_scan) {
+      const responseRunId = payload.current_run_id || payload.experiment?.run_id || action.runId;
+      if (responseRunId === action.runId) {
+        renderStatus(payload, { includeInitialization: !state.initializationAction });
+      }
+    } else {
+      try {
+        await loadStatus();
+      } catch (error) {
+        if (current()) {
+          state.sequenceResetFeedback = {
+            kind: "error",
+            message: "Numbering restart was accepted, but status refresh failed. Wait for the status connection to recover before taking another action.",
+          };
+          setStatusAvailable(false, error.message);
+        }
+        return;
+      }
+    }
+    if (current()) {
+      state.sequenceResetFeedback = {
+        kind: "success",
+        message: `Numbering restart confirmed from ${formatSourceImage(action.candidate)}. New images will continue in the new source-number sequence; the current marking image was not changed.`,
+      };
+    }
+  } catch (error) {
+    if (current()) {
+      state.sequenceResetFeedback = {
+        kind: "error",
+        message: error.outcomeUnknown
+          ? `Request outcome is unknown. Refresh status before trying again. ${error.message}`
+          : `Numbering restart was not confirmed. ${error.message}`,
+      };
+      if (error.outcomeUnknown) setStatusAvailable(false, error.message);
+    }
+  } finally {
+    if (state.sequenceResetAction === action) {
+      state.sequenceResetAction = null;
+      renderImageScan(state.imageScan);
+    }
+  }
 }
 
 function renderExperimentSource(payload) {
@@ -421,7 +794,9 @@ function renderExperimentSource(payload) {
   currentImageDirectory.textContent = selected ? (payload.container_image_path || "—") : "—";
   currentImageCount.textContent = String(imageCount);
 
-  refreshImagesButton.disabled = state.sourceActionInFlight;
+  refreshImagesButton.disabled = state.sourceActionInFlight
+    || Boolean(state.reinitializationAction)
+    || Boolean(state.alignmentSelectionAction);
 
   imageSourceStatus.classList.toggle("error", Boolean(state.sourceError));
   if (state.sourceError) {
@@ -429,15 +804,15 @@ function renderExperimentSource(payload) {
   } else if (!selected) {
     imageSourceStatus.textContent = "Create or select an experiment in Central first.";
   } else if (state.experimentLifecycleStatus === "waiting_for_initial_image") {
-    imageSourceStatus.textContent = "Waiting for the first readable camera image. Initialization will open automatically.";
+    imageSourceStatus.textContent = "Waiting for the latest ready camera image. Initialization will open automatically.";
   } else if (state.experimentLifecycleStatus === "initializing") {
-    imageSourceStatus.textContent = "The first image is selected as frame 0. Complete the marking steps below.";
+    imageSourceStatus.textContent = "The latest ready image is fixed as the current marking baseline. Directory monitoring continues without replacing the image currently open below.";
   } else if (["baseline_ready", "measuring"].includes(state.experimentLifecycleStatus)) {
-    imageSourceStatus.textContent = "Frame 0 is ready. The directory is being scanned for later images.";
+    imageSourceStatus.textContent = "The current marking baseline is ready. The directory is being scanned for later images.";
   } else if (imageCount === 0) {
-    imageSourceStatus.textContent = "Start the experiment in Central; Gsensor will wait for the first camera image.";
+    imageSourceStatus.textContent = "Start the experiment in Central; Gsensor will wait for the latest ready camera image.";
   } else {
-    imageSourceStatus.textContent = `${imageCount} images available. Start the experiment in Central to choose the baseline automatically.`;
+    imageSourceStatus.textContent = `${imageCount} images available. Start the experiment in Central to use the latest ready image as the baseline candidate.`;
   }
 }
 
@@ -481,7 +856,8 @@ async function refreshOverview() {
 }
 
 async function refreshLiveStatus() {
-  if (state.liveStatusInFlight || document.hidden) {
+  if (state.liveStatusInFlight || state.reinitializationAction
+      || state.alignmentSelectionAction || document.hidden) {
     return;
   }
   state.liveStatusInFlight = true;
@@ -547,6 +923,23 @@ function alignmentSelectable() {
     && state.alignmentCapabilitiesReady;
 }
 
+function runtimeAlignmentSelectable() {
+  return state.statusAvailable
+    && state.experimentLifecycleStatus === "measuring"
+    && state.initialized
+    && Boolean(state.runId)
+    && Boolean(state.initialization?.session_id)
+    && state.alignmentConfiguration?.can_switch === true
+    && state.alignmentConfiguration?.in_progress !== true
+    && state.reinitialization?.in_progress !== true
+    && state.alignmentCapabilitiesReady
+    && !state.alignmentSelectionAction
+    && !state.initializationAction
+    && !state.reinitializationAction
+    && !state.sequenceResetAction
+    && !state.dscgrInFlight;
+}
+
 function alignmentSelectionReady() {
   // During a rolling upgrade the previous service can still confirm initialization.
   if (!state.alignmentConfiguration) return true;
@@ -556,8 +949,18 @@ function alignmentSelectionReady() {
 function renderAlignmentConfiguration() {
   syncAlignmentDraft();
   const configuration = state.alignmentConfiguration;
-  const method = state.alignmentDraft || "none";
-  const methods = new Set(["none", ...Object.keys(state.alignmentCapabilities), method]);
+  const action = state.alignmentSelectionAction;
+  const runtimeMode = state.experimentLifecycleStatus === "measuring" && state.initialized;
+  const method = action?.method || (runtimeMode
+    ? (configuration?.method || configuration?.configured_method || "none")
+    : (state.alignmentDraft || "none"));
+  const methods = new Set([
+    "none",
+    ...Object.keys(state.alignmentCapabilities),
+    method,
+    configuration?.method,
+    state.alignmentDraft,
+  ].filter(Boolean));
   const optionsKey = JSON.stringify([...methods].map((value) => [value, state.alignmentCapabilities[value]]));
   if (alignmentMethodSelect.dataset.optionsKey !== optionsKey) {
     alignmentMethodSelect.replaceChildren();
@@ -574,16 +977,67 @@ function renderAlignmentConfiguration() {
     alignmentMethodSelect.dataset.optionsKey = optionsKey;
   }
   alignmentMethodSelect.value = method;
-  alignmentMethodSelect.disabled = !alignmentSelectable();
+  alignmentMethodSelect.disabled = !(alignmentSelectable() || runtimeAlignmentSelectable());
   const confirmed = Boolean(configuration?.confirmed);
-  alignmentConfigurationStatus.textContent = confirmed ? `confirmed · ${alignmentLabel(configuration.method)}`
-    : (state.initialization?.session_id ? `draft · ${alignmentLabel(method)}` : "waiting for initialization");
-  alignmentConfigurationStatus.className = confirmed ? "status running" : "status idle";
+  const serverPending = configuration?.in_progress === true;
+  if (action || serverPending) {
+    alignmentConfigurationStatus.textContent = `applying · ${alignmentLabel(action?.method || configuration?.method)}`;
+    alignmentConfigurationStatus.className = "status running";
+  } else if (runtimeMode && configuration) {
+    alignmentConfigurationStatus.textContent = `applied · ${alignmentLabel(configuration.method)}`;
+    alignmentConfigurationStatus.className = "status running";
+  } else if (confirmed) {
+    alignmentConfigurationStatus.textContent = `confirmed · ${alignmentLabel(configuration.method)}`;
+    alignmentConfigurationStatus.className = "status running";
+  } else {
+    alignmentConfigurationStatus.textContent = state.initialization?.session_id
+      ? `draft · ${alignmentLabel(method)}` : "waiting for initialization";
+    alignmentConfigurationStatus.className = "status idle";
+  }
+
+  alignmentAppliedMethod.textContent = configuration?.method
+    ? alignmentLabel(configuration.method) : "—";
+  alignmentEffectiveAfter.textContent = Number.isInteger(configuration?.effective_after_frame_seq)
+    ? String(configuration.effective_after_frame_seq) : "—";
+
+  let localFeedback = state.alignmentSelectionFeedback;
+  if (localFeedback && (
+    localFeedback.runId !== state.runId
+    || localFeedback.sessionId !== currentInitializationSessionId()
+  )) {
+    state.alignmentSelectionFeedback = null;
+    localFeedback = null;
+  }
+  const latestResult = state.latestMeasurementResult;
+  const feedbackRevisionMatches = latestResult?.alignment_revision == null
+    ? (Number(latestResult?.frame_seq) > Number(localFeedback?.effectiveAfterFrameSeq ?? -1))
+    : latestResult.alignment_revision === localFeedback?.revision;
+  if (localFeedback?.kind === "success"
+      && latestResult?.alignment?.method === localFeedback.method
+      && feedbackRevisionMatches) {
+    state.alignmentSelectionFeedback = null;
+    localFeedback = null;
+  }
+  const serverError = configuration?.last_error;
+  const feedback = localFeedback || (serverError ? {
+    kind: "error", message: `Alignment method was not changed. ${serverError}`,
+  } : null);
+  alignmentActionFeedback.hidden = !feedback;
+  alignmentActionFeedback.textContent = feedback?.message || "";
+  alignmentActionFeedback.classList.toggle("error", feedback?.kind === "error");
+  alignmentActionFeedback.classList.toggle("pending", feedback?.kind === "pending");
+
   let help;
   if (!state.statusAvailable) {
     help = "Status is unavailable. Alignment selection is disabled until the connection recovers.";
+  } else if (action || serverPending) {
+    help = `Applying ${alignmentLabel(action?.method || configuration?.method)} to future images. The current preview remains unchanged until a new frame is processed.`;
+  } else if (runtimeMode && runtimeAlignmentSelectable()) {
+    help = "Changing the method affects future images only. The latest preview keeps the method used for that frame. The first incoming image after a switch rebuilds the distance baseline and may not produce G; new G values begin with the following image.";
+  } else if (runtimeMode) {
+    help = "Runtime method selection is temporarily unavailable. Wait for the current GSensor operation to finish.";
   } else if (confirmed) {
-    help = `${alignmentLabel(configuration.method)} was confirmed with the selected 3D candidate and is locked for this experiment.`;
+    help = `${alignmentLabel(configuration.method)} was confirmed as the starting method for this marking session. Runtime selection becomes available while measuring.`;
   } else if (state.initializationAction) {
     help = "Waiting for the initialization operation to finish. Your alignment draft is retained.";
   } else if (state.confirmedSessionId === state.initialization?.session_id && state.confirmedSessionId) {
@@ -594,21 +1048,133 @@ function renderAlignmentConfiguration() {
     help = "This service has not provided alignment configuration. Image marking remains available.";
     alignmentConfigurationStatus.textContent = "configuration unavailable";
   } else if (!configuration.can_select || state.initialized) {
-    help = "Alignment can be selected only during manual initialization, before confirming the candidate.";
+    help = "Alignment selection is unavailable in the current experiment state.";
     alignmentConfigurationStatus.textContent = "selection locked";
   } else if (!state.alignmentCapabilitiesReady) {
     help = "Alignment capabilities are unavailable. Use Refresh Images to retry before confirming.";
   } else if (state.alignmentCapabilities[method]?.available !== true) {
     help = "This method is unavailable. Choose an available method before confirming the candidate.";
   } else {
-    help = `Draft: ${alignmentLabel(method)}. “Confirm selected candidate” also confirms this method and locks it for this experiment. None skips image alignment.`;
+    help = `Draft: ${alignmentLabel(method)}. “Confirm selected candidate” confirms this starting method for the marking session. You can change it later while measuring. None skips image alignment.`;
   }
   alignmentSelectionHelp.textContent = help;
   const unavailable = Object.values(state.alignmentCapabilities)
     .filter((item) => item.available === false)
     .map((item) => `${alignmentLabel(item.method)}: ${item.reason || "unavailable on this service"}`);
   alignmentCapabilityNotes.textContent = state.alignmentCapabilitiesError || unavailable.join(" · ");
-  alignmentCapabilityNotes.hidden = !alignmentCapabilityNotes.textContent || confirmed;
+  alignmentCapabilityNotes.hidden = !alignmentCapabilityNotes.textContent;
+}
+
+async function selectRuntimeAlignment(method) {
+  if (!runtimeAlignmentSelectable()
+      || state.alignmentCapabilities[method]?.available !== true
+      || method === state.alignmentConfiguration?.method) {
+    renderAlignmentConfiguration();
+    return;
+  }
+  const controlRevision = state.gsensorActivation?.control_revision;
+  const alignmentRevision = state.alignmentConfiguration?.revision;
+  if (!Number.isInteger(controlRevision) || controlRevision < 0
+      || !Number.isInteger(alignmentRevision) || alignmentRevision < 0) {
+    state.alignmentSelectionFeedback = {
+      kind: "error",
+      runId: state.runId,
+      sessionId: currentInitializationSessionId(),
+      message: "Alignment control status is incomplete. Refresh status before selecting a method.",
+    };
+    renderAlignmentConfiguration();
+    return;
+  }
+
+  const action = {
+    context: state.contextRevision,
+    runId: state.runId,
+    sessionId: currentInitializationSessionId(),
+    controlRevision,
+    alignmentRevision,
+    method,
+    statusRequest: ++state.statusRequest,
+  };
+  state.alignmentSelectionAction = action;
+  state.alignmentSelectionFeedback = {
+    kind: "pending",
+    runId: action.runId,
+    sessionId: action.sessionId,
+    message: `Applying ${alignmentLabel(method)} to future images…`,
+  };
+  renderAlignmentConfiguration();
+  renderInitialization(state.initialization);
+  renderImageScan(state.imageScan);
+  renderExperimentSource(state.experimentSource);
+
+  const current = () => state.alignmentSelectionAction === action
+    && state.contextRevision === action.context
+    && state.runId === action.runId
+    && currentInitializationSessionId() === action.sessionId
+    && state.gsensorActivation?.control_revision === action.controlRevision
+    && state.alignmentConfiguration?.revision === action.alignmentRevision
+    && state.statusRequest === action.statusRequest;
+
+  try {
+    const payload = await fetchJson("/api/alignment/select", {
+      method: "POST",
+      body: JSON.stringify({
+        run_id: action.runId,
+        session_id: action.sessionId,
+        control_revision: action.controlRevision,
+        alignment_revision: action.alignmentRevision,
+        alignment_method: action.method,
+      }),
+    });
+    if (!current()) return;
+
+    const responseRunId = payload.current_run_id || payload.experiment?.run_id || null;
+    const responseConfiguration = payload.alignment_configuration;
+    if (responseRunId !== action.runId
+        || payload.initialization?.session_id !== action.sessionId
+        || payload.gsensor_activation?.control_revision !== action.controlRevision
+        || responseConfiguration?.revision !== action.alignmentRevision + 1
+        || responseConfiguration?.method !== action.method
+        || responseConfiguration?.in_progress === true) {
+      throw new Error("The alignment response does not match the current experiment. Refresh status before trying again.");
+    }
+
+    state.alignmentSelectionAction = null;
+    renderStatus(payload, { includeInitialization: true });
+    state.alignmentSelectionFeedback = {
+      kind: "success",
+      runId: action.runId,
+      sessionId: action.sessionId,
+      method: action.method,
+      revision: responseConfiguration.revision,
+      effectiveAfterFrameSeq: responseConfiguration.effective_after_frame_seq,
+      message: `${alignmentLabel(action.method)} is applied to future images. The next incoming image rebuilds the distance baseline and may not produce G; new G values begin with the following image.`,
+    };
+    renderAlignmentConfiguration();
+  } catch (error) {
+    if (current()) {
+      state.alignmentSelectionFeedback = {
+        kind: "error",
+        runId: action.runId,
+        sessionId: action.sessionId,
+        message: error.outcomeUnknown
+          ? `The alignment change outcome is unknown. Wait for status to reconnect before trying again. ${error.message}`
+          : `Alignment method was not changed. ${error.message}`,
+      };
+      if (error.outcomeUnknown) setStatusAvailable(false, error.message);
+    }
+  } finally {
+    if (state.alignmentSelectionAction === action) {
+      state.alignmentSelectionAction = null;
+      if (state.alignmentSelectionFeedback?.kind === "pending") {
+        state.alignmentSelectionFeedback = null;
+      }
+      renderAlignmentConfiguration();
+      renderInitialization(state.initialization);
+      renderImageScan(state.imageScan);
+      renderExperimentSource(state.experimentSource);
+    }
+  }
 }
 
 function renderRunParameters() {
@@ -667,7 +1233,10 @@ function renderRunParameters() {
 function initializationEditable() {
   return state.statusAvailable && state.experimentLifecycleStatus === "initializing"
     && !state.initialized && !state.alignmentConfiguration?.confirmed
-    && !state.initializationAction && !state.dscgrInFlight
+    && !state.initializationAction && !state.reinitializationAction
+    && !state.alignmentSelectionAction
+    && state.reinitialization?.in_progress !== true
+    && state.alignmentConfiguration?.in_progress !== true && !state.dscgrInFlight
     && (!state.confirmedSessionId || state.confirmedSessionId !== state.initialization?.session_id);
 }
 
@@ -675,6 +1244,8 @@ function renderInitialization(payload) {
   if (state.initialization?.session_id !== payload?.session_id) {
     state.initializationFeedback = null;
     state.confirmedSessionId = null;
+    state.alignmentSelectionAction = null;
+    state.alignmentSelectionFeedback = null;
   }
   ensure3DSnapshotScope(payload);
   state.initialization = payload;
@@ -688,7 +1259,7 @@ function renderInitialization(payload) {
     ? (state.experimentLifecycleStatus === "initializing"
       ? `Previewing 3D choice ${selected3DChoice}. Compare other candidates or confirm this selection.`
       : `Confirmed 3D choice ${selected3DChoice}.`)
-    : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when the first image arrives."));
+    : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when a latest ready image is available."));
   const feedback = state.initializationFeedback;
   initSaveStatus.textContent = feedback?.message || (hasSession ? `${payload.selected_image || ""}` : "idle");
   initSaveStatus.classList.toggle("error", feedback?.kind === "error");
@@ -702,7 +1273,10 @@ function renderInitialization(payload) {
     || !alignmentSelectionReady()
     || payload?.status !== "ready_for_3d"
     || selected3DChoice == null;
-  runDscgrButton.disabled = !state.statusAvailable || payload?.status !== "ready_for_3d" || state.dscgrInFlight || Boolean(state.initializationAction);
+  runDscgrButton.disabled = !state.statusAvailable || payload?.status !== "ready_for_3d"
+    || state.dscgrInFlight || Boolean(state.initializationAction)
+    || Boolean(state.reinitializationAction) || state.reinitialization?.in_progress === true
+    || Boolean(state.alignmentSelectionAction) || state.alignmentConfiguration?.in_progress === true;
 
   fullModeControls.querySelectorAll("button").forEach((button) => {
     button.disabled = !editable || !hasSession || step?.key !== "is_full";
@@ -718,6 +1292,7 @@ function renderInitialization(payload) {
   drawInitialization();
   drawSelected3DPreview();
   render3DSnapshots();
+  renderReinitialization();
 }
 
 function renderCandidateControls(payload) {
@@ -1428,6 +2003,8 @@ async function performInitializationAction(endpoint, fields, pendingMessage, suc
 
 async function runDscgr() {
   if (!state.statusAvailable || state.dscgrInFlight || state.initializationAction
+      || state.reinitializationAction || state.reinitialization?.in_progress === true
+      || state.alignmentSelectionAction || state.alignmentConfiguration?.in_progress === true
       || !state.initialization?.session_id || state.initialization.status !== "ready_for_3d") {
     return;
   }
@@ -1478,20 +2055,27 @@ runParametersDialog.addEventListener("click", (event) => {
       || event.clientY < bounds.top || event.clientY > bounds.bottom) runParametersDialog.close();
 });
 
-alignmentMethodSelect.addEventListener("change", () => {
-  if (!alignmentSelectable()) {
+alignmentMethodSelect.addEventListener("change", async () => {
+  const method = alignmentMethodSelect.value;
+  if (state.alignmentCapabilities[method]?.available !== true) {
     renderAlignmentConfiguration();
     return;
   }
-  const method = alignmentMethodSelect.value;
-  if (state.alignmentCapabilities[method]?.available !== true) return;
-  state.alignmentDraft = method;
-  state.alignmentDraftEdited = true;
-  renderInitialization(state.initialization);
+  if (alignmentSelectable()) {
+    state.alignmentDraft = method;
+    state.alignmentDraftEdited = true;
+    renderInitialization(state.initialization);
+    return;
+  }
+  if (runtimeAlignmentSelectable()) {
+    await selectRuntimeAlignment(method);
+    return;
+  }
+  renderAlignmentConfiguration();
 });
 
 refreshImagesButton.addEventListener("click", async () => {
-  if (state.sourceActionInFlight) return;
+  if (state.sourceActionInFlight || state.reinitializationAction || state.alignmentSelectionAction) return;
   state.sourceActionInFlight = true;
   const context = state.contextRevision;
   state.sourceError = null;
@@ -1508,6 +2092,14 @@ refreshImagesButton.addEventListener("click", async () => {
     state.sourceActionInFlight = false;
     renderExperimentSource(state.experimentSource);
   }
+});
+
+confirmSequenceResetButton.addEventListener("click", () => {
+  confirmSequenceReset();
+});
+
+restartInitializationButton.addEventListener("click", () => {
+  restartInitializationOnLatestImage();
 });
 
 fullModeControls.addEventListener("click", async (event) => {
@@ -1636,6 +2228,7 @@ async function initializePage() {
 initializePage();
 
 function refreshPage() {
+  if (state.reinitializationAction || state.alignmentSelectionAction) return;
   Promise.allSettled([loadParameterMetadata(), refreshOverview()]);
 }
 window.addEventListener("focus", refreshPage);

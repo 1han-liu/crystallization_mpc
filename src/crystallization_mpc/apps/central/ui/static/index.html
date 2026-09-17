@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260910-state-sync-2">
+    <link rel="stylesheet" href="/static/styles.css?v=20260917-gsensor-activation-1">
   </head>
   <body>
     <div class="shell">
@@ -259,6 +259,35 @@
                   <div><dt>Messages</dt><dd id="gsensor-message-count">0</dd></div>
                   <div><dt>Received</dt><dd id="gsensor-received-at">—</dd></div>
                 </dl>
+                <div class="gsensor-activation-control">
+                  <div class="gsensor-activation-summary">
+                    <div>
+                      <span>GSensor Activation</span>
+                      <strong id="gsensor-activation-state" class="status idle">Off</strong>
+                    </div>
+                    <span id="gsensor-activation-pending" class="status running" hidden>enable pending</span>
+                  </div>
+                  <p class="gsensor-activation-confirmed-at">
+                    Last confirmed <strong id="gsensor-activation-confirmed-at">—</strong>
+                  </p>
+                  <div class="gsensor-activation-actions">
+                    <button id="toggle-gsensor-activation" class="primary" type="button" disabled>Enable GSensor</button>
+                    <button id="retry-gsensor-activation" class="ghost" type="button" hidden disabled>Retry Enable</button>
+                  </div>
+                  <p id="gsensor-activation-help" class="runtime-action-help">
+                    Start the experiment before enabling GSensor.
+                  </p>
+                  <p id="gsensor-activation-message" class="runtime-action-message" role="status" aria-live="polite"></p>
+                  <div class="gsensor-growth-readiness">
+                    <div>
+                      <span>Controller Growth Input</span>
+                      <strong id="gsensor-growth-readiness-state" class="status idle">Unconfirmed</strong>
+                    </div>
+                    <p id="gsensor-growth-readiness-message" role="status" aria-live="polite">
+                      Controller growth-rate availability is unconfirmed.
+                    </p>
+                  </div>
+                </div>
                 <p id="gsensor-live-error" class="service-error" hidden></p>
               </article>
               <article class="service-card">
@@ -356,6 +385,6 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260910-runtime-controls-1"></script>
+    <script src="/static/app.js?v=20260917-gsensor-activation-1"></script>
   </body>
 </html>

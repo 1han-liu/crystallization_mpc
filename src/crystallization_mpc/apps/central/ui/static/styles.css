@@ -758,6 +758,97 @@ textarea:disabled {
   overflow-wrap: anywhere;
 }
 
+.gsensor-activation-control {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.gsensor-activation-summary,
+.gsensor-activation-summary > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.gsensor-activation-summary {
+  justify-content: space-between;
+}
+
+.gsensor-activation-summary > div > span:first-child {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.gsensor-activation-confirmed-at {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.gsensor-activation-confirmed-at strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.gsensor-activation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.gsensor-activation-actions button {
+  flex: 1 1 150px;
+  min-width: 0;
+  justify-content: center;
+}
+
+#gsensor-activation-pending[hidden],
+#retry-gsensor-activation[hidden] {
+  display: none;
+}
+
+.gsensor-activation-control .runtime-action-help,
+.gsensor-activation-control .runtime-action-message {
+  grid-column: auto;
+}
+
+.gsensor-growth-readiness {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-left: 3px solid var(--line);
+  background: #ffffff;
+}
+
+.gsensor-growth-readiness > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.gsensor-growth-readiness > div > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.gsensor-growth-readiness p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.gsensor-growth-readiness p.error {
+  color: #8a1c1c;
+}
+
 .controller-runtime-action {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -856,6 +947,10 @@ textarea:disabled {
 
   .controller-runtime-action button {
     width: 100%;
+  }
+
+  .gsensor-activation-actions button {
+    flex-basis: 100%;
   }
 }
 /* Runtime controls reuse the existing configuration panel. */

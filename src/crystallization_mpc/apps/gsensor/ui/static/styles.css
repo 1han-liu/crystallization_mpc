@@ -60,6 +60,7 @@ select {
 
 .hero > div,
 .panel-head > div,
+.alignment-control-head > div,
 .online-measurement-layout > * {
   min-width: 0;
 }
@@ -72,7 +73,53 @@ summary:focus-visible {
 }
 
 .alignment-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px solid #9bbbd8;
   border-left: 4px solid #336ea8;
+  border-radius: 4px;
+  background: #f7fbff;
+}
+
+.alignment-control-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.alignment-control-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.alignment-state-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.alignment-state-facts > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.alignment-state-facts span {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.alignment-state-facts strong {
+  min-height: 40px;
+  padding: 10px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #ffffff;
 }
 
 .alignment-selection {
@@ -112,6 +159,22 @@ summary:focus-visible {
 .alignment-selection p {
   margin: 0;
   line-height: 1.5;
+}
+
+.alignment-panel .save-status {
+  margin: 0;
+}
+
+.alignment-panel .save-status.error {
+  color: #8a1c1c;
+}
+
+.alignment-panel .save-status.pending {
+  color: #705000;
+}
+
+.alignment-panel .save-status[hidden] {
+  display: none;
 }
 
 body.modal-open {
@@ -295,6 +358,77 @@ button:disabled {
   gap: 14px;
 }
 
+.reinitialization-control {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #9bbbd8;
+  border-left: 4px solid #336ea8;
+  border-radius: 4px;
+  background: #f7fbff;
+}
+
+.reinitialization-head,
+.reinitialization-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.reinitialization-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.reinitialization-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.reinitialization-facts > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.reinitialization-facts span {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.reinitialization-facts code {
+  min-height: 40px;
+  padding: 10px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.reinitialization-actions p,
+.reinitialization-control .save-status {
+  margin: 0;
+}
+
+.reinitialization-actions button {
+  flex: 0 0 auto;
+}
+
+.reinitialization-control .save-status.error {
+  color: #8a1c1c;
+}
+
+.reinitialization-control .save-status.pending {
+  color: #705000;
+}
+
+.reinitialization-control .save-status[hidden] {
+  display: none;
+}
+
 .experiment-source {
   display: grid;
   gap: 12px;
@@ -411,6 +545,50 @@ button:disabled {
 
 .image-monitor .save-status[hidden] {
   display: none;
+}
+
+.image-monitor-facts strong.sequence-alert {
+  border-color: #b7791f;
+  background: #fffaf0;
+  color: #744210;
+}
+
+.sequence-warning {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #d6a84b;
+  border-radius: 4px;
+  background: #fffaf0;
+  color: #5f3f08;
+}
+
+.sequence-warning[hidden],
+.sequence-warning button[hidden] {
+  display: none;
+}
+
+.sequence-warning.pending {
+  border-color: #7aa7d6;
+  background: #f2f7fc;
+  color: #234f78;
+}
+
+.sequence-warning.error {
+  border-color: #c86a6a;
+  background: #fff5f5;
+  color: #8b2f2f;
+}
+
+.sequence-warning p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.sequence-warning button {
+  flex: 0 0 auto;
 }
 
 .init-layout {
@@ -783,6 +961,16 @@ button:disabled {
     grid-template-columns: 1fr;
     align-items: start;
   }
+
+  .sequence-warning {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .reinitialization-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
 .online-measurement-layout {
@@ -857,11 +1045,15 @@ button:disabled {
 
 @media (max-width: 700px) {
   .alignment-selection,
-  .run-parameter-facts {
+  .alignment-state-facts,
+  .run-parameter-facts,
+  .reinitialization-facts {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .panel-head {
+  .panel-head,
+  .alignment-control-head,
+  .reinitialization-head {
     flex-wrap: wrap;
   }
 

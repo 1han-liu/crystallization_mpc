@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# Use the Dockerfile frontend bundled with Docker Desktop / BuildKit.
 
 FROM python:3.11-slim
 

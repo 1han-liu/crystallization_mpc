@@ -117,6 +117,7 @@ class CrystallizationController:
         self.ekf_k_0: ExtendedKalmanFilter | None = None
         self.ekf_E_A: ExtendedKalmanFilter | None = None
         self.last_adaptation_pause_reason: str | None = None
+        self.last_control_hold_reason: str | None = None
         self.adaptation_diagnostics: dict[str, Any] = {
             "last_status": "not_run", "fit_count": 0, "failure_count": 0,
             "last_tick": None, "last_mode": None,
@@ -252,7 +253,7 @@ class CrystallizationController:
             tick.growth_sample_age_s is not None
             and tick.growth_sample_age_s > 2.0 * float(self.params["dt_G"])
         ):
-            return values, False, "stale_growth_sample"
+            return None, False, "stale_growth_sample"
         return values, True, None
 
     def _snapshot_numeric_state(self) -> dict[str, Any]:
@@ -381,6 +382,16 @@ class CrystallizationController:
                 self.history[f"target_{name}_set"].append(target_set if active else None)
                 self.history[f"abs_e_target_{name}"].append(absolute_error if active else None)
 
+            growth_values, adaptation_allowed, pause_reason = self._growth_values(
+                tick_input, c_KF, T_KF
+            )
+            hold_growth_control = target == "G" and not adaptation_allowed
+            self.last_control_hold_reason = (
+                pause_reason or "growth_measurement_unavailable"
+                if hold_growth_control
+                else None
+            )
+
             lag_percentage = calc_t_lag_perc(
                 float(self.params["t_lag_perc"]), float(self.params["t_lag_threshold_perc"]),
                 target_set, absolute_error,
@@ -389,7 +400,13 @@ class CrystallizationController:
             self.history["t_lag_perc"].append(lag_percentage)
             self.history["t_lag"].append(lag)
             projected = filtered + np.array([filtered[1], 0.0, filtered[3], 0.0]) * lag
-            if abs(float(calc_relative_sigma(projected[2], projected[0]))) < float(self.params["sigma_threshold"]):
+            if hold_growth_control:
+                # A live G target is undefined without a fresh measurement.
+                # Re-assert the equipment's current jacket setpoint and leave
+                # every control integral untouched until a valid sample arrives.
+                dT_dt_set = 0.0
+                T_j_set = current_T_j_set
+            elif abs(float(calc_relative_sigma(projected[2], projected[0]))) < float(self.params["sigma_threshold"]):
                 if not self.history["T_j_set"] or self.history["T_j_set"][-1] is None:
                     # The frozen reference indexes ii-1 here. At ii=1 its outer
                     # try/catch produces no control result. Keep every
@@ -424,7 +441,6 @@ class CrystallizationController:
             if self.params["run_type"] == "simulation" and self.simulation_state is not None:
                 self.simulation_state["T_j_set"] = T_j_set
 
-            growth_values, adaptation_allowed, pause_reason = self._growth_values(tick_input, c_KF, T_KF)
             G_measure: float | None = None
             G_measure_KF: float | None = None
             if growth_values is not None:
@@ -543,6 +559,7 @@ class CrystallizationController:
             "sample_count": self.num_adapt,
             "minimum_samples": int(self.params["min_num_adapt"]),
             "pause_reason": self.last_adaptation_pause_reason,
+            "control_hold_reason": self.last_control_hold_reason,
         }
 
     def update_runtime(self, changes: Mapping[str, Any]) -> dict[str, Any]:
@@ -614,6 +631,7 @@ class CrystallizationController:
             "adaptation": {"enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
                            "num_adapt": self.num_adapt,
                            "pause_reason": self.last_adaptation_pause_reason,
+                           "control_hold_reason": self.last_control_hold_reason,
                            "diagnostics": copy.deepcopy(self.adaptation_diagnostics)},
         })
 
@@ -667,6 +685,7 @@ class CrystallizationController:
             self.set_adaptation(bool(adaptation["enabled"]), str(adaptation["mode"]))
             self.num_adapt = int(adaptation["num_adapt"])
             self.last_adaptation_pause_reason = adaptation.get("pause_reason")
+            self.last_control_hold_reason = adaptation.get("control_hold_reason")
             diagnostics = adaptation.get("diagnostics")
             if diagnostics is not None:
                 if not isinstance(diagnostics, dict):

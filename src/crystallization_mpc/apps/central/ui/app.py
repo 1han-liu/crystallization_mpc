@@ -63,6 +63,8 @@ from crystallization_mpc.messaging.commands import (
     EXPERIMENT_SELECT_COMMAND,
     EXPERIMENT_START_COMMAND,
     EXPERIMENT_STOP_COMMAND,
+    GSENSOR_DISABLE_COMMAND,
+    GSENSOR_ENABLE_COMMAND,
     GROWTH_RATE_COMPLETED_MESSAGE,
     GROWTH_RATE_STATUS_MESSAGE,
     PARAMS_UPDATE_MESSAGE,
@@ -72,6 +74,7 @@ from crystallization_mpc.messaging.contracts import (
     ControllerAdaptationPayload,
     ExperimentStartPayload,
     ExperimentStopPayload,
+    GsensorActivationPayload,
     GrowthRateStatus,
     GrowthRateStatusPayload,
 )
@@ -90,6 +93,8 @@ DEFAULT_OPERATION_META_PATH = PROJECT_ROOT / "operation_meta.yaml"
 DEFAULT_EXPERIMENT_ROOT = PROJECT_ROOT / ".runtime" / "experiments"
 LATEST_OVERLAY_FILENAME = "gsensor_detection_latest.jpg"
 FINAL_OVERLAY_FILENAME = "gsensor_detection_final.jpg"
+GSENSOR_ACTIVATION_STATE_FILENAME = ".central_gsensor_activation.json"
+GSENSOR_PROCESSING_STATE_FILENAME = "gsensor_processing_state.json"
 logger = logging.getLogger(__name__)
 
 
@@ -142,6 +147,17 @@ class ControllerRuntimeRequest(BaseModel):
     expected_revision: int
     changes: Dict[str, Any]
     requested_at: str
+
+
+class GsensorActivationRequest(BaseModel):
+    """One optimistic-concurrency request from the Central UI."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    run_id: str
+    enabled: bool
+    expected_revision: int = Field(ge=0)
+    event_id: str
 
 
 class ExperimentCreateRequest(ExperimentContext):
@@ -452,6 +468,48 @@ class CentralApp:
         self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
         return env
 
+    def build_gsensor_activation_command(
+        self,
+        payload: GsensorActivationPayload,
+        *,
+        enabled: bool,
+        dst: str,
+        seq: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return build_envelope(
+            src=ROLE,
+            dst=dst,
+            msg_type="command",
+            name=(GSENSOR_ENABLE_COMMAND if enabled else GSENSOR_DISABLE_COMMAND),
+            seq=next_seq() if seq is None else seq,
+            payload=payload.to_dict(),
+        )
+
+    def publish_gsensor_activation_command(
+        self,
+        payload: GsensorActivationPayload,
+        *,
+        enabled: bool,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Close/open Controller's G gate before changing the Gsensor producer."""
+
+        seq = next_seq()
+        messages: Dict[str, Dict[str, Any]] = {}
+        for dst in ("controller", "gsensor"):
+            envelope = self.build_gsensor_activation_command(
+                payload,
+                enabled=enabled,
+                dst=dst,
+                seq=seq,
+            )
+            self._publish_with_reconnect(
+                route(ROLE, dst),
+                envelope,
+                persistent=True,
+            )
+            messages[dst] = envelope
+        return messages
+
     def build_experiment_select_command(
         self,
         run_id: str,
@@ -638,6 +696,515 @@ class CentralService:
                     )
             yield
 
+    def _gsensor_activation_path(self, run_id: str) -> Path:
+        manifest = self.experiments.registry.get(run_id)
+        run_directory = (self.experiment_root / manifest.run_id).resolve()
+        root = self.experiment_root.resolve()
+        try:
+            run_directory.relative_to(root)
+        except ValueError as exc:
+            raise InvalidExperimentIdentifierError(
+                "Gsensor activation state path escapes the experiment root."
+            ) from exc
+        return run_directory / GSENSOR_ACTIVATION_STATE_FILENAME
+
+    @staticmethod
+    def _new_gsensor_activation_state(manifest) -> Dict[str, Any]:
+        if manifest.started_at is None:
+            raise InvalidExperimentStateError(
+                "Start the experiment before changing Gsensor activation."
+            )
+        return {
+            "schema_version": 1,
+            "run_id": manifest.run_id,
+            "experiment_started_at": manifest.started_at,
+            # `enabled` is confirmed by Gsensor status. Publishing a command never
+            # changes it optimistically.
+            "enabled": False,
+            # `revision` is the latest revision issued or observed and is the UI's
+            # optimistic-concurrency token.
+            "revision": 0,
+            "acknowledged_revision": 0,
+            "acknowledged_event_id": None,
+            "acknowledged_at": None,
+            "pending": None,
+            "last_request": None,
+            "last_error": None,
+            "updated_at": utc_ts(),
+        }
+
+    def _load_gsensor_activation_state(
+        self,
+        manifest,
+        *,
+        create: bool,
+    ) -> Dict[str, Any]:
+        path = self._gsensor_activation_path(manifest.run_id)
+        if not path.exists():
+            state = self._new_gsensor_activation_state(manifest)
+            if create:
+                self._save_gsensor_activation_state(state)
+            return state
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Could not read Gsensor activation state: {path}"
+            ) from exc
+        self._validate_gsensor_activation_state(state, manifest)
+        return state
+
+    @staticmethod
+    def _validate_gsensor_activation_state(state: Any, manifest) -> None:
+        if not isinstance(state, dict) or state.get("schema_version") != 1:
+            raise ValueError("Invalid Central Gsensor activation state.")
+        if state.get("run_id") != manifest.run_id:
+            raise ValueError("Central Gsensor activation run_id mismatch.")
+        if (
+            not isinstance(state.get("experiment_started_at"), str)
+            or manifest.started_at is None
+            or not _same_timestamp(
+                state["experiment_started_at"],
+                manifest.started_at,
+            )
+        ):
+            raise ValueError("Central Gsensor activation experiment start mismatch.")
+        if not isinstance(state.get("enabled"), bool):
+            raise ValueError("Central Gsensor activation enabled state is invalid.")
+        revision = state.get("revision")
+        acknowledged_revision = state.get("acknowledged_revision")
+        if type(revision) is not int or revision < 0:
+            raise ValueError("Central Gsensor activation revision is invalid.")
+        if (
+            type(acknowledged_revision) is not int
+            or acknowledged_revision < 0
+            or acknowledged_revision > revision
+        ):
+            raise ValueError(
+                "Central Gsensor activation acknowledged revision is invalid."
+            )
+        acknowledged_event_id = state.get("acknowledged_event_id")
+        if acknowledged_event_id is not None and (
+            not isinstance(acknowledged_event_id, str)
+            or not acknowledged_event_id.strip()
+        ):
+            raise ValueError(
+                "Central Gsensor activation acknowledged event_id is invalid."
+            )
+        acknowledged_at = state.get("acknowledged_at")
+        if acknowledged_at is not None and (
+            not isinstance(acknowledged_at, str) or not acknowledged_at.strip()
+        ):
+            raise ValueError(
+                "Central Gsensor activation acknowledgment timestamp is invalid."
+            )
+        pending = state.get("pending")
+        if pending is not None:
+            if not isinstance(pending, dict):
+                raise ValueError("Central Gsensor activation pending state is invalid.")
+            command = GsensorActivationPayload.from_mapping(pending)
+            if command.run_id != manifest.run_id:
+                raise ValueError("Pending Gsensor activation run_id mismatch.")
+            if not _same_timestamp(
+                command.experiment_started_at,
+                manifest.started_at,
+            ):
+                raise ValueError("Pending Gsensor activation start mismatch.")
+            if command.revision != revision:
+                raise ValueError("Pending Gsensor activation revision mismatch.")
+            if not isinstance(pending.get("enabled"), bool):
+                raise ValueError("Pending Gsensor activation enabled state is invalid.")
+            expected_revision = pending.get("expected_revision")
+            if type(expected_revision) is not int or expected_revision < 0:
+                raise ValueError(
+                    "Pending Gsensor activation expected revision is invalid."
+                )
+            transport_error = pending.get("transport_error")
+            if transport_error is not None and not isinstance(transport_error, str):
+                raise ValueError("Pending Gsensor activation transport error is invalid.")
+        last_request = state.get("last_request")
+        if last_request is not None:
+            if not isinstance(last_request, dict):
+                raise ValueError("Central Gsensor activation last request is invalid.")
+            GsensorActivationPayload.from_mapping(last_request)
+            if not isinstance(last_request.get("enabled"), bool):
+                raise ValueError(
+                    "Central Gsensor activation last request enabled state is invalid."
+                )
+            expected_revision = last_request.get("expected_revision")
+            if type(expected_revision) is not int or expected_revision < 0:
+                raise ValueError(
+                    "Central Gsensor activation last request revision is invalid."
+                )
+        last_error = state.get("last_error")
+        if last_error is not None and not isinstance(last_error, str):
+            raise ValueError("Central Gsensor activation last error is invalid.")
+
+    def _save_gsensor_activation_state(self, state: Dict[str, Any]) -> None:
+        manifest = self.experiments.registry.get(str(state.get("run_id", "")))
+        self._validate_gsensor_activation_state(state, manifest)
+        state["updated_at"] = utc_ts()
+        _atomic_write_json(self._gsensor_activation_path(manifest.run_id), state)
+
+    @staticmethod
+    def _gsensor_activation_allowed(manifest) -> bool:
+        return manifest.started_at is not None and manifest.status in {
+            ExperimentStatus.STARTING,
+            ExperimentStatus.WAITING_FOR_INITIAL_IMAGE,
+            ExperimentStatus.INITIALIZING,
+            ExperimentStatus.MEASURING,
+        }
+
+    def _gsensor_activation_public_state(
+        self,
+        manifest=None,
+        state: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        if manifest is None:
+            run_id = self.experiments.current_run_id()
+            if run_id is None:
+                return {
+                    "run_id": None,
+                    "experiment_started_at": None,
+                    "enabled": False,
+                    "desired_enabled": False,
+                    "revision": 0,
+                    "acknowledged_revision": 0,
+                    "acknowledged_event_id": None,
+                    "acknowledged_at": None,
+                    "pending": None,
+                    "last_error": None,
+                    "updated_at": None,
+                    "can_toggle": False,
+                    "can_cancel_pending_enable": False,
+                    "blocked_reason": "Create and start an experiment first.",
+                }
+            manifest = self.experiments.registry.get(run_id)
+        if manifest.started_at is None:
+            return {
+                "run_id": manifest.run_id,
+                "experiment_started_at": None,
+                "enabled": False,
+                "desired_enabled": False,
+                "revision": 0,
+                "acknowledged_revision": 0,
+                "acknowledged_event_id": None,
+                "acknowledged_at": None,
+                "pending": None,
+                "last_error": None,
+                "updated_at": None,
+                "can_toggle": False,
+                "can_cancel_pending_enable": False,
+                "blocked_reason": "Start the experiment before changing Gsensor activation.",
+            }
+        if state is None:
+            state = self._load_gsensor_activation_state(manifest, create=False)
+        pending = state.get("pending")
+        can_toggle = self._gsensor_activation_allowed(manifest)
+        blocked_reason = None
+        if not can_toggle:
+            blocked_reason = (
+                f"Gsensor activation is unavailable while the experiment is "
+                f"{manifest.status.value}."
+            )
+        elif pending is not None and not (
+            pending.get("enabled") is True
+        ):
+            blocked_reason = (
+                "A Gsensor activation request is awaiting confirmation; retry that "
+                "same event."
+            )
+        return {
+            "run_id": state["run_id"],
+            "experiment_started_at": state["experiment_started_at"],
+            "enabled": state["enabled"],
+            "desired_enabled": (
+                pending["enabled"] if pending is not None else state["enabled"]
+            ),
+            "revision": state["revision"],
+            "acknowledged_revision": state["acknowledged_revision"],
+            "acknowledged_event_id": state.get("acknowledged_event_id"),
+            "acknowledged_at": state.get("acknowledged_at"),
+            "pending": dict(pending) if pending is not None else None,
+            "last_error": state.get("last_error"),
+            "updated_at": state.get("updated_at"),
+            "can_toggle": can_toggle,
+            "can_cancel_pending_enable": bool(
+                can_toggle and pending is not None and pending.get("enabled") is True
+            ),
+            "blocked_reason": blocked_reason,
+        }
+
+    def gsensor_activation_status(self) -> Dict[str, Any]:
+        with self._lock:
+            try:
+                return self._gsensor_activation_public_state()
+            except (OSError, RuntimeError, ValueError) as exc:
+                run_id = self.experiments.current_run_id()
+                return {
+                    "run_id": run_id,
+                    "experiment_started_at": None,
+                    "enabled": False,
+                    "desired_enabled": False,
+                    "revision": 0,
+                    "acknowledged_revision": 0,
+                    "acknowledged_event_id": None,
+                    "acknowledged_at": None,
+                    "pending": None,
+                    "last_error": (
+                        f"Gsensor activation state is unavailable: {type(exc).__name__}"
+                    ),
+                    "updated_at": None,
+                    "can_toggle": False,
+                    "can_cancel_pending_enable": False,
+                    "blocked_reason": "Repair the persisted activation state before retrying.",
+                }
+
+    @_locked_service_state
+    def set_gsensor_activation(
+        self,
+        request: GsensorActivationRequest | Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(request, GsensorActivationRequest):
+            request = GsensorActivationRequest.model_validate(request)
+        run_id = self.experiments.current_run_id()
+        if run_id is None:
+            raise InvalidExperimentStateError(
+                "Create and start an experiment before changing Gsensor activation."
+            )
+        if request.run_id != run_id:
+            raise InvalidExperimentStateError(
+                "The selected experiment changed. Refresh before changing Gsensor activation."
+            )
+        if not request.event_id.strip():
+            raise ValueError("event_id must be nonempty text.")
+        manifest = self.experiments.registry.get(run_id)
+        if not self._gsensor_activation_allowed(manifest):
+            if manifest.started_at is None:
+                reason = "Start the experiment before changing Gsensor activation."
+            else:
+                reason = (
+                    f"Cannot change Gsensor activation while experiment {run_id} is "
+                    f"{manifest.status.value}."
+                )
+            raise InvalidExperimentStateError(reason)
+
+        state = self._load_gsensor_activation_state(manifest, create=True)
+        event_id = request.event_id.strip()
+        last_request = state.get("last_request")
+        retrying = False
+        if last_request is not None and last_request.get("event_id") == event_id:
+            same_request = (
+                last_request.get("run_id") == run_id
+                and last_request.get("enabled") is request.enabled
+                and last_request.get("expected_revision")
+                == request.expected_revision
+                and _same_timestamp(
+                    str(last_request.get("experiment_started_at")),
+                    str(manifest.started_at),
+                )
+            )
+            if not same_request:
+                raise InvalidExperimentStateError(
+                    "Gsensor activation event_id was reused with different content."
+                )
+            pending = state.get("pending")
+            if pending is None:
+                return {
+                    "requested": False,
+                    "idempotent": True,
+                    "commands": {},
+                    "activation": self._gsensor_activation_public_state(
+                        manifest,
+                        state,
+                    ),
+                }
+            command = GsensorActivationPayload.from_mapping(pending)
+            retrying = True
+        else:
+            if request.expected_revision != state["revision"]:
+                raise InvalidExperimentStateError(
+                    "Gsensor activation revision changed. Refresh before retrying."
+                )
+            pending = state.get("pending")
+            if pending is not None:
+                cancelling_enable = (
+                    pending.get("enabled") is True and request.enabled is False
+                )
+                if not cancelling_enable:
+                    raise InvalidExperimentStateError(
+                        "A Gsensor activation request is awaiting confirmation; retry "
+                        "that event before making another change."
+                    )
+            elif request.enabled is state["enabled"]:
+                return {
+                    "requested": False,
+                    "idempotent": True,
+                    "commands": {},
+                    "activation": self._gsensor_activation_public_state(
+                        manifest,
+                        state,
+                    ),
+                }
+
+            revision = state["revision"] + 1
+            command = GsensorActivationPayload.from_mapping(
+                {
+                    "run_id": run_id,
+                    "experiment_started_at": manifest.started_at,
+                    "event_id": event_id,
+                    "revision": revision,
+                    "requested_at": utc_ts(),
+                }
+            )
+            command_document = {
+                **command.to_dict(),
+                "enabled": request.enabled,
+                "expected_revision": request.expected_revision,
+            }
+            state["revision"] = revision
+            state["last_request"] = dict(command_document)
+            state["pending"] = {
+                **command_document,
+                "transport_error": None,
+            }
+            state["last_error"] = None
+            # The pending intent is durable before either service can receive it.
+            self._save_gsensor_activation_state(state)
+
+        messages: Dict[str, Dict[str, Any]] = {}
+        transport_error = None
+        try:
+            messages = self.publisher.publish_gsensor_activation_command(
+                command,
+                enabled=request.enabled,
+            )
+        except Exception as exc:
+            transport_error = f"Delivery not confirmed: {type(exc).__name__}"
+
+        # A synchronous in-memory status publisher can acknowledge and clear the
+        # request during publish. Reload and never resurrect such an acknowledgment.
+        latest = self._load_gsensor_activation_state(manifest, create=True)
+        latest_pending = latest.get("pending")
+        if (
+            latest_pending is not None
+            and latest_pending.get("revision") == command.revision
+            and latest_pending.get("event_id") == command.event_id
+        ):
+            latest_pending["transport_error"] = transport_error
+            latest["pending"] = latest_pending
+            self._save_gsensor_activation_state(latest)
+        return {
+            "requested": True,
+            "idempotent": retrying,
+            "commands": messages,
+            "activation": self._gsensor_activation_public_state(manifest, latest),
+        }
+
+    def _observe_gsensor_activation(
+        self,
+        payload: GrowthRateStatusPayload,
+        manifest,
+    ) -> bool:
+        metadata = (
+            payload.enabled,
+            payload.control_revision,
+            payload.experiment_started_at,
+            payload.control_event_id,
+        )
+        if all(value is None for value in metadata):
+            return True
+
+        state = self._load_gsensor_activation_state(manifest, create=False)
+        if payload.control_revision is not None:
+            if payload.control_revision < state["revision"]:
+                return False
+        # Older mixed-version producers may provide only part of the optional
+        # bundle. It may still drive lifecycle status, but never acknowledges a
+        # Central activation request.
+        if any(value is None for value in metadata):
+            return True
+
+        assert payload.control_revision is not None
+        assert payload.enabled is not None
+        assert payload.experiment_started_at is not None
+        assert payload.control_event_id is not None
+        revision = payload.control_revision
+        event_id = payload.control_event_id
+        pending = state.get("pending")
+        prior_revision = state["revision"]
+        prior_enabled = state["enabled"]
+
+        if revision > prior_revision:
+            state["revision"] = revision
+            state["enabled"] = payload.enabled
+            state["acknowledged_revision"] = revision
+            state["acknowledged_event_id"] = event_id
+            state["acknowledged_at"] = payload.occurred_at
+            state["pending"] = None
+            state["last_error"] = (
+                "Gsensor reported a newer activation revision; the local pending "
+                "request was superseded."
+                if pending is not None
+                else None
+            )
+            self._save_gsensor_activation_state(state)
+            return True
+
+        if pending is not None:
+            if _timestamp_precedes(payload.occurred_at, pending["requested_at"]):
+                return False
+            if event_id != pending.get("event_id"):
+                return False
+            requested_enabled = pending["enabled"]
+            state["enabled"] = payload.enabled
+            state["acknowledged_revision"] = revision
+            state["acknowledged_event_id"] = event_id
+            state["acknowledged_at"] = payload.occurred_at
+            state["pending"] = None
+            if payload.enabled is requested_enabled:
+                state["last_error"] = None
+            else:
+                state["last_error"] = (
+                    "Gsensor acknowledged the command but remained disabled. "
+                    "Refresh and issue a new enable request."
+                    if requested_enabled
+                    else "Gsensor did not confirm the requested disabled state."
+                )
+            self._save_gsensor_activation_state(state)
+            return True
+
+        acknowledged_revision = state["acknowledged_revision"]
+        acknowledged_event_id = state.get("acknowledged_event_id")
+        if revision != acknowledged_revision:
+            return False
+        acknowledged_at = state.get("acknowledged_at")
+        if acknowledged_at is not None and _timestamp_precedes(
+            payload.occurred_at,
+            acknowledged_at,
+        ):
+            return False
+        if acknowledged_event_id is not None and event_id != acknowledged_event_id:
+            return False
+        if payload.enabled is prior_enabled:
+            state["acknowledged_event_id"] = event_id
+            state["acknowledged_at"] = payload.occurred_at
+            self._save_gsensor_activation_state(state)
+            return True
+        # Recovery is fail-safe: a restarted Gsensor restores disabled at the same
+        # revision. That is authoritative and requires a fresh higher revision to
+        # enable it again. The reverse transition is never accepted implicitly.
+        if prior_enabled and not payload.enabled:
+            state["enabled"] = False
+            state["acknowledged_event_id"] = event_id
+            state["acknowledged_at"] = payload.occurred_at
+            state["last_error"] = (
+                "Gsensor restarted in the disabled state. Issue a new enable request."
+            )
+            self._save_gsensor_activation_state(state)
+            return True
+        return False
+
     def run_configuration_payload(self) -> Dict[str, Any]:
         return {
             "configuration": self.run_configuration.to_dict(),
@@ -771,11 +1338,12 @@ class CentralService:
             }:
                 raise ValueError(f"Unsupported Gsensor status message: {name!r}.")
             payload = GrowthRateStatusPayload.from_mapping(message.get("payload", {}))
-            if (
-                name == GROWTH_RATE_COMPLETED_MESSAGE
-                and payload.status != GrowthRateStatus.COMPLETED
-            ):
+            is_completed_message = name == GROWTH_RATE_COMPLETED_MESSAGE
+            is_completed_status = payload.status == GrowthRateStatus.COMPLETED
+            if is_completed_message and not is_completed_status:
                 raise ValueError("growth_rate.completed must use status='completed'.")
+            if is_completed_status and not is_completed_message:
+                raise ValueError("status='completed' must use growth_rate.completed.")
             if not self._apply_gsensor_status(payload):
                 return {"accepted": True, "ignored": True, "reason": "Outdated Gsensor status."}
         except Exception as exc:
@@ -801,8 +1369,24 @@ class CentralService:
             raise ValueError("Gsensor status run_id does not match the current experiment.")
 
         manifest = self.experiments.registry.get(run_id)
+        if (
+            payload.experiment_started_at is not None
+            and manifest.started_at is not None
+            and not _same_timestamp(payload.experiment_started_at, manifest.started_at)
+        ):
+            raise ValueError(
+                "Gsensor status experiment_started_at does not match the current experiment."
+            )
+        if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+            return False
         previous = self.last_gsensor_status
         if previous is not None and previous.get("run_id") == run_id:
+            previous_revision = previous.get("control_revision")
+            if type(previous_revision) is int:
+                if payload.control_revision is None:
+                    return False
+                if payload.control_revision < previous_revision:
+                    return False
             previous_frame = previous.get("frame_seq")
             if (
                 payload.frame_seq is not None and previous_frame is not None
@@ -817,9 +1401,8 @@ class CentralService:
             except (KeyError, TypeError, ValueError):
                 # Older valid producers may not have a comparable timestamp.
                 pass
-        if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+        if not self._observe_gsensor_activation(payload, manifest):
             return False
-
         status = payload.status
         if status == GrowthRateStatus.ERROR:
             self.experiments.registry.mark_error(
@@ -837,6 +1420,22 @@ class CentralService:
             self.experiments.finish(run_id)
             with self._lock:
                 self.operation_state["experiment_active"] = False
+            return True
+
+        if status == GrowthRateStatus.DISABLED:
+            # Gsensor activation is independent from the experiment lifecycle.
+            # Disabling image processing must not stop or complete Controller work.
+            return True
+
+        if (
+            manifest.status == ExperimentStatus.MEASURING
+            and status in {
+                GrowthRateStatus.INITIALIZING,
+                GrowthRateStatus.BASELINE_READY,
+            }
+        ):
+            # Runtime re-marking starts a new Gsensor processing segment while
+            # the overall experiment and Controller remain in their running phase.
             return True
 
         target_by_status = {
@@ -924,6 +1523,7 @@ class CentralService:
                 "last_rejection_error": self.last_rejected_status_error,
                 "message_count": self.status_message_count,
                 "rejection_count": self.status_rejection_count,
+                "activation": self.gsensor_activation_status(),
             }
         controller = self.controller_status()
         if current_run_id:
@@ -947,10 +1547,42 @@ class CentralService:
     def overlay_path(self, run_id: str, kind: str) -> Path:
         if kind not in {"latest", "final"}:
             raise ValueError("Overlay kind must be 'latest' or 'final'.")
-        self.experiments.registry.get(run_id)
-        run_directory = (self.experiment_root / run_id).resolve()
+        manifest = self.experiments.registry.get(run_id)
+        run_directory = (self.experiment_root / manifest.run_id).resolve()
         filename = LATEST_OVERLAY_FILENAME if kind == "latest" else FINAL_OVERLAY_FILENAME
-        path = (run_directory / filename).resolve()
+        processing_state_path = run_directory / GSENSOR_PROCESSING_STATE_FILENAME
+        if processing_state_path.is_file():
+            try:
+                processing_state = json.loads(
+                    processing_state_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"Could not read Gsensor processing state: {processing_state_path}"
+                ) from exc
+            if (
+                not isinstance(processing_state, dict)
+                or processing_state.get("run_id") != manifest.run_id
+            ):
+                raise ValueError(
+                    "Gsensor processing-state run_id does not match the experiment."
+                )
+            configured = processing_state.get(f"{kind}_overlay_path")
+            if configured is None:
+                raise ExperimentNotFoundError(
+                    f"{kind.capitalize()} overlay is not available yet."
+                )
+            if not isinstance(configured, str) or not configured.strip():
+                raise ValueError("Gsensor processing-state overlay path is invalid.")
+            configured_path = Path(configured)
+            path = (
+                configured_path
+                if configured_path.is_absolute()
+                else run_directory / configured_path
+            ).resolve()
+        else:
+            # Legacy runs wrote the stable overlays directly in their run root.
+            path = (run_directory / filename).resolve()
         try:
             path.relative_to(run_directory)
         except ValueError as exc:
@@ -1296,6 +1928,8 @@ class CentralService:
             params_snapshot=params_snapshot,
             parameter_version=int(params_snapshot["version"]),
         )
+        started_manifest = self.experiments.registry.get(run_id)
+        self._load_gsensor_activation_state(started_manifest, create=True)
         # STARTING is intentionally persisted before RabbitMQ delivery. If a
         # publish is interrupted, the immutable snapshot can be retried while
         # configuration changes and experiment switching remain locked.
@@ -1337,6 +1971,7 @@ class CentralService:
             "parameters": self.params_payload(),
             "commands": commands,
             "experiment": experiment,
+            "gsensor_activation": self.gsensor_activation_status(),
         }
 
     def finish_experiment(self, run_id: str) -> Dict[str, Any]:
@@ -1493,7 +2128,7 @@ def _retain_last_gsensor_frame(
     previous: Dict[str, Any] | None,
     current: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Keep the latest frame reference when a terminal status omits it."""
+    """Keep the latest frame reference when a lifecycle status omits it."""
 
     merged = dict(current)
     if previous is None or previous.get("run_id") != merged.get("run_id"):
@@ -1503,6 +2138,48 @@ def _retain_last_gsensor_frame(
     if not merged.get("image_name"):
         merged["image_name"] = previous.get("image_name")
     return merged
+
+
+def _same_timestamp(left: str, right: str) -> bool:
+    """Compare ISO timestamps while accepting equivalent UTC spellings."""
+
+    try:
+        left_time = datetime.fromisoformat(left.replace("Z", "+00:00"))
+        right_time = datetime.fromisoformat(right.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return left == right
+    return left_time == right_time
+
+
+def _timestamp_precedes(left: str, right: str) -> bool:
+    """Return whether one ISO timestamp is older, treating naive values as UTC."""
+
+    try:
+        left_time = datetime.fromisoformat(left.replace("Z", "+00:00"))
+        right_time = datetime.fromisoformat(right.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Gsensor activation status timestamps must use ISO-8601 text."
+        ) from exc
+    if left_time.tzinfo is None:
+        left_time = left_time.replace(tzinfo=timezone.utc)
+    if right_time.tzinfo is None:
+        right_time = right_time.replace(tzinfo=timezone.utc)
+    return left_time < right_time
+
+
+def _atomic_write_json(path: Path, document: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(document, stream, ensure_ascii=False, allow_nan=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 service = CentralService()
@@ -1688,6 +2365,14 @@ def start_experiment(payload: Optional[ParamsUpdate] = None) -> Dict[str, Any]:
     try:
         with service.ui_action(payload):
             return service.start_experiment(payload)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/operation/gsensor/activation")
+def set_gsensor_activation(payload: GsensorActivationRequest) -> Dict[str, Any]:
+    try:
+        return service.set_gsensor_activation(payload)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 

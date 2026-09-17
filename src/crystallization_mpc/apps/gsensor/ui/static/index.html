@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260910-run-alignment">
+    <link rel="stylesheet" href="/static/styles.css?v=20260917-runtime-alignment">
   </head>
   <body>
     <div class="shell">
@@ -24,32 +24,37 @@
 
         <p id="connection-status" class="connection-status" role="status" aria-live="polite" hidden></p>
 
-        <section class="panel alignment-panel" aria-labelledby="alignment-heading">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Initialization Setting</p>
-              <h2 id="alignment-heading">Image Alignment</h2>
-            </div>
-            <span id="alignment-configuration-status" class="status idle">waiting for experiment</span>
-          </div>
-          <div class="alignment-selection">
-            <div class="alignment-field">
-              <label for="alignment-method-select">Alignment method</label>
-              <select id="alignment-method-select" aria-describedby="alignment-selection-help alignment-capability-notes" disabled>
-                <option value="none">None — no image alignment</option>
-              </select>
-            </div>
-            <p id="alignment-selection-help" class="muted" role="status" aria-live="polite">Start an experiment in Central. Choose an alignment method during image marking.</p>
-          </div>
-          <p id="alignment-capability-notes" class="save-status muted" hidden></p>
-        </section>
-
         <section class="panel initialization-panel">
           <div class="panel-head">
             <div>
               <p class="eyebrow">Initialization</p>
               <h2>Image Marking</h2>
             </div>
+          </div>
+
+          <div class="reinitialization-control" aria-labelledby="reinitialization-heading">
+            <div class="reinitialization-head">
+              <div>
+                <p class="eyebrow">Marking Image</p>
+                <h3 id="reinitialization-heading">Switch to the latest ready image</h3>
+              </div>
+              <span id="reinitialization-status" class="status idle">unavailable</span>
+            </div>
+            <div class="reinitialization-facts">
+              <div>
+                <span>Current Marking Image</span>
+                <code id="marking-current-image">—</code>
+              </div>
+              <div>
+                <span>Latest Ready Image</span>
+                <code id="marking-latest-ready">—</code>
+              </div>
+            </div>
+            <div class="reinitialization-actions">
+              <p class="muted">New images never replace the marking canvas automatically. Choosing the latest ready image clears the current points and pauses new G values; the selected image then stays fixed until another explicit switch. G resumes only after you confirm the new candidate.</p>
+              <button id="restart-initialization" class="primary" type="button" disabled>Use latest image</button>
+            </div>
+            <p id="reinitialization-feedback" class="save-status muted" role="status" aria-live="polite" hidden></p>
           </div>
 
           <div class="experiment-source">
@@ -91,6 +96,26 @@
                 <strong id="scan-pending-count">0</strong>
               </div>
               <div class="wide">
+                <span>Latest Discovered</span>
+                <code id="scan-latest-discovered">—</code>
+              </div>
+              <div class="wide">
+                <span>Latest Ready</span>
+                <code id="scan-latest-ready">—</code>
+              </div>
+              <div>
+                <span>Last Accepted Sequence</span>
+                <strong id="scan-sequence-watermark">—</strong>
+              </div>
+              <div>
+                <span>Missing Sequences</span>
+                <strong id="scan-missing-count">0</strong>
+              </div>
+              <div>
+                <span>Late Images</span>
+                <strong id="scan-late-count">0</strong>
+              </div>
+              <div class="wide">
                 <span>Last Detected Image</span>
                 <code id="scan-last-image">—</code>
               </div>
@@ -103,6 +128,10 @@
                 <code id="scan-detected-at">—</code>
               </div>
             </div>
+            <div id="scan-sequence-warning" class="sequence-warning" role="status" aria-live="polite" hidden>
+              <p id="scan-sequence-warning-text"></p>
+              <button id="confirm-sequence-reset" class="ghost" type="button" hidden>Confirm numbering restart</button>
+            </div>
             <p id="scan-last-error" class="save-status muted" hidden></p>
           </div>
 
@@ -110,7 +139,7 @@
             <div class="image-monitor-head">
               <div>
                 <p class="eyebrow">Measurement Baseline</p>
-                <h3>Frame 0</h3>
+                <h3>Current Baseline</h3>
               </div>
               <span id="baseline-status" class="status idle">not ready</span>
             </div>
@@ -208,6 +237,40 @@
               <button id="refresh-overlay" class="ghost" type="button">Refresh Preview</button>
             </div>
           </div>
+          <section class="alignment-panel" aria-labelledby="alignment-heading">
+            <div class="alignment-control-head">
+              <div>
+                <p class="eyebrow">Image Processing</p>
+                <h3 id="alignment-heading">Image Alignment</h3>
+              </div>
+              <span id="alignment-configuration-status" class="status idle">waiting for experiment</span>
+            </div>
+            <div class="alignment-state-facts">
+              <div>
+                <span>Current Applied Method</span>
+                <strong id="alignment-applied-method">—</strong>
+              </div>
+              <div>
+                <span>Latest Preview Method</span>
+                <strong id="alignment-preview-method">—</strong>
+              </div>
+              <div>
+                <span>Applies After Frame</span>
+                <strong id="alignment-effective-after">—</strong>
+              </div>
+            </div>
+            <div class="alignment-selection">
+              <div class="alignment-field">
+                <label for="alignment-method-select">Method for new frames</label>
+                <select id="alignment-method-select" aria-describedby="alignment-selection-help alignment-action-feedback alignment-capability-notes" disabled>
+                  <option value="none">None — no image alignment</option>
+                </select>
+              </div>
+              <p id="alignment-selection-help" class="muted" role="status" aria-live="polite">Start an experiment in Central. Choose an alignment method during image marking.</p>
+            </div>
+            <p id="alignment-action-feedback" class="save-status muted" role="status" aria-live="polite" hidden></p>
+            <p id="alignment-capability-notes" class="save-status muted" hidden></p>
+          </section>
           <div class="online-measurement-layout">
             <div class="measurement-summary">
               <div class="measurement-facts">
@@ -219,7 +282,7 @@
                 <div><span>G_v_KF</span><strong id="measurement-g-v-kf">—</strong></div>
                 <div><span>Valid Frames</span><strong id="measurement-valid-count">0</strong></div>
                 <div><span>Invalid Frames</span><strong id="measurement-invalid-count">0</strong></div>
-                <div><span>Alignment</span><strong id="alignment-method">—</strong></div>
+                <div><span>Preview Alignment</span><strong id="alignment-method">—</strong></div>
                 <div><span>Alignment Status</span><strong id="alignment-status">—</strong></div>
                 <div><span>Translation</span><strong id="alignment-translation">—</strong></div>
                 <div><span>Rotation</span><strong id="alignment-rotation">—</strong></div>
@@ -293,6 +356,6 @@
       <div id="run-parameters-values" class="run-parameters-values"></div>
     </dialog>
 
-    <script src="/static/app.js?v=20260910-run-alignment"></script>
+    <script src="/static/app.js?v=20260917-runtime-alignment"></script>
   </body>
 </html>

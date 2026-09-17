@@ -157,6 +157,10 @@ class GrowthRateProcessor:
         self.algorithm_step = 0
         self.valid_frame_count = 0
         self.invalid_frame_count = 0
+        # Runtime alignment changes start a new numerical segment without
+        # changing experiment-wide counters.  The first usable frame seeds
+        # distances in the new coordinate system and intentionally withholds G.
+        self.alignment_warmup_pending = False
         self.last_result: GrowthRateFrameResult | None = None
 
         q2 = _required(params, "q2")
@@ -165,6 +169,95 @@ class GrowthRateProcessor:
             initialize_uv_struct(item, self.dt_s, self.resolution, q2, r_diag)
             for item in uv_struct_list
         ]
+
+    def begin_alignment_segment(
+        self,
+        *,
+        frame_seq: int,
+        valid_frame_count: int,
+        invalid_frame_count: int,
+    ) -> None:
+        """Prepare a fresh processor for a runtime alignment-method segment.
+
+        The caller constructs a new processor from the existing confirmed
+        initialization geometry, then transfers only experiment-wide counters.
+        Edge, distance, Kalman and aligner histories must still be pristine.
+        """
+
+        inherited_frame_seq = _non_negative_int(frame_seq, "frame_seq")
+        inherited_valid = _non_negative_int(
+            valid_frame_count, "valid_frame_count"
+        )
+        inherited_invalid = _non_negative_int(
+            invalid_frame_count, "invalid_frame_count"
+        )
+        if inherited_valid + inherited_invalid > inherited_frame_seq:
+            raise ValueError(
+                "valid_frame_count + invalid_frame_count cannot exceed frame_seq."
+            )
+        if (
+            self.frame_seq != 0
+            or self.algorithm_step != 0
+            or self.valid_frame_count != 0
+            or self.invalid_frame_count != 0
+            or self.last_result is not None
+            or self.aligner_initialized
+            or self.alignment_warmup_pending
+            or any(not _edge_history_is_empty(item) for item in self.uv_structs)
+        ):
+            raise ValueError(
+                "begin_alignment_segment requires a fresh GrowthRateProcessor."
+            )
+        self.frame_seq = inherited_frame_seq
+        self.valid_frame_count = inherited_valid
+        self.invalid_frame_count = inherited_invalid
+        self.alignment_warmup_pending = True
+
+    def prime_alignment_from_baseline(self) -> AlignmentDiagnostics:
+        """Initialize a candidate aligner from the immutable marked image.
+
+        Runtime switching calls this before committing the candidate processor,
+        so a missing/undecodable baseline or an aligner initialization failure
+        leaves the currently active processor untouched.
+        """
+
+        if self.aligner_initialized:
+            raise ValueError("The alignment method is already initialized.")
+        if self.alignment_method == "none":
+            # Identity alignment owns no image-derived state; avoid making a
+            # switch to None depend on image decoding or segmentation.
+            empty = np.zeros((1, 1), dtype=np.uint8)
+            baseline_frame = AlignmentInput(empty, empty, empty)
+        else:
+            if self.initial_image_path is None:
+                raise ValueError(
+                    "initial_image_path is required to prime an alignment segment."
+                )
+            baseline_image = imread(self.initial_image_path)
+            segmentation = segment_crystal_yolov(
+                baseline_image,
+                runner=self.segmentation_runner,
+            )
+            baseline_frame = AlignmentInput(
+                image_gray=_to_gray(baseline_image),
+                raw_mask=np.asarray(segmentation.raw_mask, dtype=np.uint8) * 255,
+                measurement_mask=(
+                    np.asarray(segmentation.measurement_mask, dtype=np.uint8) * 255
+                ),
+            )
+        if (
+            self.alignment_method != "none"
+            and not np.any(baseline_frame.measurement_mask)
+        ):
+            raise RuntimeError("baseline segmentation mask is empty")
+        result = self.aligner.initialize(baseline_frame)
+        if not result.diagnostics.success:
+            raise RuntimeError(
+                "alignment initialization failed: "
+                f"{result.diagnostics.error or 'unknown error'}"
+            )
+        self.aligner_initialized = True
+        return result.diagnostics
 
     def process(
         self,
@@ -261,52 +354,110 @@ class GrowthRateProcessor:
                     original_image=alignment_result.aligned_gray,
                     edge_mask=shared_edge_mask,
                 )
-                working_structs[index] = update_EKF_G(
-                    working_structs[index],
-                    self.dt_s,
-                    self.resolution,
-                    algorithm_step,
-                )
 
             overlay_path = self._write_overlay(
                 original_image,
                 image_path,
                 uv_structs=working_structs,
             )
-            u_measurement = self._edge_measurement(working_structs[0], algorithm_step)
-            v_measurement = self._edge_measurement(working_structs[1], algorithm_step)
-            missing_edges = [
-                name
-                for name, measurement in (("u", u_measurement), ("v", v_measurement))
-                if not measurement.detected
-            ]
-            valid = not missing_edges
-            measurements = (u_measurement, v_measurement)
-            finite = all(
-                np.isfinite(value)
-                for measurement in measurements
-                for value in (
-                    measurement.distance_px,
-                    measurement.distance_m,
-                    measurement.distance_KF_m,
-                    measurement.G,
-                    measurement.G_KF,
+            if self.alignment_warmup_pending:
+                missing_edges = [
+                    edge_name
+                    for edge_name, uv_struct in zip(("u", "v"), working_structs)
+                    if not bool(getattr(uv_struct.line, "detection_valid", True))
+                ]
+                finite_distances = all(
+                    np.isfinite(float(getattr(uv_struct, "dist")))
+                    for uv_struct in working_structs
                 )
-            )
-            if missing_edges:
-                error = f"no valid {'/'.join(missing_edges)} Hough line detected"
-            elif not finite:
+                if missing_edges:
+                    error = (
+                        "alignment segment warm-up is waiting for valid "
+                        f"{'/'.join(missing_edges)} Hough line detection"
+                    )
+                    if alignment_checkpoint is not None:
+                        self.aligner.restore_state(alignment_checkpoint)
+                elif not finite_distances:
+                    error = (
+                        "alignment segment warm-up produced a non-finite distance"
+                    )
+                    if alignment_checkpoint is not None:
+                        self.aligner.restore_state(alignment_checkpoint)
+                else:
+                    for uv_struct in working_structs:
+                        uv_struct.baseline_dist = float(uv_struct.dist)
+                        _clear_edge_history(uv_struct)
+                        # Seed the Kalman position in physical units without a
+                        # predict/correct step.  Leaving x at zero would turn a
+                        # large absolute distance into artificial velocity on
+                        # the first measured frame after the switch.
+                        uv_struct.EKF_G.x = np.array(
+                            [
+                                [uv_struct.baseline_dist * self.resolution],
+                                [0.0],
+                                [0.0],
+                            ],
+                            dtype=float,
+                        )
+                    self.uv_structs = working_structs
+                    self.alignment_warmup_pending = False
+                    error = (
+                        "alignment segment warm-up established; growth rate withheld"
+                    )
+                # Warm-up frames are deliberately invalid at the public
+                # contract: their transformed distances establish a baseline,
+                # but cannot yet represent a growth rate.
                 valid = False
-                error = "growth-rate calculation produced a non-finite value"
                 u_measurement = None
                 v_measurement = None
             else:
-                error = None
-            if valid and finite:
-                self.uv_structs = working_structs
-                self.algorithm_step = algorithm_step
-            elif alignment_checkpoint is not None:
-                self.aligner.restore_state(alignment_checkpoint)
+                for index in range(2):
+                    working_structs[index] = update_EKF_G(
+                        working_structs[index],
+                        self.dt_s,
+                        self.resolution,
+                        algorithm_step,
+                    )
+                u_measurement = self._edge_measurement(
+                    working_structs[0], algorithm_step
+                )
+                v_measurement = self._edge_measurement(
+                    working_structs[1], algorithm_step
+                )
+                missing_edges = [
+                    name
+                    for name, measurement in (
+                        ("u", u_measurement), ("v", v_measurement)
+                    )
+                    if not measurement.detected
+                ]
+                valid = not missing_edges
+                measurements = (u_measurement, v_measurement)
+                finite = all(
+                    np.isfinite(value)
+                    for measurement in measurements
+                    for value in (
+                        measurement.distance_px,
+                        measurement.distance_m,
+                        measurement.distance_KF_m,
+                        measurement.G,
+                        measurement.G_KF,
+                    )
+                )
+                if missing_edges:
+                    error = f"no valid {'/'.join(missing_edges)} Hough line detected"
+                elif not finite:
+                    valid = False
+                    error = "growth-rate calculation produced a non-finite value"
+                    u_measurement = None
+                    v_measurement = None
+                else:
+                    error = None
+                if valid and finite:
+                    self.uv_structs = working_structs
+                    self.algorithm_step = algorithm_step
+                elif alignment_checkpoint is not None:
+                    self.aligner.restore_state(alignment_checkpoint)
         except Exception as exc:
             if alignment_checkpoint is not None:
                 self.aligner.restore_state(alignment_checkpoint)
@@ -411,6 +562,7 @@ class GrowthRateProcessor:
             "algorithm_step": self.algorithm_step,
             "valid_frame_count": self.valid_frame_count,
             "invalid_frame_count": self.invalid_frame_count,
+            "alignment_warmup_pending": self.alignment_warmup_pending,
             "edges": [self._export_edge_state(item) for item in self.uv_structs],
             "alignment": alignment,
         }
@@ -431,6 +583,13 @@ class GrowthRateProcessor:
         )
         if algorithm_step > frame_seq:
             raise ValueError("algorithm_step cannot exceed frame_seq.")
+        warmup_pending = state.get("alignment_warmup_pending", False)
+        if type(warmup_pending) is not bool:
+            raise ValueError("alignment_warmup_pending must be a boolean.")
+        if warmup_pending and algorithm_step != 0:
+            raise ValueError(
+                "alignment_warmup_pending requires algorithm_step to be zero."
+            )
 
         # Only old, unaligned v1 records may omit alignment metadata. Extended
         # v1 records restore alignment by field presence, not by another version.
@@ -469,6 +628,7 @@ class GrowthRateProcessor:
             self._restore_edge_state(uv_struct, edge_state, algorithm_step)
         self.frame_seq = frame_seq
         self.algorithm_step = algorithm_step
+        self.alignment_warmup_pending = warmup_pending
         self.valid_frame_count = _non_negative_int(
             state.get("valid_frame_count"), "valid_frame_count"
         )
@@ -593,6 +753,28 @@ class GrowthRateProcessor:
             G=_value(uv_struct.G_array, frame_seq),
             G_KF=_value(uv_struct.G_KF_array, frame_seq),
         )
+
+
+_EDGE_HISTORY_FIELDS = (
+    "dist_array",
+    "distance_array",
+    "distance_KF_array",
+    "G_array",
+    "G_KF_array",
+    "x_G_array",
+)
+
+
+def _edge_history_is_empty(uv_struct: Any) -> bool:
+    return all(
+        np.asarray(getattr(uv_struct, name, ()), dtype=object).size == 0
+        for name in _EDGE_HISTORY_FIELDS
+    )
+
+
+def _clear_edge_history(uv_struct: Any) -> None:
+    for name in _EDGE_HISTORY_FIELDS:
+        setattr(uv_struct, name, [])
 
 
 def _value(values: Any, frame_seq: int) -> float:

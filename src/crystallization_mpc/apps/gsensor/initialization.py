@@ -64,6 +64,7 @@ class GsensorInitializationManager:
         image_path: str | Path,
         *,
         available_images: list[Path] | None = None,
+        source_folder: str | Path | None = None,
     ) -> dict[str, Any]:
         """Start a session from the exact readable image chosen by the watcher."""
 
@@ -72,11 +73,12 @@ class GsensorInitializationManager:
             raise FileNotFoundError(f"Initialization image not found: {selected_image}")
         if selected_image.suffix.lower() not in IMAGE_EXTENSIONS:
             raise ValueError(f"Unsupported initialization image: {selected_image.name}")
-        images = available_images or list_supported_images(selected_image.parent)
+        image_folder = Path(source_folder) if source_folder is not None else selected_image.parent
+        images = available_images or list_supported_images(image_folder)
         image_width, image_height = read_image_size(selected_image)
         session = InitializationSession(
             session_id=uuid4().hex,
-            image_folder=str(selected_image.parent),
+            image_folder=str(image_folder),
             images=[str(path) for path in images],
             selected_image=str(selected_image),
             image_width=image_width,

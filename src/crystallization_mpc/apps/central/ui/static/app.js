@@ -28,6 +28,12 @@ const state = {
   pendingSeedEventId: null,
   seedActionMessage: "",
   seedActionError: false,
+  gsensorActivation: null,
+  gsensorActivationInFlight: false,
+  gsensorActivationCommand: null,
+  gsensorActivationError: "",
+  gsensorActivationErrorSource: null,
+  gsensorActivationRequestId: 0,
   runtimeInFlight: false,
   runtimeRequest: null,
   runtimeError: "",
@@ -82,6 +88,15 @@ const gsensorLiveImage = document.querySelector("#gsensor-live-image");
 const gsensorMessageCount = document.querySelector("#gsensor-message-count");
 const gsensorReceivedAt = document.querySelector("#gsensor-received-at");
 const gsensorLiveError = document.querySelector("#gsensor-live-error");
+const gsensorActivationState = document.querySelector("#gsensor-activation-state");
+const gsensorActivationPending = document.querySelector("#gsensor-activation-pending");
+const gsensorActivationConfirmedAt = document.querySelector("#gsensor-activation-confirmed-at");
+const toggleGsensorActivationButton = document.querySelector("#toggle-gsensor-activation");
+const retryGsensorActivationButton = document.querySelector("#retry-gsensor-activation");
+const gsensorActivationHelp = document.querySelector("#gsensor-activation-help");
+const gsensorActivationMessage = document.querySelector("#gsensor-activation-message");
+const gsensorGrowthReadinessState = document.querySelector("#gsensor-growth-readiness-state");
+const gsensorGrowthReadinessMessage = document.querySelector("#gsensor-growth-readiness-message");
 const controllerLiveStatus = document.querySelector("#controller-live-status");
 const controllerRunId = document.querySelector("#controller-run-id");
 const controllerLastFrame = document.querySelector("#controller-last-frame");
@@ -130,7 +145,7 @@ const runConfigurationControls = [
 function mutationInFlight() {
   return state.experimentActionInFlight || state.parameterActionInFlight
     || state.runConfigurationInFlight || state.seedActionInFlight
-    || state.runtimeInFlight;
+    || state.gsensorActivationInFlight || state.runtimeInFlight;
 }
 
 function invalidatePendingReads() {
@@ -138,6 +153,7 @@ function invalidatePendingReads() {
   state.operationRequestId += 1;
   state.parameterRequestId += 1;
   state.configurationRequestId += 1;
+  state.gsensorActivationRequestId += 1;
 }
 
 function clearCentralOverlay(message = "Waiting for an overlay for this experiment.") {
@@ -152,11 +168,13 @@ function renderMutationState() {
   renderExperiments();
   updateParameterDraftState();
   renderRuntimeControls();
+  renderGsensorActivation();
 }
 
 function markSystemStatusUnavailable(message, label = "offline") {
   state.systemStatusFresh = false;
   state.controllerStatus = null;
+  state.gsensorActivation = null;
   systemRefreshStatus.textContent = label;
   systemRefreshStatus.className = "status error";
   controllerLiveStatus.textContent = "unavailable";
@@ -168,6 +186,8 @@ function markSystemStatusUnavailable(message, label = "offline") {
     controllerAdaptationStatus].forEach((element) => { element.textContent = "—"; });
   controllerLiveError.textContent = message;
   controllerLiveError.hidden = false;
+  state.gsensorActivationError = message;
+  state.gsensorActivationErrorSource = "status";
   clearCentralOverlay("Status is unconfirmed. Refresh to view the current experiment overlay.");
   renderMutationState();
 }
@@ -942,6 +962,237 @@ function currentExperiment() {
   return state.experiments.find((item) => item.run_id === state.currentRunId) || null;
 }
 
+function activeGsensorExperiment(experiment = currentExperiment()) {
+  return Boolean(experiment && [
+    "starting",
+    "waiting_for_initial_image",
+    "initializing",
+    "measuring",
+  ].includes(experiment.status));
+}
+
+function commandFromActivationPending(pending) {
+  if (!pending) return null;
+  return {
+    run_id: pending.run_id,
+    enabled: pending.enabled,
+    expected_revision: pending.expected_revision,
+    event_id: pending.event_id,
+  };
+}
+
+function retryableGsensorActivationCommand() {
+  const activation = state.gsensorActivation;
+  const pending = activation?.pending;
+  if (pending) {
+    return commandFromActivationPending(pending);
+  }
+  const local = state.gsensorActivationCommand;
+  if (!local?.delivery_error || local.run_id !== state.currentRunId || pending) {
+    return null;
+  }
+  if (activation?.revision !== local.expected_revision) {
+    return null;
+  }
+  return {
+    run_id: local.run_id,
+    enabled: local.enabled,
+    expected_revision: local.expected_revision,
+    event_id: local.event_id,
+  };
+}
+
+function observeGsensorActivation(activation) {
+  const current = currentExperiment();
+  if (!activation || activation.run_id !== (current?.run_id || null)) {
+    state.gsensorActivation = null;
+    if (current?.run_id) {
+      state.gsensorActivationError = "Gsensor activation status does not match the selected experiment.";
+      state.gsensorActivationErrorSource = "status";
+    }
+    return;
+  }
+
+  state.gsensorActivation = activation;
+  const local = state.gsensorActivationCommand;
+  if (!local) {
+    if (state.gsensorActivationErrorSource === "status") {
+      state.gsensorActivationError = "";
+      state.gsensorActivationErrorSource = null;
+    }
+    return;
+  }
+  if (local.run_id !== current?.run_id) {
+    state.gsensorActivationCommand = null;
+    state.gsensorActivationError = "";
+    state.gsensorActivationErrorSource = null;
+    return;
+  }
+
+  const pendingEventId = activation.pending?.event_id || null;
+  const acknowledgedEventId = activation.acknowledged_event_id || null;
+  if (pendingEventId === local.event_id || acknowledgedEventId === local.event_id
+      || activation.revision > local.expected_revision) {
+    state.gsensorActivationCommand = null;
+    state.gsensorActivationError = "";
+    state.gsensorActivationErrorSource = null;
+  }
+}
+
+function renderControllerGrowthInput() {
+  const current = currentExperiment();
+  const controller = state.controllerStatus;
+  const growthInput = state.systemStatusFresh
+    && controller?.available
+    && controller.current_run_id === current?.run_id
+    ? controller.growth_input
+    : null;
+  let label = "Unconfirmed";
+  let message = "Controller growth-rate availability is unconfirmed.";
+  let className = "status idle";
+
+  if (growthInput?.source && growthInput.source !== "live_gsensor") {
+    label = "Not in use";
+    message = "Controller is using a non-camera growth-rate source for this experiment.";
+  } else if (growthInput) {
+    if (!growthInput.requested_enabled) {
+      label = "Off";
+      message = "Controller is not using GSensor growth measurements.";
+    } else if (!growthInput.enabled) {
+      label = "Waiting";
+      className = "status running";
+      message = "Waiting for GSensor to confirm that measurement is enabled.";
+    } else if (!growthInput.measurement_ready) {
+      label = "Preparing";
+      className = "status running";
+      message = "Waiting for a usable image measurement. Marking or image processing may still be in progress.";
+    } else if (growthInput.available) {
+      label = "Ready";
+      className = "status success";
+      const age = Number(growthInput.sample_age_s);
+      message = growthInput.sample_age_s != null && Number.isFinite(age)
+        ? `A fresh growth-rate measurement is available (${age.toFixed(1)} s old).`
+        : "A fresh growth-rate measurement is available.";
+    } else if (growthInput.reason === "stale_growth_sample") {
+      label = "Stale";
+      className = "status error";
+      const age = Number(growthInput.sample_age_s);
+      message = growthInput.sample_age_s != null && Number.isFinite(age)
+        ? `The latest growth-rate measurement is ${age.toFixed(1)} s old. Waiting for a fresh valid measurement.`
+        : "The latest growth-rate measurement is stale. Waiting for a fresh valid measurement.";
+    } else {
+      label = "Waiting";
+      className = "status running";
+      message = "Waiting for a fresh valid growth-rate measurement.";
+    }
+    if (growthInput.control_hold_reason) {
+      message += " Growth-rate target control is waiting and the current jacket setpoint is being held.";
+    }
+  }
+
+  gsensorGrowthReadinessState.textContent = label;
+  gsensorGrowthReadinessState.className = className;
+  gsensorGrowthReadinessMessage.textContent = message;
+  gsensorGrowthReadinessMessage.classList.toggle("error", label === "Stale");
+}
+
+function renderGsensorActivation() {
+  const current = currentExperiment();
+  const activation = state.gsensorActivation;
+  const matchesCurrent = Boolean(current?.run_id)
+    && activation?.run_id === current.run_id;
+  const pending = matchesCurrent ? activation.pending : null;
+  const confirmedEnabled = Boolean(matchesCurrent && activation.enabled);
+  const retryCommand = retryableGsensorActivationCommand();
+  const operationsBlocked = mutationInFlight();
+  const canOperate = Boolean(
+    state.systemStatusFresh
+    && matchesCurrent
+    && activeGsensorExperiment(current)
+    && activation.can_toggle
+    && !operationsBlocked
+  );
+
+  gsensorActivationState.textContent = confirmedEnabled ? "On" : "Off";
+  gsensorActivationState.className = confirmedEnabled ? "status success" : "status idle";
+  gsensorActivationConfirmedAt.textContent = matchesCurrent
+    ? formatExperimentTime(activation.acknowledged_at)
+    : "—";
+
+  gsensorActivationPending.hidden = !pending;
+  if (pending) {
+    gsensorActivationPending.textContent = pending.enabled ? "enable pending" : "disable pending";
+    gsensorActivationPending.className = pending.transport_error ? "status error" : "status running";
+  }
+
+  let desiredEnabled = !confirmedEnabled;
+  let toggleLabel = confirmedEnabled ? "Disable GSensor" : "Enable GSensor";
+  let toggleAllowed = canOperate && !pending;
+  if (pending?.enabled && activation.can_cancel_pending_enable) {
+    desiredEnabled = false;
+    toggleLabel = "Cancel Pending Enable";
+    toggleAllowed = canOperate;
+  } else if (pending) {
+    desiredEnabled = pending.enabled;
+    toggleLabel = pending.enabled ? "Enable Pending" : "Disable Pending";
+  }
+  if (state.gsensorActivationInFlight) {
+    const command = state.gsensorActivationCommand;
+    toggleLabel = command?.enabled ? "Sending Enable…" : "Sending Disable…";
+  }
+  toggleGsensorActivationButton.textContent = toggleLabel;
+  toggleGsensorActivationButton.dataset.enabled = String(desiredEnabled);
+  toggleGsensorActivationButton.disabled = !toggleAllowed;
+  toggleGsensorActivationButton.classList.toggle("danger", confirmedEnabled || Boolean(pending?.enabled));
+  toggleGsensorActivationButton.classList.toggle("primary", !confirmedEnabled && !pending?.enabled);
+
+  retryGsensorActivationButton.hidden = !retryCommand || state.gsensorActivationInFlight;
+  retryGsensorActivationButton.disabled = !retryCommand || !canOperate;
+  retryGsensorActivationButton.textContent = `Retry ${retryCommand?.enabled ? "Enable" : "Disable"}`;
+
+  let help = "Start the experiment before enabling GSensor.";
+  if (pending?.enabled) {
+    help = "Confirmed state remains Off until GSensor acknowledges. You may cancel this pending enable without stopping the experiment.";
+  } else if (pending) {
+    help = `Confirmed state remains ${confirmedEnabled ? "On" : "Off"} until GSensor acknowledges. The experiment keeps running.`;
+  } else if (confirmedEnabled) {
+    help = "GSensor is on. Controller can use only fresh measurements from this experiment.";
+  } else if (matchesCurrent && activeGsensorExperiment(current)) {
+    help = "The experiment continues while GSensor is Off. Enable it when the process is ready for image-based growth measurement.";
+  }
+  gsensorActivationHelp.textContent = help;
+
+  let message = "";
+  let isError = false;
+  if (!state.systemStatusFresh) {
+    message = state.gsensorActivationError || "Activation status is unconfirmed. Refresh system status before operating.";
+    isError = true;
+  } else if (!matchesCurrent && current?.run_id) {
+    message = state.gsensorActivationError || "Activation status is unavailable for the selected experiment.";
+    isError = true;
+  } else if (state.gsensorActivationInFlight) {
+    message = "Sending the activation command…";
+  } else if (state.gsensorActivationError) {
+    message = state.gsensorActivationError;
+    isError = true;
+  } else if (pending?.transport_error) {
+    message = `${pending.transport_error} Retry resends the original command.`;
+    isError = true;
+  } else if (pending) {
+    message = `${pending.enabled ? "Enable" : "Disable"} command sent; waiting for GSensor confirmation. Retry is safe if confirmation does not arrive.`;
+  } else if (activation?.last_error) {
+    message = activation.last_error;
+    isError = true;
+  } else if (activation?.blocked_reason) {
+    message = activation.blocked_reason;
+  } else if (matchesCurrent) {
+    message = `GSensor is confirmed ${confirmedEnabled ? "on" : "off"}.`;
+  }
+  gsensorActivationMessage.textContent = message;
+  gsensorActivationMessage.classList.toggle("error", isError);
+  renderControllerGrowthInput();
+}
+
 function renderExperiments() {
   const current = currentExperiment();
   const hasCurrent = Boolean(current);
@@ -1005,6 +1256,7 @@ function renderExperiments() {
   state.lastRenderedRunId = current?.run_id || null;
   state.lastRenderedExperimentStatus = status;
   renderRunConfiguration();
+  renderGsensorActivation();
 }
 
 async function loadExperiments() {
@@ -1013,6 +1265,12 @@ async function loadExperiments() {
   if (requestId !== state.experimentRequestId) return;
   if (state.currentRunId !== (payload.current_run_id || null)) {
     state.systemStatusFresh = false;
+    state.gsensorActivationRequestId += 1;
+    state.gsensorActivationInFlight = false;
+    state.gsensorActivationCommand = null;
+    state.gsensorActivationError = "";
+    state.gsensorActivationErrorSource = null;
+    state.gsensorActivation = null;
   }
   state.experiments = payload.experiments || [];
   state.currentRunId = payload.current_run_id || null;
@@ -1048,6 +1306,7 @@ function renderSystemStatus(payload) {
   state.runtimeHistory = payload.runtime_history || [];
   state.runtimeHistoryError = payload.runtime_history_error || "";
   observeRuntimeRequest(payload.runtime_request || null);
+  observeGsensorActivation(gsensor.activation || null);
 
   if (state.seedActionRunId && state.seedActionRunId !== current?.run_id) {
     state.seedActionRunId = null;
@@ -1115,6 +1374,7 @@ function renderSystemStatus(payload) {
 
 
   renderRuntimeControls();
+  renderGsensorActivation();
 
   const frameSeq = Number(gsensorStatus.frame_seq || 0);
   if (current?.run_id && frameSeq > 0) {
@@ -1172,6 +1432,12 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
     state.operationRequestId += 1;
     state.parameterRequestId += 1;
     state.configurationRequestId += 1;
+    state.gsensorActivationRequestId += 1;
+    state.gsensorActivationInFlight = false;
+    state.gsensorActivationCommand = null;
+    state.gsensorActivationError = "";
+    state.gsensorActivationErrorSource = null;
+    state.gsensorActivation = null;
   }
   state.experiments = experiments.experiments || [];
   state.currentRunId = experiments.current_run_id || null;
@@ -1357,6 +1623,111 @@ async function addSeed() {
       }
     }
   }
+}
+
+async function sendGsensorActivation(command) {
+  const activation = state.gsensorActivation;
+  const current = currentExperiment();
+  if (
+    !current
+    || !state.systemStatusFresh
+    || mutationInFlight()
+    || activation?.run_id !== current.run_id
+    || command.run_id !== current.run_id
+    || !activeGsensorExperiment(current)
+    || !activation.can_toggle
+  ) {
+    renderGsensorActivation();
+    return null;
+  }
+
+  const experimentStartedAt = activation.experiment_started_at;
+  const issuedRevision = activation.revision;
+  invalidatePendingReads();
+  const requestId = ++state.gsensorActivationRequestId;
+  state.gsensorActivationInFlight = true;
+  state.gsensorActivationCommand = { ...command, delivery_error: null };
+  state.gsensorActivationError = "";
+  state.gsensorActivationErrorSource = null;
+  renderMutationState();
+
+  let response = null;
+  try {
+    response = await fetchJson("/api/operation/gsensor/activation", {
+      method: "POST",
+      body: JSON.stringify(command),
+    });
+    if (requestId !== state.gsensorActivationRequestId
+        || state.currentRunId !== command.run_id) return null;
+    if (response.activation?.run_id !== command.run_id
+        || response.activation?.experiment_started_at !== experimentStartedAt
+        || !Number.isInteger(response.activation?.revision)
+        || response.activation.revision < issuedRevision) {
+      throw new Error("The activation response belongs to a different experiment context. Refresh before operating.");
+    }
+    state.gsensorActivationCommand = null;
+    state.gsensorActivationError = "";
+    state.gsensorActivationErrorSource = null;
+    observeGsensorActivation(response.activation);
+  } catch (error) {
+    if (requestId !== state.gsensorActivationRequestId
+        || state.currentRunId !== command.run_id) return null;
+    state.gsensorActivationError = error.message;
+    state.gsensorActivationErrorSource = "request";
+    if ([400, 403, 404, 409, 422].includes(error.status)) {
+      state.gsensorActivationCommand = null;
+    } else {
+      state.gsensorActivationCommand = {
+        ...command,
+        delivery_error: "Command delivery is unconfirmed.",
+      };
+    }
+  } finally {
+    if (requestId === state.gsensorActivationRequestId
+        && state.currentRunId === command.run_id) {
+      const requestError = state.gsensorActivationErrorSource === "request"
+        ? state.gsensorActivationError
+        : "";
+      try {
+        await loadSystemStatus();
+      } catch (error) {
+        state.gsensorActivationError = `${requestError ? requestError + " " : ""}Status refresh failed: ${error.message}`;
+        state.gsensorActivationErrorSource = requestError ? "request" : "status";
+      }
+    }
+    if (requestId === state.gsensorActivationRequestId) {
+      state.gsensorActivationInFlight = false;
+      renderMutationState();
+    }
+  }
+  return response;
+}
+
+async function toggleGsensorActivation() {
+  if (toggleGsensorActivationButton.disabled) return null;
+  const activation = state.gsensorActivation;
+  const pending = activation?.pending;
+  let enabled;
+  if (pending?.enabled && activation.can_cancel_pending_enable) {
+    enabled = false;
+  } else if (!pending) {
+    enabled = !activation.enabled;
+  } else {
+    return null;
+  }
+  return sendGsensorActivation({
+    run_id: state.currentRunId,
+    enabled,
+    expected_revision: activation.revision,
+    event_id: crypto.randomUUID(),
+  });
+}
+
+async function retryGsensorActivation() {
+  if (retryGsensorActivationButton.disabled) return null;
+  const command = retryableGsensorActivationCommand();
+  if (!command) return null;
+  return sendGsensorActivation(command);
 }
 
 
@@ -1661,6 +2032,14 @@ endExperimentButton.addEventListener("click", async () => {
 
 addSeedButton.addEventListener("click", async () => {
   await addSeed();
+});
+
+toggleGsensorActivationButton.addEventListener("click", async () => {
+  await toggleGsensorActivation();
+});
+
+retryGsensorActivationButton.addEventListener("click", async () => {
+  await retryGsensorActivation();
 });
 
 
