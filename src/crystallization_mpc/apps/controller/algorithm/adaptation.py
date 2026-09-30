@@ -6,7 +6,7 @@ import math
 from typing import Any, Mapping, Sequence
 
 import numpy as np
-from scipy.optimize import minimize_scalar
+from ._bounded_scalar import bounded_scalar
 
 
 ADAPTATION_MODES = (
@@ -42,7 +42,9 @@ def _bounded_minimum(function, lower: float, upper: float, *, initial: float) ->
             reference_identifier="optim:barrier:UsrObjUndefAtX0",
         )
     delta = np.sqrt(np.finfo(float).eps) * max(abs(initial), 1.0)
-    shifted = initial + delta if initial + delta <= upper else initial - delta
+    if initial < 0:
+        delta = -delta
+    shifted = initial + delta if lower <= initial + delta <= upper else initial - delta
     if not defined(function(shifted)):
         raise AdaptationError(
             "Finite difference derivatives at initial point contain Inf, NaN, or complex values. Fmincon cannot continue.",
@@ -55,12 +57,10 @@ def _bounded_minimum(function, lower: float, upper: float, *, initial: float) ->
         # move away from it, as opposed to rejecting the initial objective.
         return float(np.real(result)) if defined(result) else math.inf
 
-    result = minimize_scalar(
-        real_objective,
-        bounds=(float(lower), float(upper)),
-        method="bounded",
-        options={"maxiter": 100, "xatol": 1e-8},
-    )
+    try:
+        result = bounded_scalar(real_objective, float(lower), float(upper), initial=float(initial))
+    except ValueError as exc:
+        raise AdaptationError(f"Growth adaptation failed: {exc}") from exc
     if not math.isfinite(float(result.x)) or not math.isfinite(float(result.fun)):
         raise AdaptationError(f"Growth adaptation failed: {result.message}")
     # The MATLAB caller requests b_min only, not exitflag. Do not add an

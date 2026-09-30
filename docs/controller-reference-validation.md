@@ -5,6 +5,73 @@
 > below preserve validation provenance; reproduction requires those local
 > development files and is not available from a fresh clone alone.
 
+## September 17 consistency work — offline acceptance
+
+The current work uses `supersaturation_control.m` as the principal closed-loop
+oracle and retains the GUI-snippet comparisons. A stable sigma plot is not proof
+of equivalence. The original 13 adaptation numerical failures are now resolved
+against unchanged fixtures: the final Controller plus Central runtime/history
+suite has 469 passes, and
+140 new original-MATLAB adaptation inputs also pass rtol=1e-5, atol=0.
+The 14 principal long-loop scenarios, staged GUI sequence, exact JSON recovery,
+cross-mode same-input tests and thermal boundary oracle also pass. Historical
+failures below describe earlier snapshots, not the final candidate.
+Additional September 17 result reports and manual rerun notes are retained
+locally and are not distributed with this repository. This is offline
+numerical/integration acceptance, not equipment validation or deployment.
+
+Simulation and Experiment share the numerical controller; only process input
+and actuation differ. The original MATLAB activation scalar and its dynamic
+history have different roles:
+
+| Quantity | Lifetime and use |
+|---|---|
+| `T_j` | Current process jacket temperature; continues changing in the plant and telemetry |
+| `T_j_set` | Newly calculated jacket command; continues changing |
+| `control_T_j_reference_K` | Activation scalar passed to `calc_T_j_set` in both modes; not a frozen physical plant |
+
+Simulation initializes the reference from `T_j_init`. Experiment reads and
+validates an activation `ProcessState` before starting the adapter, initializes
+filters and reference through `initialize_process_state`, and only then enters
+RUNNING. The first scheduled tick performs a separate read. Neither target
+switching nor adaptation switching relatches the reference. Initialization
+failure prohibits operation and actuator output. The hook defaults to a no-op
+for third-party adapters; the crystallization algorithm requires it in Experiment.
+
+The single algorithm checkpoint format persists this reference, filters, and the
+fitting-only raw growth history, without a numeric algorithm format label.
+Recovery checks actual content, run identity, baseline, and parameter digest;
+it must not infer a missing reference from a new measurement. A legacy numeric
+label is ignored when all required content is valid. Incomplete or corrupt
+checkpoints are rejected, not migrated or deleted. On recovery failure, automatic
+saving (including shutdown) is inhibited to preserve the original file; start a
+new experiment using a new session directory. The outer service schema and
+parameter revisions are unchanged. Older code may not read the new unnumbered
+algorithm format; backwards restart compatibility is not promised. This code is
+not hot-deployed into an existing experiment.
+
+The raw growth history used by the fitting EKF is separate from continuous
+dashboard `G_measure`: only adaptation execution assigns entries, and MATLAB
+indexed-assignment gaps are zero-filled. Disabling adaptation does not feed
+dashboard observations into the fitting filter. The history survives recovery.
+
+The principal 14-case long-loop replay exposed a further difference, invisible
+in the original short helper tests: with G adaptation off and shared noise,
+the state crosses the `abs(sigma) < 0.001` dynamics branch around tick 327.
+SciPy's unrestricted default RK45 maximum step did not match MATLAB's default
+`MaxStep = abs(tf-t0)/10`. On identical inputs this changed the predicted state
+and covariance, then the controller's hold branch at tick 328. Both Python
+transition functions now explicitly use MATLAB's interval-based maximum step;
+neither control dt, formulas, gains nor numerical acceptance tolerances changed.
+The default is documented in [MathWorks odeset](https://www.mathworks.com/help/matlab/ref/odeset.html)
+and verified in the installed R2021a runtime. The 26 same-input boundary probes
+now have identical transition vectors. All 14 closed-loop scenarios were then
+rerun and audited against the current production source hashes.
+
+Physical device validation remains NOT RUN. In particular, the meaning and
+availability of the configured `T_j_node` must be confirmed before equipment
+use. No offline process fake establishes that the physical value is measurable.
+
 ## Frozen baseline
 
 The only numerical oracle for this validation is
@@ -58,6 +125,7 @@ Python implementation; **backup** is excluded `.asv` material.
 
 | MATLAB source | Status | Python destination / verification |
 |---|---|---|
+| `source_codes/supersaturation_control.m` | principal numerical oracle | finite extraction in local `main_closed_loop_run.m`; original main-script initialization, timed seed and numerical loop, with all transformations recorded |
 | `source_codes/controller_for_gui.m` | convert + platform | `algorithm/controller.py`; lifecycle and finite replay tests; communication/GUI parts are platform-owned |
 | `source_codes/parameters.m` | contract | `baseline_manifest.json`, Central parameter contract tests |
 | `source_codes/parameters_on_target_change.m` | convert | target-dependent parameter selection in `algorithm/parameters.py` |
@@ -124,6 +192,10 @@ The four confirmed pre-conversion drifts are:
 | D-002 | `calc_T_j_set_.m` assigns local `K_P_T` from `params.K_P_target`, not `params.K_P_T` | reproduce exactly, do not silently correct | direct function oracle and code comment |
 | D-003 | MATLAB and NumPy RNG streams differ for the same seed | store MATLAB-generated random arrays in fixtures and replay them in Python | fixture hashes and deterministic repeat test |
 | D-004 | `op_section.m` declares `exp_sim='experiment'` and `adaptive_mode='E_A'`, while `parameters.m` initializes `simulation` and `all`; `OperationsTab` actually calls `evalin('base', ...)` for list values | preserve `parameters.m` algorithm defaults; Central sends an explicit safe run configuration (`experiment/MPC/sigma/E_A/live_gsensor`) | machine-readable operation contract and Central default test |
+| D-005 | MATLAB activation scalar `T_j` and dynamic `T_j_list(ii)` are distinct | one `control_T_j_reference_K` lifetime in both Python modes; dynamic process state continues updating | startup snapshot, restore and exact same-input cross-mode tests |
+| D-006 | MATLAB ode45 default maximum internal step is one tenth of the integration interval | explicit `max_step=abs(dt)/10` in both Python transitions; do not retune dt or tolerances | same-input piecewise-boundary probe and full long-loop replay |
+| D-007 | Main script catches a fitting exception locally; GUI outer catch skips later recording/output | preserve GUI-oriented platform failure protection; document the entrypoint difference rather than treating an invalid tick as a successful fit | original exception fixtures; invalid results never cause equipment writes; normal-path main and GUI oracles both retained |
+| D-008 | Main script seeds by simulated time; Central is operator-controlled | map fixed MATLAB seed times to explicit offline events, do not add automatic UI seeding | seed tick assertions; manual tests record actual user event times |
 
 Intentional fixes require separate approval, a separate commit, and both
 baseline-compatible and corrected-behavior tests.
@@ -162,10 +234,12 @@ as a valid controller output. Baseline/default parameters were not edited.
   setpoint. It logs a warning, skips subsequent parameter recording, returns an
   invalid result (no device write), and permits the next tick. When recording
   resumes, MATLAB's indexed-assignment gaps in kinetic histories are zero-filled.
-- State schema is now **2** to represent partial parameter histories. Old
-  schema-1 checkpoints are rejected, not silently resumed under changed failure
-  semantics. Restart a simulation to generate a new checkpoint; old evidence is
-  retained. Other optimization/input safety handling is unchanged by this patch.
+- Historically, partial parameter histories introduced schema **2**, and the
+  September 17 initialization patch introduced schema **3**. The later single
+  algorithm format described above supersedes those numeric checks. A legacy
+  label alone neither accepts nor rejects an archive: all required current
+  content must be valid. Incomplete archives are preserved, not silently
+  resumed or repaired. Other optimization/input safety handling is unchanged.
 
 Actual reference runtime: `/home/laniakea/.local/MATLAB/R2021a/bin/matlab`,
 R2021a Update 8. The separate `/usr/local/MATLAB/R2021a` installation lacks the

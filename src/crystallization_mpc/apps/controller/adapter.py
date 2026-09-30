@@ -23,6 +23,14 @@ class ControllerAdapter(ABC):
     def start(self) -> None:
         """Start one configured experiment."""
 
+    def initialize_process_state(self, process_state: ProcessState) -> None:
+        """Initialize from the validated activation snapshot, before any tick.
+
+        Optional for third-party adapters. Recovery restores saved initialization
+        state instead of calling this hook with a new measurement.
+        """
+        return None
+
     @abstractmethod
     def step(
         self,

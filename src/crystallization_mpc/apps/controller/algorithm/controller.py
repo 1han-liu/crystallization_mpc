@@ -10,10 +10,12 @@ from typing import Any, Mapping
 import numpy as np
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
+from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
 
 from .adaptation import AdaptationError, adapt_growth_parameters
+from ._checkpoint import validate_checkpoint
 from .control import (
     OptimizationError,
     calc_T_j_set,
@@ -39,7 +41,6 @@ from .thermodynamics import calc_G, calc_relative_sigma, calc_sigma
 
 
 BASELINE_COMMIT = "ce885a13e0a3e95ac0509e06eebf9d7cd1d418b0"
-ALGORITHM_STATE_SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 
 HISTORY_KEYS = (
@@ -111,6 +112,10 @@ class CrystallizationController:
         self.size_list_seed = np.empty(0, dtype=float)
         self.size_list = np.empty(0, dtype=float)
         self.simulation_state: dict[str, float] | None = None
+        self.control_T_j_reference_K: float | None = None
+        # MATLAB only assigns this indexed array when adaptation executes.
+        # Continuous dashboard measurements are not filter prehistory.
+        self.fitting_G_measure_history: list[float] = []
         self.ekf: ExtendedKalmanFilter | None = None
         self.ekf_G_measure: ExtendedKalmanFilter | None = None
         self.ekf_n: ExtendedKalmanFilter | None = None
@@ -170,7 +175,24 @@ class CrystallizationController:
         self.size_list = np.zeros_like(self.size_list_seed)
         if self.params["run_type"] == "simulation":
             self._initialize_filters(initial_T, initial_c)
+            self.control_T_j_reference_K = float(self.params["T_j_init"])
         self.running = True
+
+    def initialize_process_state(self, process_state: ProcessState) -> None:
+        """Latch MATLAB's activation scalar separately from dynamic T_j.
+
+        Both modes share the same control equation and lifetime of this
+        reference. Only the source of the activation snapshot differs.
+        """
+        if not self.running or self.params["run_type"] != "experiment":
+            raise RuntimeError("Process initialization requires a started Experiment.")
+        if self.frame_index != 0 or self.control_T_j_reference_K is not None:
+            raise RuntimeError("Process state has already been initialized; start a new experiment.")
+        if not isinstance(process_state, ProcessState):
+            raise TypeError("Activation requires a validated ProcessState.")
+        process_state.__post_init__()
+        self._initialize_filters(float(process_state.T), float(process_state.c))
+        self.control_T_j_reference_K = float(process_state.T_j)
 
     def _initialize_filters(self, T: float, c: float) -> None:
         dt = float(self.params["dt"])
@@ -285,6 +307,7 @@ class CrystallizationController:
                 else None
             ),
             "num_adapt": self.num_adapt,
+            "fitting_G_measure_length": len(self.fitting_G_measure_history),
         }
 
     def _restore_numeric_state(self, snapshot: Mapping[str, Any]) -> None:
@@ -297,6 +320,7 @@ class CrystallizationController:
         ) = snapshot["integrals"]
         self.params = copy.deepcopy(snapshot["params"])
         self.num_adapt = int(snapshot["num_adapt"])
+        del self.fitting_G_measure_history[int(snapshot["fitting_G_measure_length"]) :]
         if self.simulation_state is not None:
             self.simulation_state["T_j_set"] = float(snapshot["simulation_T_j_set"])
         for name, filter_ in {
@@ -321,6 +345,10 @@ class CrystallizationController:
             raise ValueError("controller_dt_s does not match parameter dt.")
         if tick_input.tick_seq != self.frame_index + 1:
             raise ValueError("Controller tick sequence must be contiguous.")
+        if self.control_T_j_reference_K is None or self.ekf is None:
+            return ControllerStepResult(
+                valid=False, error="Experiment activation ProcessState has not been initialized."
+            )
         simulation_tick_index = self.frame_index
         self.frame_index = tick_input.tick_seq
         self.elapsed_s = float(tick_input.elapsed_s)
@@ -343,12 +371,6 @@ class CrystallizationController:
                 return ControllerStepResult(valid=False, error="Process input is non-finite.")
             if T <= 0 or T_j <= 0 or current_T_j_set <= 0 or c < 0 or count_middle < 0:
                 return ControllerStepResult(valid=False, error="Process input violates physical bounds.")
-
-            # The reference controller initializes the experiment EKF from the
-            # live T/c values read during activation. The first Python tick is
-            # the first safe point at which that complete snapshot exists.
-            if self.ekf is None:
-                self._initialize_filters(T, c)
 
             rollback_state = self._snapshot_numeric_state()
             for key, value in (("t", self.elapsed_s), ("T", T), ("T_j", T_j),
@@ -427,9 +449,11 @@ class CrystallizationController:
                     float(self.params["dT_dt_min"]), float(self.params["dT_dt_max"]),
                     dt, self.int_e_target_dt,
                 )
+                # Original MATLAB passes the activation scalar in both modes;
+                # dynamic T_j remains separate in the plant and telemetry.
                 T_j_set, self.int_e_dT_dt_dt, self.int_e_T_dt = calc_T_j_set(
                     self.params, projected, dT_dt_set, self.int_e_dT_dt_dt,
-                    self.int_e_T_dt, T_j, float(self.params["T_j_min"]),
+                    self.int_e_T_dt, self.control_T_j_reference_K, float(self.params["T_j_min"]),
                     float(self.params["T_j_max"]), dt, target == "G",
                 )
             objective = objective_function(self.params, filtered, target, dT_dt_set, target_set, dt)
@@ -456,8 +480,11 @@ class CrystallizationController:
             if should_adapt:
                 if self.ekf_G_measure is None:
                     raise RuntimeError("Growth measurement EKF is missing.")
-                finite_measurements = [float(value) for value in self.history["G_measure"] if value is not None]
-                G_measure_KF = smooth_EKF_general(finite_measurements, self.ekf_G_measure, dt)
+                self.fitting_G_measure_history.extend(
+                    [0.0] * (len(self.history["G_measure"]) - 1 - len(self.fitting_G_measure_history))
+                )
+                self.fitting_G_measure_history.append(float(G_measure))
+                G_measure_KF = smooth_EKF_general(self.fitting_G_measure_history, self.ekf_G_measure, dt)
                 self.history["G_measure_KF"].append(G_measure_KF)
                 self.history["to_adapt"].append(True)
                 growth_history = [float("nan") if value is None else float(value)
@@ -615,10 +642,10 @@ class CrystallizationController:
             }.items()
         }
         return _json_value({
-            "algorithm_state_schema_version": ALGORITHM_STATE_SCHEMA_VERSION,
             "baseline_commit": BASELINE_COMMIT, "run_id": self.run_id,
             "params_digest": self.params_digest, "running": self.running,
             "frame_index": self.frame_index, "elapsed_s": self.elapsed_s,
+            "control_T_j_reference_K": self.control_T_j_reference_K,
             "params": self.params, "history": self.history,
             "integrals": {"int_e_target_dt": self.int_e_target_dt,
                           "int_e_dT_dt_dt": self.int_e_dT_dt_dt,
@@ -630,6 +657,7 @@ class CrystallizationController:
             "filters": filters,
             "adaptation": {"enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
                            "num_adapt": self.num_adapt,
+                           "fitting_G_measure_history": self.fitting_G_measure_history,
                            "pause_reason": self.last_adaptation_pause_reason,
                            "control_hold_reason": self.last_control_hold_reason,
                            "diagnostics": copy.deepcopy(self.adaptation_diagnostics)},
@@ -638,18 +666,23 @@ class CrystallizationController:
     def restore_state(
         self, params: Mapping[str, Any], run_id: str, state: Mapping[str, Any]
     ) -> bool:
+        # A rejected checkpoint must never leave an existing instance running.
+        self.running = False
         try:
             if not isinstance(state, Mapping):
                 return False
-            if state.get("algorithm_state_schema_version") != ALGORITHM_STATE_SCHEMA_VERSION:
-                return False
-            if state.get("baseline_commit") != BASELINE_COMMIT or str(state.get("run_id", "")) != str(run_id):
+            if state.get("baseline_commit") != BASELINE_COMMIT or state.get("run_id") != run_id:
                 return False
             configured = build_parameters(params)
             if state.get("params_digest") != parameter_digest(configured):
                 return False
+            validate_checkpoint(state, configured, HISTORY_KEYS)
             self.configure(params, run_id)
             self.start()
+            reference = float(state["control_T_j_reference_K"])
+            if not math.isfinite(reference) or reference <= 0:
+                raise ValueError("Recovery activation jacket reference is invalid.")
+            self.control_T_j_reference_K = reference
             saved_params = state.get("params")
             if not isinstance(saved_params, Mapping):
                 raise ValueError("Recovery params are missing.")
@@ -684,6 +717,17 @@ class CrystallizationController:
             adaptation = state["adaptation"]
             self.set_adaptation(bool(adaptation["enabled"]), str(adaptation["mode"]))
             self.num_adapt = int(adaptation["num_adapt"])
+            fitting_history = adaptation["fitting_G_measure_history"]
+            if not isinstance(fitting_history, list):
+                raise ValueError("Recovery fitting history is missing.")
+            self.fitting_G_measure_history = [float(value) for value in fitting_history]
+            assigned = [i for i, selected in enumerate(self.history["to_adapt"]) if selected]
+            expected_length = assigned[-1] + 1 if assigned else 0
+            if (len(self.fitting_G_measure_history) != expected_length
+                    or not all(math.isfinite(value) for value in self.fitting_G_measure_history)
+                    or any(value != 0.0 for i, value in enumerate(self.fitting_G_measure_history)
+                           if not self.history["to_adapt"][i])):
+                raise ValueError("Recovery fitting history is incompatible.")
             self.last_adaptation_pause_reason = adaptation.get("pause_reason")
             self.last_control_hold_reason = adaptation.get("control_hold_reason")
             diagnostics = adaptation.get("diagnostics")
@@ -716,17 +760,9 @@ class CrystallizationController:
                                   (self.ekf_n, "n"), (self.ekf_k_0, "k_0"),
                                   (self.ekf_E_A, "E_A")):
                 saved_filter = filters.get(name)
-                if saved_filter is None and frame_index == 0:
-                    continue
                 if filter_ is None or not isinstance(saved_filter, Mapping):
                     raise ValueError("Recovery filter is missing.")
                 restore_EKF(filter_, saved_filter)
-            if self.params["run_type"] == "experiment" and frame_index == 0:
-                self.ekf = None
-                self.ekf_G_measure = None
-                self.ekf_n = None
-                self.ekf_k_0 = None
-                self.ekf_E_A = None
             self.running = bool(state["running"])
             return True
         except (KeyError, TypeError, ValueError, OverflowError):
@@ -734,4 +770,4 @@ class CrystallizationController:
             return False
 
 
-__all__ = ["ALGORITHM_STATE_SCHEMA_VERSION", "BASELINE_COMMIT", "CrystallizationController"]
+__all__ = ["BASELINE_COMMIT", "CrystallizationController"]

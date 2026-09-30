@@ -363,7 +363,9 @@ class ControllerService:
         }
 
     def _try_persist_state_locked(self) -> None:
-        if self.state_path is None:
+        # An unreadable/incompatible archive is evidence, not a fresh state file.
+        # In particular, shutdown and rejected messages must not overwrite it.
+        if self.state_path is None or self.recovery_status == "error":
             return
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -648,7 +650,10 @@ class ControllerService:
                 )
                 if not restored:
                     raise ValueError(
-                        "The configured Controller adapter cannot restore a running experiment."
+                        "The configured Controller adapter cannot restore a running experiment. "
+                        "Its checkpoint content is incomplete, invalid, or incompatible. "
+                        "Preserve the checkpoint and create a new experiment in a new session "
+                        "directory; do not substitute the latest process temperature."
                     )
                 self.adapter.set_adaptation(
                     self.adaptation_enabled,
@@ -701,6 +706,15 @@ class ControllerService:
             self.recovery_error = None
         except Exception as exc:
             self.state = ControllerState.ERROR
+            self._next_tick_monotonic = None
+            try:
+                self.adapter.stop()
+            except Exception:
+                logger.exception("Could not stop adapter after failed recovery.")
+            try:
+                self.process_adapter.disconnect()
+            except Exception:
+                logger.exception("Could not disconnect process after failed recovery.")
             self.last_error = f"Controller recovery failed: {exc}"
             self.recovery_status = "error"
             self.recovery_error = str(exc)
@@ -929,6 +943,11 @@ class ControllerService:
         _positive_int(payload.get("parameter_version"), "parameter_version")
         command = ExperimentStartPayload.from_mapping(payload)
         with self._lock:
+            if self.recovery_status == "error":
+                raise ValueError(
+                    "Preserve the failed checkpoint and create a new experiment in a new "
+                    "session directory before restarting Controller."
+                )
             if self.parameter_version is None:
                 raise ValueError("Controller has not received params.update.")
             if command.parameter_version != self.parameter_version:
@@ -1016,21 +1035,33 @@ class ControllerService:
                 self.adapter_error_count += 1
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter configure failed: {exc}") from exc
+            activation_state = None
             if self.settings.opcua_enabled:
                 try:
                     self.process_adapter.connect()
+                    if run_type == "experiment":
+                        activation_state = self.process_adapter.read_state()
+                        if not isinstance(activation_state, ProcessState):
+                            raise TypeError("Process activation requires ProcessState.")
+                        activation_state.__post_init__()
                 except Exception as exc:
                     self.process_error_count += 1
                     self.last_process_error = str(exc)
                     self.process_adapter.disconnect()
                     self.state = ControllerState.ERROR
                     raise RuntimeError(
-                        f"Controller process connection failed: {exc}"
+                        f"Controller process activation failed: {exc}"
                     ) from exc
             try:
                 self.adapter.start()
+                if activation_state is not None:
+                    self.adapter.initialize_process_state(activation_state)
             except Exception as exc:
                 self.adapter_error_count += 1
+                try:
+                    self.adapter.stop()
+                except Exception:
+                    logger.exception("Could not stop adapter after failed activation.")
                 self.process_adapter.disconnect()
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter start failed: {exc}") from exc

@@ -30,6 +30,9 @@ class CrystallizationControllerAdapter(ControllerAdapter):
         # Algorithm initialization is owned by controller.py.
         self.controller.start()
 
+    def initialize_process_state(self, process_state: ProcessState) -> None:
+        self.controller.initialize_process_state(process_state)
+
     def step(
         self,
         sample: GrowthRateSamplePayload | ControllerTickInput,
@@ -103,7 +106,10 @@ class CrystallizationControllerAdapter(ControllerAdapter):
         run_id: str,
         state: Mapping[str, Any],
     ) -> bool:
-        return self.controller.restore_state(params, run_id, state)
+        # The service calls this hook only to resume a RUNNING experiment.
+        # Loading a valid stopped archive is allowed by the numerical class,
+        # but must not report a running service recovery as successful.
+        return self.controller.restore_state(params, run_id, state) and self.controller.running
 
 
 __all__ = ["CrystallizationControllerAdapter"]

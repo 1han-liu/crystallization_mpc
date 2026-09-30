@@ -91,6 +91,10 @@ def state_transition_function(
         method="RK45",
         rtol=rtol,
         atol=atol,
+        # MATLAB ode45 defaults MaxStep to one tenth of the tspan interval.
+        # SciPy's unlimited default can cross the sigma=0.001 model branch
+        # differently; matching only RelTol/AbsTol is insufficient here.
+        max_step=abs(float(dt)) / 10.0,
     )
     if not result.success or result.y.shape[1] == 0:
         raise RuntimeError(f"Controller state RK45 failed: {result.message}")
@@ -125,6 +129,7 @@ def state_transition_function_T(
         method="RK45",
         rtol=rtol,
         atol=atol,
+        max_step=abs(float(dt)) / 10.0,
     )
     if not result.success or result.y.shape[1] == 0:
         raise RuntimeError(f"Temperature RK45 failed: {result.message}")
