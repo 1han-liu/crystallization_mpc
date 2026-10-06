@@ -29,10 +29,29 @@ YOLO is not repeated for u and v. LoFTR and SIFT derive their matching masks fro
 
 ## Selection and capabilities
 
-Both parameter pages render `alignment_method` as a select control. Parameters remain locked while an experiment is active. GSensor also exposes:
+Central's parameter page sets the starting `alignment_method` with a select control.
+Start-time parameters remain locked while an experiment is active; GSensor's
+**Run Parameters** section displays the effective run parameters read-only. The
+GSensor **Image Alignment** selector inside **Latest Processed Frame** can override
+the method during the current run, including switching back to None. During
+marking it is a draft confirmed with the 3D candidate; during measurement it applies
+to subsequent frames without re-marking.
+
+A live switch waits for the current frame to finish and preserves the marked image
+and manual geometry. It starts fresh alignment and distance/filter histories; the
+first frame with valid distances establishes a new baseline and produces no G
+value (warm-up). Global frame numbers and cumulative frame counts continue. The
+previous preview keeps its original method and frame identity until a new result
+arrives. Preparation or commit failure leaves the previous method active.
+
+The processing snapshot records the method revision, effective frame boundary and
+change history, and retains the previous committed state in `gsensor_history/`.
+Recovery restores the committed method and warm-up state; after a process restart,
+GSensor remains disabled until enabled again. GSensor exposes:
 
 ```text
 GET /api/alignment/capabilities
+POST /api/alignment/select
 ```
 
 The response identifies unavailable methods and supplies a reason. The GSensor page disables unavailable options. A selected method is never silently changed to `none`.

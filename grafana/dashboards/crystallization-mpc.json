@@ -125,7 +125,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "^target_value(?: .*)?$"
+              "options": "^sigma(?: .*)?$"
             },
             "properties": [
               {
@@ -257,12 +257,20 @@
             "type": "influxdb",
             "uid": "crystallization-influxdb"
           },
-          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"target_value\" or r._field == \"target_set\" or r._field == \"target_error_abs\" or r._field == \"objective\")\n  |> filter(fn: (r) => exists r.target and r.target == \"sigma\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"target_set\" or r._field == \"target_error_abs\" or r._field == \"objective\")\n  |> filter(fn: (r) => exists r.target and r.target == \"sigma\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "crystallization-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.status == \"calculated\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"sigma\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value)}))\n  |> group(columns: [\"_measurement\", \"run_id\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"run_id\"])"
         }
       ],
       "title": "Target & obj. fun (sigma)",
       "type": "timeseries",
-      "description": "\u53ea\u663e\u793a\u660e\u786e\u6807\u8bb0\u4e3a sigma \u76ee\u6807\u7684\u8bb0\u5f55\u3002\u5de6\u8f74\uff1a\u5b9e\u9645\u76ee\u6807\u3001\u8bbe\u5b9a\u503c\u4e0e\u7edd\u5bf9\u8bef\u5dee\uff1b\u53f3\u8f74\uff1a\u4f18\u5316\u76ee\u6807\u51fd\u6570\u503c objective\u3002\u6ca1\u6709\u76ee\u6807\u7c7b\u578b\u6807\u7b7e\u7684\u5386\u53f2\u8bb0\u5f55\u4e0d\u5728\u6b64\u56fe\u663e\u793a\u3002 \u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
+      "description": "\u7d2b\u8272\u66f2\u7ebf\u663e\u793a\u6574\u4e2a\u5b9e\u9a8c\u8fc7\u7a0b\u7684\u76f8\u5bf9\u8fc7\u9971\u548c\u5ea6 sigma\uff0c\u5207\u6362\u5230 G \u63a7\u5236\u540e\u4ecd\u6301\u7eed\u663e\u793a\u3002\u8bbe\u5b9a\u503c\u3001\u7edd\u5bf9\u8bef\u5dee\u548c\u4f18\u5316\u76ee\u6807\u51fd\u6570\u53ea\u663e\u793a\u660e\u786e\u6807\u8bb0\u4e3a sigma \u63a7\u5236\u9636\u6bb5\u7684\u8bb0\u5f55\u3002\u5de6\u8f74\uff1asigma\u3001\u8bbe\u5b9a\u503c\u4e0e\u7edd\u5bf9\u8bef\u5dee\uff08\u65e0\u91cf\u7eb2\uff09\uff1b\u53f3\u8f74\uff1a\u4f18\u5316\u76ee\u6807\u51fd\u6570\u503c objective\u3002\u65e0\u6570\u636e\u65f6\uff0c\u8bf7\u68c0\u67e5\u6240\u9009\u5b9e\u9a8c\u548c\u53f3\u4e0a\u89d2\u65f6\u95f4\u8303\u56f4\uff1b\u672a\u4ea7\u751f\u7684\u5b57\u6bb5\u4e0d\u4f1a\u8865\u96f6\u3002"
     },
     {
       "datasource": {

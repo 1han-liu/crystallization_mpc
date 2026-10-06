@@ -13,6 +13,9 @@
 本机免登录仅授予 Viewer 权限；管理账户随机密码保存在本地受限文件中，不在文档或 Git 中公开。
 
 图表包含温度、浓度、sigma、G、目标/误差/目标函数、E_A/k_0/n 和滞后时间。
+第六步将它们整理为两个可折叠分区：顶部 **Control Targets** 并排展示 sigma/G
+目标图，下面 **Process Measurements & Diagnostics** 展示其余 10 张过程图。
+实验和时间筛选共用。
 只进行 sigma 控制时，G 目标图可以没有数据；没有真实设备时 Count 图可以没有数据。
 `Samples / completed fits / failures` 仍在 Central 的拟合状态行，现有 Grafana
 仪表盘没有新增这三个计数面板。真实拟合参数变化可查看 Growth parameters。
