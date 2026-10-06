@@ -585,6 +585,224 @@ textarea:disabled {
   gap: 8px;
 }
 
+.drawer-panel > .panel-head {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.drawer-panel > .panel-head .hero-actions {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.drawer-panel > .panel-head button {
+  padding: 7px 9px;
+  font-size: 0.8rem;
+}
+
+.parameter-source {
+  margin: -6px 0 16px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.parameter-field {
+  min-width: 0;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid #ededed;
+}
+
+.parameter-field:last-child {
+  border-bottom: none;
+}
+
+.field-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(136px, 42%);
+  align-items: center;
+  gap: 10px;
+}
+
+.parameter-field .field-heading {
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+.parameter-field .field-key {
+  color: var(--ink);
+  font-size: 0.86rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.field-info {
+  flex: 0 0 28px;
+  min-height: 28px;
+  padding: 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.field-info:hover,
+.field-info[aria-expanded="true"] {
+  background: #f0f2f1;
+  color: var(--ink);
+}
+
+.field-info:focus-visible {
+  outline: 2px solid #336ea8;
+  outline-offset: 2px;
+}
+
+.field-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.parameter-field .field-input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.parameter-field .field-input:disabled {
+  background: #f5f5f5;
+  color: var(--muted);
+}
+
+.parameter-field .field-unit {
+  flex: 0 0 auto;
+  max-width: 66px;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.parameter-field .field-value .field-input {
+  flex: 1 1 0;
+}
+
+.parameter-field.field-wide .field-main {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.parameter-field.field-wide .field-value {
+  width: 100%;
+}
+
+.parameter-field .field-description {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.field-state {
+  display: flex;
+  gap: 8px;
+}
+
+.parameter-field .field-modified {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.72rem;
+}
+
+.drawer-panel .parameter-field .field-unsaved {
+  color: #885a0c;
+  font-size: 0.72rem;
+}
+
+.parameter-field.modified .field-input {
+  border-color: var(--line);
+}
+
+.parameter-field.unsaved .field-input {
+  border-color: #b99128;
+}
+
+.field-details {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 4px;
+  background: #f5f7f6;
+  color: var(--ink);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.field-details p {
+  margin: 0 0 10px;
+}
+
+.field-reference {
+  margin: 0 0 10px;
+}
+
+.field-reference dt {
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+.field-reference dd {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.field-details .field-formula-label {
+  margin: 12px 0 4px;
+  color: var(--muted);
+}
+
+.field-formula {
+  margin: 0 0 12px;
+  font-family: Consolas, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.field-unit-note,
+.field-note {
+  border-left: 2px solid #aeb9b2;
+  padding-left: 8px;
+}
+
+.parameter-field [hidden] {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .parameter-field .field-info,
+  .parameter-field .field-reset,
+  .parameter-field .field-input {
+    min-height: 44px;
+  }
+  .parameter-field .field-info { flex-basis: 36px; }
+  .parameter-field .field-input { font-size: 1rem; }
+}
+
+@media (max-width: 380px) {
+  .parameter-field .field-main { grid-template-columns: minmax(0, 1fr); }
+}
+
 .code-block {
   margin: 0;
   min-height: 320px;

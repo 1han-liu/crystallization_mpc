@@ -2,9 +2,15 @@ version: 1
 params:
   dt:
     section: "Loop interval"
-    label: "Time step t"
-    description: "Global control loop interval."
+    label: "Time step"
+    description: "Time between controller calculations."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "dt"
+      label: "Time step t [s]"
+      source: "parameters.m:30; gui_main/param_section.m:9"
+      definition: "Time between controller calculations."
     kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
@@ -14,9 +20,16 @@ params:
 
   resolution:
     section: "Shared estimation"
-    label: "Camera resolution"
-    description: "Pixel-to-length conversion used by growth-rate estimation."
-    unit: "m"
+    label: "Resolution of PVM"
+    description: "Physical length represented by one image pixel."
+    unit: "m/px"
+    reference:
+      origin: "matlab"
+      name: "resolution"
+      label: "Resolution of PVM: resolution [m]"
+      source: "parameters_G.m:2; subroutines_gsensor/detection/update_EKF_G.m"
+      definition: "PVM pixel-to-length calibration used to convert tracked distances and growth rates to metres and metres per second."
+      unit_note: "MATLAB GUI labels this [m]. The conversion multiplies image distances in pixels by resolution; m/px makes that per-pixel meaning explicit."
     kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
@@ -26,9 +39,17 @@ params:
 
   q2:
     section: "Shared estimation"
-    label: "Process noise q2"
-    description: "Shared EKF process noise term."
+    label: "Process noise for G array"
+    description: "Controls how freely the growth estimate can change."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "q2"
+      label: "Process noise for G array from DSCGR: q2 [-]"
+      source: "parameters_G.m:3; subroutines_gsensor/detection/create_EKF_G.m:4"
+      definition: "Process-noise scale for the three-state DSCGR filter; larger values increase process uncertainty relative to measurement noise."
+      formula: "Q_func = @(q2, dt) [dt^4/4, dt^3/2, dt^2/2; dt^3/2, dt^2, dt; dt^2/2, dt, 1] * q2 * resolution^2;"
+      unit_note: "[-] follows the MATLAB GUI convention for this filter scale; it is not a covariance matrix unit."
     kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
@@ -38,9 +59,17 @@ params:
 
   r_diag:
     section: "Shared estimation"
-    label: "Measurement noise diagonal r_diag"
-    description: "Shared EKF measurement noise diagonal."
+    label: "Measurement noise for G array"
+    description: "Three diagonal weights for the growth estimator."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "r_diag"
+      label: "Diagonal array of measurement noise for G array from DSCGR: r_diag [-]"
+      source: "parameters_G.m:4; subroutines_gsensor/detection/create_EKF_G.m:5"
+      definition: "Three entries form the measurement-noise diagonal of the DSCGR filter, in the original state order. Larger entries reduce trust in the corresponding measurements."
+      formula: "R = diag(r_diag) * resolution^2;"
+      unit_note: "[-] preserves the MATLAB GUI convention for these diagonal weights."
     kind: "basic"
     derived: false
     publish_to: [controller, gsensor]
@@ -50,9 +79,15 @@ params:
 
   dt_G:
     section: "Growth rate estimation"
-    label: "Growth-rate time step dt_G"
-    description: "Sampling interval used by gsensor growth-rate estimation."
+    label: "Time step for DSCGR"
+    description: "Time between images used to estimate growth."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "dt_G"
+      label: "Time step: dt_G [s]"
+      source: "parameters_G.m:1; subroutines_gsensor/detection/create_EKF_G.m"
+      definition: "Sampling interval passed to the growth-rate filter and distance-to-rate calculations."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -62,9 +97,17 @@ params:
 
   ptr_format:
     section: "Growth rate estimation"
-    label: "Pointer display format"
-    description: "Display format options used in gsensor parameter views."
+    label: "Figure format"
+    description: "Legacy figure format; currently unused."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "ptr_format"
+      label: "Figure format: ptr_format [-]"
+      source: "parameters_G.m:5"
+      definition: "Original MATLAB figure-format string, initialized as %d."
+      formula: "ptr_format = '%d';"
+      note: "The current Python configuration retains a list of format strings; the growth-processing and controller paths do not consume this setting."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -75,8 +118,14 @@ params:
   alignment_method:
     section: "Image alignment"
     label: "Alignment method"
-    description: "Frame registration method applied after segmentation and before growth-line detection."
+    description: "Aligns segmented frames before detecting growth lines."
     unit: "-"
+    reference:
+      origin: "python"
+      name: "alignment_method"
+      source: "src/crystallization_mpc/apps/gsensor/growth_rate_processor.py"
+      definition: "Selects the Python frame-registration method: none, centroid, fft, kalman, loftr, sift, optical_flow, or ecc. none skips registration."
+      note: "Python addition; no corresponding MATLAB parameter."
     kind: "basic"
     derived: false
     choices: [none, centroid, fft, kalman, loftr, sift, optical_flow, ecc]
@@ -88,9 +137,19 @@ params:
 
   params_G.width:
     section: "Growth line detection"
-    label: "Search window width"
-    description: "Search window width for growth-line detection."
+    label: "Width for detection"
+    description: "Search half-width on each side of the tracked line."
     unit: "px"
+    reference:
+      origin: "matlab"
+      name: "params_G.width"
+      label: "Width for detection: params_G.width [-]"
+      source: "parameters_G.m:9; subroutines_gsensor/detection/calc_masked_image.m:2-3"
+      definition: "Sets the perpendicular half-width of the detection strip. A value of 100 searches 100 pixels on each side."
+      formula: |-
+        up = t + n * width;
+        dp = t - n * width;
+      unit_note: "MATLAB GUI shows [-]; pixel units follow the image-coordinate mask calculation."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -100,9 +159,19 @@ params:
 
   params_G.ratio:
     section: "Growth line detection"
-    label: "Shape ratio threshold"
-    description: "Shape ratio threshold used in line updates."
+    label: "Length extension ratio"
+    description: "Along-line extension ratio; currently unused."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params_G.ratio"
+      label: "Length extension ratio for detection: params_G.ratio [-]"
+      source: "parameters_G.m:10; subroutines_gsensor/detection/calc_masked_image.m:5-15"
+      definition: "Original ratio for extending the mask past each endpoint of the tracked line."
+      formula: |-
+        rp = e + (e - t) * ratio;
+        lp = t - (e - t) * ratio;
+      note: "The length mask (mask2) is commented out in both MATLAB and Python. The active mask uses only the perpendicular width, so changing ratio has no effect."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -112,9 +181,18 @@ params:
 
   params_G.delta_theta:
     section: "Growth line detection"
-    label: "Angular step"
-    description: "Angular step used by line search."
+    label: "Hough angle deviation"
+    description: "Maximum angle deviation from the previous line."
     unit: "deg"
+    reference:
+      origin: "matlab"
+      name: "params_G.delta_theta"
+      label: "Angle of Hough transformation deviation: params_G.delta_theta [-]"
+      source: "parameters_G.m:11; subroutines_gsensor/detection/calc_theta_range.m:2"
+      definition: "MATLAB searches from theta - delta_theta to theta + delta_theta using 20 angle samples."
+      formula: "theta_range = linspace(theta-delta_theta, theta+delta_theta, 20);"
+      note: "Python uses this as the acceptance limit for detected-line angle changes. Its Hough angular resolution is a separate parameter."
+      unit_note: "MATLAB GUI shows [-]; degrees follow the angle range and degree-based Hough coordinates."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -124,9 +202,17 @@ params:
 
   params_G.width_divider:
     section: "Growth line detection"
-    label: "Width divider"
-    description: "Divider applied to narrow the detection width."
+    label: "Hough width-range divider"
+    description: "Narrows the preferred line-position search range."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params_G.width_divider"
+      label: "Width range of Hough transformation divider: params_G.width_divider [-]"
+      source: "parameters_G.m:12; subroutines_gsensor/detection/update_line.m:17"
+      definition: "Divides the detection half-width to set the preferred rho range around the previous line. Increasing it narrows that range."
+      formula: "Hs(rhos < line.rho - params_G.width / params_G.width_divider | rhos > line.rho + params_G.width / params_G.width_divider) = 0;"
+      note: "Python first prefers this narrow band, then allows recovery candidates within the full detection half-width."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -136,9 +222,17 @@ params:
 
   params_G.num_peak:
     section: "Growth line detection"
-    label: "Peak count limit"
-    description: "Maximum number of peaks kept during detection."
+    label: "Number of Hough peaks"
+    description: "Limits the number of retained line candidates."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params_G.num_peak"
+      label: "Number of peaks of Hough transformation: params_G.num_peak [-]"
+      source: "parameters_G.m:13; subroutines_gsensor/detection/update_line.m:18"
+      definition: "Maximum number of peaks requested from MATLAB houghpeaks."
+      formula: "peaks = houghpeaks(Hs, params_G.num_peak, 'NHoodSize', [9, 1]);"
+      note: "Python uses num_peak as the candidate-count limit unless hough_max_candidates is explicitly supplied. OpenCV candidates are not MATLAB accumulator peaks."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -148,9 +242,17 @@ params:
 
   params_G.len_min:
     section: "Growth line detection"
-    label: "Minimum line length"
-    description: "Minimum accepted growth-line length."
+    label: "Minimal Hough line length"
+    description: "Rejects detected lines shorter than this length."
     unit: "px"
+    reference:
+      origin: "matlab"
+      name: "params_G.len_min"
+      label: "Minimal length of Hough transformation: params_G.len_min [-]"
+      source: "parameters_G.m:14; subroutines_gsensor/detection/update_line.m:28"
+      definition: "Final line-length acceptance threshold, applied after the Hough transform."
+      formula: "if norm(lines(ii).point1 - lines(ii).point2) < params_G.len_min"
+      unit_note: "MATLAB GUI shows [-]; pixel units follow the endpoint coordinates."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -160,9 +262,16 @@ params:
 
   params_G.hough_threshold:
     section: "Growth line detection"
-    label: "OpenCV Hough threshold"
-    description: "Accumulator vote threshold used by OpenCV probabilistic Hough line detection."
+    label: "OpenCV vote threshold"
+    description: "Minimum Hough votes needed to propose a line."
     unit: "votes"
+    reference:
+      origin: "python"
+      name: "params_G.hough_threshold"
+      source: "src/crystallization_mpc/apps/gsensor/detection/update_line.py:houghlines_opencv"
+      definition: "The threshold argument of cv2.HoughLinesP. Increasing it requires stronger line evidence."
+      formula: "threshold=threshold"
+      note: "Python addition; MATLAB does not expose an equivalent configurable vote threshold here."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -172,9 +281,16 @@ params:
 
   params_G.hough_min_line_length:
     section: "Growth line detection"
-    label: "OpenCV min line length"
-    description: "Minimum line segment length passed to OpenCV probabilistic Hough line detection."
+    label: "OpenCV minimum line length"
+    description: "Shortest segment proposed by the Hough detector."
     unit: "px"
+    reference:
+      origin: "python"
+      name: "params_G.hough_min_line_length"
+      source: "src/crystallization_mpc/apps/gsensor/detection/update_line.py:houghlines_opencv"
+      definition: "The minLineLength argument of cv2.HoughLinesP. The separate params_G.len_min test is applied afterwards."
+      formula: "minLineLength=min_line_length"
+      note: "Python exposes this setting; MATLAB fixes houghlines 'Minlength' at 7 pixels."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -184,9 +300,16 @@ params:
 
   params_G.hough_max_line_gap:
     section: "Growth line detection"
-    label: "OpenCV max line gap"
-    description: "Maximum gap between line segment points passed to OpenCV probabilistic Hough line detection."
+    label: "OpenCV maximum line gap"
+    description: "Largest gap allowed when joining line segments."
     unit: "px"
+    reference:
+      origin: "python"
+      name: "params_G.hough_max_line_gap"
+      source: "src/crystallization_mpc/apps/gsensor/detection/update_line.py:houghlines_opencv"
+      definition: "The maxLineGap argument of cv2.HoughLinesP."
+      formula: "maxLineGap=max_line_gap"
+      note: "Python exposes this setting; MATLAB fixes houghlines 'FillGap' at 5 pixels."
     kind: "basic"
     derived: false
     publish_to: [gsensor]
@@ -196,9 +319,17 @@ params:
 
   sigma_set:
     section: "Target"
-    label: "Target of relative supersaturation: sigma_set"
-    description: "Supersaturation target used when target mode is sigma."
-    unit: "g/g"
+    label: "Target of relative supersaturation"
+    description: "Desired relative supersaturation in sigma mode."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "sigma_set"
+      label: "Target of relative supersaturation: sigma_set [-]"
+      source: "parameters.m:6; subroutines_controller/control/calc_relative_sigma.m:3"
+      definition: "Target for (c - c_sat) / c_sat. Enter a fraction: 0.035 means 3.5%."
+      formula: "relative_sigma = (c - c_sat) / c_sat;"
+      unit_note: "[-] agrees with the original MATLAB GUI and relative-supersaturation equation. The [g/g] comment in parameters_on_target_change.m is inconsistent with that ratio."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -208,9 +339,15 @@ params:
 
   G_set:
     section: "Target"
-    label: "Target of growth rate: G_set"
-    description: "Growth-rate target used when target mode is G."
+    label: "Target of growth rate"
+    description: "Desired crystal growth rate in G mode."
     unit: "m/s"
+    reference:
+      origin: "matlab"
+      name: "G_set"
+      label: "Target of growth rate: G_set [m/s]"
+      source: "parameters.m:7; subroutines_controller/control/calc_e_target.m"
+      definition: "Growth-rate target used when target is G; the objective converts it to an equivalent supersaturation for comparison."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -220,9 +357,22 @@ params:
 
   target_set:
     section: "Target"
-    label: "Target value: target_set"
-    description: "Effective target after sigma/G selection."
+    label: "Target value"
+    description: "Target selected by the active sigma or G mode."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "target_set"
+      label: "Target value: target_set [-]"
+      source: "parameters_on_target_change.m:1-5"
+      definition: "Uses sigma_set in sigma mode and G_set in G mode."
+      formula: |-
+        if strcmp(target, 'sigma')
+            target_set = sigma_set;
+        elseif strcmp(target, 'G')
+            target_set = G_set;
+        end
+      unit_note: "The original GUI uses [-]; the effective unit is [-] for sigma or m/s for G."
     kind: "derived"
     compute_from: "target_selection"
     expression: 'if target=="sigma", target_set=sigma_set; elseif target=="G", target_set=G_set; end'
@@ -234,9 +384,16 @@ params:
 
   params.var_dT_dt:
     section: "Kalman filter for MPC"
-    label: "Temperature variance of process noise: params.var_dT_dt"
-    description: "Process variance for the temperature-gradient state."
+    label: "Temperature process-noise variance"
+    description: "Allows uncertainty in the temperature gradient."
     unit: "(K/s)^2"
+    reference:
+      origin: "matlab"
+      name: "params.var_dT_dt"
+      label: "Temperature variance of process noise: params.var_dT_dt [(K/s)^2]"
+      source: "parameters.m:55; subroutines_controller/control/calc_Q.m:15"
+      definition: "Scales the corresponding part of the process-noise covariance Q. Increasing it gives the model less confidence in that gradient."
+      formula: "Q = Q_M_T * var_dT_dt + Q_M_c * var_dc_dt;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -246,9 +403,16 @@ params:
 
   params.var_dc_dt:
     section: "Kalman filter for MPC"
-    label: "Concentration variance of process noise: params.var_dc_dt"
-    description: "Process variance for the concentration-gradient state."
+    label: "Concentration process-noise variance"
+    description: "Allows uncertainty in the concentration gradient."
     unit: "((g/g)/s)^2"
+    reference:
+      origin: "matlab"
+      name: "params.var_dc_dt"
+      label: "Concentration variance of process noise: params.var_dc_dt [((g/g)/s)^2]"
+      source: "parameters.m:56; subroutines_controller/control/calc_Q.m:15"
+      definition: "Scales the corresponding part of the process-noise covariance Q. Increasing it gives the model less confidence in that gradient."
+      formula: "Q = Q_M_T * var_dT_dt + Q_M_c * var_dc_dt;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -258,9 +422,20 @@ params:
 
   params.dT:
     section: "Kalman filter for MPC"
-    label: "Temperature measurement inaccuracy: params.dT"
-    description: "Temperature measurement uncertainty."
+    label: "Temperature measurement inaccuracy"
+    description: "Expected uncertainty of the temperature measurement."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "params.dT"
+      source: "parameters.m:57; subroutines_controller/control/calc_R.m:9-13"
+      definition: "Measurement inaccuracy used as a standard-deviation scale; the filter squares it to build the measurement-noise covariance. MATLAB recommends setting it above the real measurement deviation."
+      formula: |-
+        R = [
+          dT^2,             0;
+          0,                dc^2;
+        ];
+      note: "Uses the parameters.m variable. The old MATLAB GUI references var_dT / var_dc instead, which do not match these definitions."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -270,9 +445,20 @@ params:
 
   params.dc:
     section: "Kalman filter for MPC"
-    label: "Concentration measurement inaccuracy: params.dc"
-    description: "Concentration measurement uncertainty."
+    label: "Concentration measurement inaccuracy"
+    description: "Expected uncertainty of the concentration measurement."
     unit: "g/g"
+    reference:
+      origin: "matlab"
+      name: "params.dc"
+      source: "parameters.m:58; subroutines_controller/control/calc_R.m:9-13"
+      definition: "Measurement inaccuracy used as a standard-deviation scale; the filter squares it to build the measurement-noise covariance. MATLAB recommends setting it above the real measurement deviation."
+      formula: |-
+        R = [
+          dT^2,             0;
+          0,                dc^2;
+        ];
+      note: "Uses the parameters.m variable. The old MATLAB GUI references var_dT / var_dc instead, which do not match these definitions."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -282,9 +468,16 @@ params:
 
   params.n:
     section: "Growth rate model"
-    label: "Reaction order: params.n"
-    description: "Growth-rate order with respect to supersaturation."
+    label: "Reaction order"
+    description: "Sets how strongly supersaturation affects control growth."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.n"
+      label: "Reaction order: params.n [-]"
+      source: "parameters.m:62; subroutines_controller/control/calc_G.m:5-11"
+      definition: "Exponent of the absolute relative supersaturation in the control growth-rate model."
+      formula: "G = k_0 * abs(relative_sigma) ^ n * exp(-E_A / (R * T)) * sign(relative_sigma);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -294,9 +487,16 @@ params:
 
   params.E_A:
     section: "Growth rate model"
-    label: "Activation energy: params.E_A"
-    description: "Activation energy for the main growth-rate model."
+    label: "Activation energy"
+    description: "Sets temperature sensitivity of control growth."
     unit: "J/mol"
+    reference:
+      origin: "matlab"
+      name: "params.E_A"
+      label: "Activation energy: params.E_A [J/mol]"
+      source: "parameters.m:63; subroutines_controller/control/calc_G.m:5-11"
+      definition: "Activation energy in the Arrhenius factor of the control growth-rate model."
+      formula: "G = k_0 * abs(relative_sigma) ^ n * exp(-E_A / (R * T)) * sign(relative_sigma);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -306,9 +506,19 @@ params:
 
   params.k_0:
     section: "Growth rate model"
-    label: "Reaction coefficient prefactor: params.k_0"
-    description: "Growth-rate coefficient used by the main controller model."
+    label: "Reaction coefficient prefactor"
+    description: "Scales the control growth-rate model."
     unit: "m/s"
+    reference:
+      origin: "matlab"
+      name: "params.k_0"
+      label: "Reaction coefficient prefactor: params.k_0 [-]"
+      source: "parameters.m:64; subroutines_controller/control/calc_G.m:5-11"
+      definition: "Prefactor multiplying supersaturation and the Arrhenius temperature term."
+      formula: |-
+        params.k_0 = 0.1 * 3.0e-8 / 0.035^1.5 / exp(-120e3 / params.R / 306.15);
+        G = k_0 * abs(relative_sigma) ^ n * exp(-E_A / (R * T)) * sign(relative_sigma);
+      unit_note: "Uses [m/s] from parameters.m; the original GUI marks this [-]."
     kind: "derived"
     compute_from: "k_0"
     expression: "0.1 * 3.0e-8 / 0.035^1.5 / exp(-120e3 / params.R / 306.15)"
@@ -320,9 +530,18 @@ params:
 
   params.n_proc:
     section: "Growth rate process model"
-    label: "Process-model order: params.n_proc"
-    description: "Process-model order for growth-rate adaptation."
+    label: "Reaction order (process)"
+    description: "Sets how strongly supersaturation affects simulation process growth."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.n_proc"
+      label: "Reaction order: params.n_proc [-]"
+      source: "parameters.m:66; subroutines_controller/control/calc_G.m:5-11"
+      definition: "Exponent of the absolute relative supersaturation in the simulation process growth-rate model."
+      formula: |-
+        [n, E_A, R, k_0] = assign_list([params.n_proc, params.E_A_proc, params.R, params.k_0_proc]);
+        G = k_0 * abs(relative_sigma) ^ n * exp(-E_A / (R * T)) * sign(relative_sigma);
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -332,9 +551,18 @@ params:
 
   params.E_A_proc:
     section: "Growth rate process model"
-    label: "Process-model activation energy: params.E_A_proc"
-    description: "Process-model activation energy for adaptation."
+    label: "Activation energy (process)"
+    description: "Sets temperature sensitivity of simulation process growth."
     unit: "J/mol"
+    reference:
+      origin: "matlab"
+      name: "params.E_A_proc"
+      label: "Activation energy: params.E_A_proc [J/mol]"
+      source: "parameters.m:67; subroutines_controller/control/calc_G.m:5-11"
+      definition: "Activation energy in the Arrhenius factor of the simulation process growth-rate model."
+      formula: |-
+        [n, E_A, R, k_0] = assign_list([params.n_proc, params.E_A_proc, params.R, params.k_0_proc]);
+        G = k_0 * abs(relative_sigma) ^ n * exp(-E_A / (R * T)) * sign(relative_sigma);
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -344,9 +572,20 @@ params:
 
   params.k_0_proc:
     section: "Growth rate process model"
-    label: "Process-model prefactor: params.k_0_proc"
-    description: "Growth-rate coefficient used by the process adaptation model."
+    label: "Reaction coefficient prefactor (process)"
+    description: "Scales the simulation process growth-rate model."
     unit: "m/s"
+    reference:
+      origin: "matlab"
+      name: "params.k_0_proc"
+      label: "Reaction coefficient prefactor: params.k_0_proc [-]"
+      source: "parameters.m:68; subroutines_controller/control/calc_G.m:5-11"
+      definition: "Prefactor multiplying supersaturation and the Arrhenius temperature term."
+      formula: |-
+        params.k_0_proc = 3.0e-8 / 0.035^1.5 / exp(-120e3 / params.R / 306.15);
+        [n, E_A, R, k_0] = assign_list([params.n_proc, params.E_A_proc, params.R, params.k_0_proc]);
+        G = k_0 * abs(relative_sigma) ^ n * exp(-E_A / (R * T)) * sign(relative_sigma);
+      unit_note: "Uses [m/s] from parameters.m; the original GUI marks this [-]."
     kind: "derived"
     compute_from: "k_0_proc"
     expression: "3.0e-8 / 0.035^1.5 / exp(-120e3 / params.R / 306.15)"
@@ -358,9 +597,20 @@ params:
 
   params.w_sigma:
     section: "Objective weights"
-    label: "Objective weight: params.w_sigma"
-    description: "Objective weight for supersaturation tracking."
+    label: "Weight for relative supersaturation"
+    description: "Balances sigma tracking against temperature-gradient changes."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.w_sigma"
+      label: "Weight for relative supersaturation: params.w_sigma [-]"
+      source: "parameters.m:47; subroutines_controller/control/objective_function.m:13-21"
+      definition: "Weight w for squared relative-supersaturation tracking error in sigma mode."
+      formula: |-
+        f1 = e_target ^ 2;
+        f2 = (dT_dt_set - dT_dt) ^ 2;
+        f = w * f1 + w_dT_dt * f2;
+      unit_note: "[-] follows the original MATLAB GUI convention for objective weights."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -370,9 +620,20 @@ params:
 
   params.w_G:
     section: "Objective weights"
-    label: "Objective weight: params.w_G"
-    description: "Objective weight for growth-rate tracking."
+    label: "Weight for converted growth rate"
+    description: "Balances G tracking against temperature-gradient changes."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.w_G"
+      label: "Weight for converted growth rate: params.w_G [-]"
+      source: "parameters.m:48; subroutines_controller/control/objective_function.m:13-21"
+      definition: "Weight w for squared growth-rate error after conversion to equivalent relative supersaturation; it does not weight raw (m/s) errors."
+      formula: |-
+        f1 = e_target ^ 2;
+        f2 = (dT_dt_set - dT_dt) ^ 2;
+        f = w * f1 + w_dT_dt * f2;
+      unit_note: "[-] follows the original MATLAB GUI convention for objective weights."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -382,9 +643,20 @@ params:
 
   params.w_dT_dt:
     section: "Objective weights"
-    label: "Objective weight: params.w_dT_dt"
-    description: "Objective weight for temperature-gradient effort."
+    label: "Weight for temperature gradient"
+    description: "Penalizes changing the requested temperature gradient."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.w_dT_dt"
+      label: "Weight for temperature gradient: params.w_dT_dt [-]"
+      source: "parameters.m:49; subroutines_controller/control/objective_function.m:13-21"
+      definition: "Weight on the squared difference between the requested and current temperature gradients; increasing it discourages abrupt gradient changes."
+      formula: |-
+        f1 = e_target ^ 2;
+        f2 = (dT_dt_set - dT_dt) ^ 2;
+        f = w * f1 + w_dT_dt * f2;
+      unit_note: "[-] follows the original MATLAB GUI convention for objective weights."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -394,9 +666,16 @@ params:
 
   sigma_threshold:
     section: "Target switching"
-    label: "Supersaturation threshold"
-    description: "Threshold below which sigma-specific logic switches regime."
+    label: "Sigma threshold"
+    description: "Holds control updates close to zero supersaturation."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "sigma_threshold"
+      label: "Sigma threshold (to avoid zero division)"
+      source: "parameters.m:101; gui_main/snipptets_controller/calculate_T_j_set.m:3"
+      definition: "If the absolute projected relative supersaturation is below this threshold, the controller keeps its previous commands to avoid numerical problems."
+      formula: "if abs(calc_relative_sigma(x_(3), x_(1))) < sigma_threshold"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -406,9 +685,18 @@ params:
 
   params.PI_mode:
     section: "PI tuning"
-    label: "PI tuning mode: params.PI_mode"
-    description: "PI tuning rule used to derive target-loop gains."
+    label: "PI mode"
+    description: "Selects the rule used to calculate target-loop gains."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.PI_mode"
+      label: "PI mode"
+      source: "parameters.m:81; subroutines_controller/control/calc_K_P_target.m; subroutines_controller/control/calc_K_I_target.m"
+      definition: "The supplied MATLAB and Python implementations support Ziegler_Nichols; K_P_target is 0.45 * K_u and K_I_target is fixed at zero."
+      formula: |-
+        K_P_target = 0.45 * params.K_u;
+        K_I_target = 0;
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -418,9 +706,16 @@ params:
 
   params.K_u:
     section: "PI tuning"
-    label: "Ultimate gain: params.K_u"
-    description: "Ultimate gain used for PI tuning."
+    label: "Ultimate gain K_u"
+    description: "Scales the derived target-loop proportional gain."
     unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "params.K_u"
+      label: "K_u"
+      source: "parameters.m:82; subroutines_controller/control/calc_K_P_target.m:4"
+      definition: "Gain used by the implemented Ziegler_Nichols rule. The derived K_P_target also supplies the temperature correction in the original secondary-controller equation."
+      formula: "K_P_target = 0.45 * params.K_u;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -430,9 +725,19 @@ params:
 
   params.T_u:
     section: "PI tuning"
-    label: "Oscillation period: params.T_u"
-    description: "Oscillation period used for PI tuning."
+    label: "Oscillation period T_u"
+    description: "Stored tuning period; inactive while integral gain is zero."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "params.T_u"
+      label: "T_u"
+      source: "parameters.m:83; subroutines_controller/control/calc_K_I_target.m:5-6"
+      definition: "Period in the commented Ziegler_Nichols integral-gain formula. The active formula fixes K_I_target at zero, so changing T_u has no effect."
+      formula: |-
+        K_I_target = 0;
+        % K_I_target = (0.45 * params.K_u)/ (params.T_u / 1.2);
+      unit_note: "parameters.m annotates T_u as [K/s^2], inconsistent with its period role in the commented formula. Seconds are inferred from that formula; the active code does not use T_u."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -442,9 +747,18 @@ params:
 
   params.K_P_target:
     section: "Target loop"
-    label: "Target loop proportional gain: params.K_P_target"
-    description: "Effective proportional gain for the target loop."
-    unit: "-"
+    label: "Target proportional gain"
+    description: "Effective proportional gain of the target controller."
+    unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "params.K_P_target"
+      label: "K_P_target"
+      source: "parameters.m:84; subroutines_controller/control/calc_K_P_target.m:4; subroutines_controller/control/calc_T_j_set_.m:14-15"
+      definition: "Effective proportional gain of the target controller."
+      formula: "K_P_target = 0.45 * params.K_u;"
+      note: "The original secondary controller also reads this value into its local K_P_T variable."
+      unit_note: "Inherits K_u units through the implemented gain formula."
     kind: "derived"
     compute_from: "k_p_target"
     expression: 'if params.PI_mode=="Ziegler_Nichols", params.K_P_target = 0.45 * params.K_u; end'
@@ -457,9 +771,19 @@ params:
 
   params.K_I_target:
     section: "Target loop"
-    label: "Target loop integral gain: params.K_I_target"
-    description: "Effective integral gain for the target loop."
-    unit: "-"
+    label: "Target integral gain"
+    description: "Effective integral gain; currently fixed at zero."
+    unit: "K/s^2"
+    reference:
+      origin: "matlab"
+      name: "params.K_I_target"
+      label: "K_I_target"
+      source: "parameters.m:85; subroutines_controller/control/calc_K_I_target.m:5-6"
+      definition: "Effective integral gain; currently fixed at zero."
+      formula: |-
+        K_I_target = 0;
+        % K_I_target = (0.45 * params.K_u)/ (params.T_u / 1.2);
+      unit_note: "Units inferred from K_u divided by a time period in the original commented tuning formula."
     kind: "derived"
     compute_from: "k_i_target"
     expression: 'if params.PI_mode=="Ziegler_Nichols", params.K_I_target = 0; end'
@@ -472,9 +796,16 @@ params:
 
   params.K_P_dT_dt:
     section: "dT/dt loop"
-    label: "dT/dt proportional gain: params.K_P_dT_dt"
-    description: "Proportional gain for the dT/dt loop."
+    label: "Proportional gain in dT/dt"
+    description: "Corrects the instantaneous temperature-gradient error."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "params.K_P_dT_dt"
+      label: "Proportional gain in dT_dt: params.K_P_dT_dt [s]"
+      source: "parameters.m:73; subroutines_controller/control/calc_T_j_set_.m:18"
+      definition: "Corrects the instantaneous temperature-gradient error."
+      formula: "T_j_set = T_j_calc - K_P_dT_dt * e_dT_dt - K_I_dT_dt * int_e_dT_dt_dt - K_P_T * e_T - K_I_T * int_e_T_dt;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -484,9 +815,16 @@ params:
 
   params.K_I_dT_dt:
     section: "dT/dt loop"
-    label: "dT/dt integral gain: params.K_I_dT_dt"
-    description: "Integral gain for the dT/dt loop."
+    label: "Integral gain in dT/dt"
+    description: "Corrects accumulated temperature-gradient error."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "params.K_I_dT_dt"
+      label: "Integral gain in dT_dt: params.K_I_dT_dt [-]"
+      source: "parameters.m:74; subroutines_controller/control/calc_T_j_set_.m:18"
+      definition: "Corrects accumulated temperature-gradient error."
+      formula: "T_j_set = T_j_calc - K_P_dT_dt * e_dT_dt - K_I_dT_dt * int_e_dT_dt_dt - K_P_T * e_T - K_I_T * int_e_T_dt;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -496,9 +834,18 @@ params:
 
   params.K_P_T_sigma:
     section: "Temperature loop by target"
-    label: "Temperature proportional gain in sigma mode: params.K_P_T_sigma"
-    description: "Temperature-loop proportional gain used in sigma mode."
+    label: "Proportional gain in T (sigma)"
+    description: "Stored temperature gain; currently unused."
     unit: "s^2"
+    reference:
+      origin: "matlab"
+      name: "params.K_P_T_sigma"
+      label: "Proportional gain in T (for sigma): params.K_P_T_sigma [s^2]"
+      source: "parameters.m:75; parameters_on_target_change.m; subroutines_controller/control/calc_T_j_set_.m:14-18"
+      definition: "Target-specific proportional temperature gain selected into params.K_P_T."
+      formula: "T_j_set = T_j_calc - K_P_dT_dt * e_dT_dt - K_I_dT_dt * int_e_dT_dt_dt - K_P_T * e_T - K_I_T * int_e_T_dt;"
+      note: "MATLAB calc_T_j_set_.m assigns params.K_P_target to local K_P_T instead of params.K_P_T; Python preserves that equation. This setting currently has no effect on the jacket command."
+      unit_note: "[s^2] preserves the original MATLAB parameter and GUI annotations."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -508,9 +855,17 @@ params:
 
   params.K_I_T_sigma:
     section: "Temperature loop by target"
-    label: "Temperature integral gain in sigma mode: params.K_I_T_sigma"
-    description: "Temperature-loop integral gain used in sigma mode."
+    label: "Integral gain in T (sigma)"
+    description: "Corrects accumulated temperature error in sigma mode."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "params.K_I_T_sigma"
+      label: "Integral gain in T (for sigma): params.K_I_T_sigma [s]"
+      source: "parameters.m:76; parameters_on_target_change.m; subroutines_controller/control/calc_T_j_set_.m:18"
+      definition: "Target-specific integral temperature gain selected into params.K_I_T. It weights accumulated positive temperature error relative to the zero-gradient temperature."
+      formula: "T_j_set = T_j_calc - K_P_dT_dt * e_dT_dt - K_I_dT_dt * int_e_dT_dt_dt - K_P_T * e_T - K_I_T * int_e_T_dt;"
+      unit_note: "[s] preserves the original MATLAB parameter and GUI annotations."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -520,9 +875,18 @@ params:
 
   params.K_P_T_G:
     section: "Temperature loop by target"
-    label: "Temperature proportional gain in G mode: params.K_P_T_G"
-    description: "Temperature-loop proportional gain used in G mode."
+    label: "Proportional gain in T (G)"
+    description: "Stored temperature gain; currently unused."
     unit: "s^2"
+    reference:
+      origin: "matlab"
+      name: "params.K_P_T_G"
+      label: "Proportional gain in T (for G): params.K_P_T_G [s^2]"
+      source: "parameters.m:77; parameters_on_target_change.m; subroutines_controller/control/calc_T_j_set_.m:14-18"
+      definition: "Target-specific proportional temperature gain selected into params.K_P_T."
+      formula: "T_j_set = T_j_calc - K_P_dT_dt * e_dT_dt - K_I_dT_dt * int_e_dT_dt_dt - K_P_T * e_T - K_I_T * int_e_T_dt;"
+      note: "MATLAB calc_T_j_set_.m assigns params.K_P_target to local K_P_T instead of params.K_P_T; Python preserves that equation. This setting currently has no effect on the jacket command."
+      unit_note: "[s^2] preserves the original MATLAB parameter and GUI annotations."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -532,9 +896,17 @@ params:
 
   params.K_I_T_G:
     section: "Temperature loop by target"
-    label: "Temperature integral gain in G mode: params.K_I_T_G"
-    description: "Temperature-loop integral gain used in G mode."
+    label: "Integral gain in T (G)"
+    description: "Corrects accumulated temperature error in G mode."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "params.K_I_T_G"
+      label: "Integral gain in T (for G): params.K_I_T_G [s]"
+      source: "parameters.m:78; parameters_on_target_change.m; subroutines_controller/control/calc_T_j_set_.m:18"
+      definition: "Target-specific integral temperature gain selected into params.K_I_T. It weights accumulated positive temperature error relative to the zero-gradient temperature."
+      formula: "T_j_set = T_j_calc - K_P_dT_dt * e_dT_dt - K_I_dT_dt * int_e_dT_dt_dt - K_P_T * e_T - K_I_T * int_e_T_dt;"
+      unit_note: "[s] preserves the original MATLAB parameter and GUI annotations."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -544,9 +916,16 @@ params:
 
   t_lag:
     section: "Lag settings"
-    label: "Lag time t_lag"
-    description: "Main lag time horizon."
+    label: "Time lag base"
+    description: "Base time horizon used to project the process state."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "t_lag"
+      label: "Time lag base: t_lag [s]"
+      source: "parameters.m:108; gui_main/snipptets_controller/calculate_lag_time.m:2"
+      definition: "Base prediction horizon, multiplied by the error-dependent lag factor."
+      formula: "t_lag_list(ii) = t_lag * t_lag_perc_list(ii);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -556,21 +935,42 @@ params:
 
   t_lag_perc:
     section: "Lag settings"
-    label: "Lag ratio t_lag_perc"
-    description: "Lag ratio used in timing heuristics."
+    label: "Additional time lag percentage"
+    description: "Maximum fractional increase of the base time lag."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "t_lag_perc"
+      label: "Additional time lag percentage: t_lag_perc [-]"
+      source: "parameters.m:109; subroutines_controller/control/calc_t_lag_perc.m:2; gui_main/snipptets_controller/calculate_lag_time.m:2"
+      definition: "Enter a fraction, not a percent number. 20/150 is about 0.1333 (13.33%); with t_lag = 150 s, the maximum added lag is 20 s for a positive target."
+      formula: |-
+        t_lag_perc_val = 1 + t_lag_perc * atan(t_lag_threshold_perc * target_set / abs_e_target) / (pi / 2);
+        t_lag_list(ii) = t_lag * t_lag_perc_list(ii);
     kind: "basic"
     derived: false
     publish_to: [controller]
     ui:
       visible: true
       order: 470
+      # Older saved defaults rounded this ratio to ten decimal places.
+      # This tolerance affects only the Non-default label, never saved values.
+      default_comparison:
+        rtol: 1.0e-9
+        atol: 0
 
   t_lag_threshold_perc_sigma:
     section: "Lag settings"
-    label: "Lag threshold ratio in sigma mode"
-    description: "Lag threshold ratio for sigma mode."
+    label: "Additional lag threshold (sigma)"
+    description: "Sets the error scale for increasing lag in sigma mode."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "t_lag_threshold_perc_sigma"
+      label: "Additional time lag percentage threshold (for sigma): t_lag_threshold_perc_sigma [-]"
+      source: "parameters.m:110; parameters_on_target_change.m; subroutines_controller/control/calc_t_lag_perc.m:2"
+      definition: "Selected as t_lag_threshold_perc in sigma mode. When absolute target error equals this fraction of a positive target, half the maximum additional lag is applied."
+      formula: "t_lag_perc_val = 1 + t_lag_perc * atan(t_lag_threshold_perc * target_set / abs_e_target) / (pi / 2);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -580,9 +980,16 @@ params:
 
   t_lag_threshold_perc_G:
     section: "Lag settings"
-    label: "Lag threshold ratio in G mode"
-    description: "Lag threshold ratio for G mode."
+    label: "Additional lag threshold (G)"
+    description: "Sets the error scale for increasing lag in G mode."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "t_lag_threshold_perc_G"
+      label: "Additional time lag percentage threshold (for G): t_lag_threshold_perc_G [-]"
+      source: "parameters.m:111; parameters_on_target_change.m; subroutines_controller/control/calc_t_lag_perc.m:2"
+      definition: "Selected as t_lag_threshold_perc in G mode. When absolute target error equals this fraction of a positive target, half the maximum additional lag is applied."
+      formula: "t_lag_perc_val = 1 + t_lag_perc * atan(t_lag_threshold_perc * target_set / abs_e_target) / (pi / 2);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -592,9 +999,15 @@ params:
 
   dT_dt_min_sigma:
     section: "Temperature-gradient limits"
-    label: "Minimum dT/dt in sigma mode"
-    description: "Minimum temperature-gradient limit in sigma mode."
+    label: "Minimal reactor gradient (sigma)"
+    description: "Lower limit for the requested reactor temperature rate."
     unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "dT_dt_min_sigma"
+      label: "Minimal reactor temperature gradient (for sigma): dT_dt_min_sigma [K/s]"
+      source: "parameters.m:88; parameters_on_target_change.m; subroutines_controller/control/calc_dT_dt_set.m"
+      definition: "Selected in sigma mode to bound MPC optimization and clip the PI temperature-gradient command."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -604,9 +1017,15 @@ params:
 
   dT_dt_max_sigma:
     section: "Temperature-gradient limits"
-    label: "Maximum dT/dt in sigma mode"
-    description: "Maximum temperature-gradient limit in sigma mode."
+    label: "Maximal reactor gradient (sigma)"
+    description: "Upper limit for the requested reactor temperature rate."
     unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "dT_dt_max_sigma"
+      label: "Maximal reactor temperature gradient (for sigma): dT_dt_max_sigma [K/s]"
+      source: "parameters.m:89; parameters_on_target_change.m; subroutines_controller/control/calc_dT_dt_set.m"
+      definition: "Selected in sigma mode to bound MPC optimization and clip the PI temperature-gradient command."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -616,9 +1035,15 @@ params:
 
   dT_dt_min_G:
     section: "Temperature-gradient limits"
-    label: "Minimum dT/dt in G mode"
-    description: "Minimum temperature-gradient limit in G mode."
+    label: "Minimal reactor gradient (G)"
+    description: "Lower limit for the requested reactor temperature rate."
     unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "dT_dt_min_G"
+      label: "Minimal reactor temperature gradient (for G): dT_dt_min_G [K/s]"
+      source: "parameters.m:90; parameters_on_target_change.m; subroutines_controller/control/calc_dT_dt_set.m"
+      definition: "Selected in G mode to bound MPC optimization and clip the PI temperature-gradient command."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -628,9 +1053,15 @@ params:
 
   dT_dt_max_G:
     section: "Temperature-gradient limits"
-    label: "Maximum dT/dt in G mode"
-    description: "Maximum temperature-gradient limit in G mode."
+    label: "Maximal reactor gradient (G)"
+    description: "Upper limit for the requested reactor temperature rate."
     unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "dT_dt_max_G"
+      label: "Maximal reactor temperature gradient (for G): dT_dt_max_G [K/s]"
+      source: "parameters.m:91; parameters_on_target_change.m; subroutines_controller/control/calc_dT_dt_set.m"
+      definition: "Selected in G mode to bound MPC optimization and clip the PI temperature-gradient command."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -640,9 +1071,16 @@ params:
 
   T_j_min:
     section: "Jacket constraints"
-    label: "Minimum jacket temperature T_j_min"
-    description: "Minimum jacket temperature."
+    label: "Minimal jacket temperature"
+    description: "Lower limit for the jacket temperature command."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "T_j_min"
+      label: "Minimal jacket temperature: T_j_min [K]"
+      source: "parameters.m:92; subroutines_controller/control/calc_T_j_set_.m:19"
+      definition: "Bounds the calculated jacket setpoint and the simulated jacket-rate model. Enter an absolute temperature in kelvin."
+      formula: "T_j_set = clip(T_j_set, T_j_min, T_j_max);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -652,9 +1090,16 @@ params:
 
   T_j_max:
     section: "Jacket constraints"
-    label: "Maximum jacket temperature T_j_max"
-    description: "Maximum jacket temperature."
+    label: "Maximal jacket temperature"
+    description: "Upper limit for the jacket temperature command."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "T_j_max"
+      label: "Maximal jacket temperature: T_j_max [K]"
+      source: "parameters.m:93; subroutines_controller/control/calc_T_j_set_.m:19"
+      definition: "Bounds the calculated jacket setpoint and the simulated jacket-rate model. Enter an absolute temperature in kelvin."
+      formula: "T_j_set = clip(T_j_set, T_j_min, T_j_max);"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -664,9 +1109,15 @@ params:
 
   dT_j_dt_max:
     section: "Jacket constraints"
-    label: "Maximum jacket slew rate dT_j_dt_max"
-    description: "Maximum jacket temperature slew rate."
+    label: "Maximal jacket temperature gradient"
+    description: "Limits the jacket heating/cooling rate in simulation."
     unit: "K/s"
+    reference:
+      origin: "matlab"
+      name: "dT_j_dt_max"
+      label: "Maximal jacket temperature gradient: dT_j_dt_max [K/s]"
+      source: "parameters.m:96; subroutines_controller/control/calc_dT_j_dt.m"
+      definition: "Base absolute jacket-temperature rate in the simulation; calc_dT_j_dt reduces it near the jacket temperature limits."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -676,9 +1127,18 @@ params:
 
   dT_j:
     section: "Jacket constraints"
-    label: "Jacket temperature resolution dT_j"
-    description: "Jacket temperature resolution or tolerance."
+    label: "Jacket temperature precision"
+    description: "Stops simulated jacket movement within this setpoint error."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "dT_j"
+      label: "Jacket temperature precision: dT_j [K]"
+      source: "parameters.m:97; subroutines_controller/control/update_T_j.m:4-5"
+      definition: "Simulation deadband: update_T_j advances the jacket only while abs(T_j_set - T_j) exceeds this value."
+      formula: |-
+        delta_T_j = T_j_set - T_j;
+        if abs(delta_T_j) > dT_j
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -688,9 +1148,17 @@ params:
 
   dt_update:
     section: "Jacket constraints"
-    label: "Hardware update period dt_update"
-    description: "Hardware update period for jacket commands."
+    label: "Jacket temperature update interval"
+    description: "Internal time step for the simulated jacket response."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "dt_update"
+      label: "Jacket temperature update time interval: dt_update [K]"
+      source: "parameters.m:98; subroutines_controller/control/update_T_j.m:2"
+      definition: "Divides each controller interval into fix(dt / dt_update) jacket-model substeps; it is not a hardware command publishing period."
+      formula: "frequency = fix(dt / dt_update);"
+      unit_note: "Uses [s] from parameters.m and update_T_j; the old MATLAB GUI incorrectly labels it [K]."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -700,9 +1168,16 @@ params:
 
   T_init_sigma:
     section: "Initialization"
-    label: "Initial process temperature in sigma mode T_init_sigma"
-    description: "Initial process temperature used in sigma mode."
+    label: "Initial reactor temperature (sigma)"
+    description: "Starting reactor temperature for a new sigma simulation."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "T_init_sigma"
+      label: "Initial reactor temperature (for sigma): T_init_sigma [K]"
+      source: "parameters.m:119; parameters_on_target_change.m"
+      definition: "Selected into T_init for simulation initialization. In experiment mode, activation reads the measured process state instead."
+      formula: "T_init_sigma = 42 + C2K;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -712,9 +1187,16 @@ params:
 
   T_init_G:
     section: "Initialization"
-    label: "Initial process temperature in G mode T_init_G"
-    description: "Initial process temperature used in G mode."
+    label: "Initial reactor temperature (G)"
+    description: "Starting reactor temperature for a new G simulation."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "T_init_G"
+      label: "Initial reactor temperature (for G): T_init_G [K]"
+      source: "parameters.m:120; parameters_on_target_change.m"
+      definition: "Selected into T_init for simulation initialization. In experiment mode, activation reads the measured process state instead."
+      formula: "T_init_G = 38.5 + C2K;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -724,9 +1206,16 @@ params:
 
   T_j_init:
     section: "Initialization"
-    label: "Initial jacket temperature T_j_init"
-    description: "Initial jacket temperature."
+    label: "Initial jacket temperature"
+    description: "Starting jacket temperature for a new simulation."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "T_j_init"
+      label: "Initial jacket temperature: T_j_init [K]"
+      source: "parameters.m:121"
+      definition: "Initial simulated jacket temperature and the latched jacket reference used by the controller. Experiment activation uses the measured jacket temperature."
+      formula: "T_j_init = T_init_sigma;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -736,9 +1225,16 @@ params:
 
   T_j_set_init:
     section: "Initialization"
-    label: "Initial jacket setpoint T_j_set_init"
-    description: "Initial jacket setpoint."
+    label: "Initial set jacket temperature"
+    description: "Starting jacket setpoint for a new simulation."
     unit: "K"
+    reference:
+      origin: "matlab"
+      name: "T_j_set_init"
+      label: "Initial set jacket temperature: T_j_set_init [K]"
+      source: "parameters.m:122"
+      definition: "Initial setpoint of the simulated jacket, before subsequent controller commands."
+      formula: "T_j_set_init = T_j_init;"
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -748,9 +1244,15 @@ params:
 
   c_init:
     section: "Initialization"
-    label: "Initial concentration c_init"
-    description: "Initial concentration."
+    label: "Initial concentration"
+    description: "Starting solute-to-solvent mass ratio in simulation."
     unit: "g/g"
+    reference:
+      origin: "matlab"
+      name: "c_init"
+      label: "Initial concentration: c_init [g/g]"
+      source: "parameters.m:123; gui_main/param_section.m:128"
+      definition: "Initial mass of dissolved solute per mass of solvent. Experiment activation uses measured concentration."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -760,9 +1262,16 @@ params:
 
   steps_sigma:
     section: "Scheduling"
-    label: "Number of control steps in sigma mode"
-    description: "Number of control steps used in sigma mode."
+    label: "Total steps (sigma)"
+    description: "Legacy simulation step limit; no automatic stop currently."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "steps_sigma"
+      label: "Total steps (for sigma): steps_sigma [-]"
+      source: "parameters.m:125; parameters_on_target_change.m; gui_main/snipptets_controller/measure_controller_data.m:4-5"
+      definition: "MATLAB selects this as the total number of simulation steps in sigma mode."
+      note: "Python retains and selects this value, but its current runtime does not stop automatically at this count."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -772,9 +1281,16 @@ params:
 
   steps_G:
     section: "Scheduling"
-    label: "Number of control steps in G mode"
-    description: "Number of control steps used in G mode."
+    label: "Total steps (G)"
+    description: "Legacy simulation step limit; no automatic stop currently."
     unit: "-"
+    reference:
+      origin: "matlab"
+      name: "steps_G"
+      label: "Total steps (for G): steps_G [-]"
+      source: "parameters.m:126; parameters_on_target_change.m; gui_main/snipptets_controller/measure_controller_data.m:4-5"
+      definition: "MATLAB selects this as the total number of simulation steps in G mode."
+      note: "Python retains and selects this value, but its current runtime does not stop automatically at this count."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -784,9 +1300,16 @@ params:
 
   seed_time_sigma:
     section: "Scheduling"
-    label: "Seed addition time in sigma mode"
-    description: "Seed addition time used in sigma mode."
+    label: "Seeding time (sigma)"
+    description: "Legacy simulation seed time; use the Add seed command."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "seed_time_sigma"
+      label: "Seeding time (for sigma): seed_time_sigma [s]"
+      source: "parameters.m:129; supersaturation_control.m:96; gui_main/snipptets_controller/measure_controller_data.m:15"
+      definition: "Seed-addition time in the original standalone MATLAB simulation for sigma mode."
+      note: "The current Python controller seeds on an explicit request, not on this timer; the MATLAB GUI path also uses add_seed_request."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -796,9 +1319,17 @@ params:
 
   seed_time_G:
     section: "Scheduling"
-    label: "Seed addition time in G mode"
-    description: "Seed addition time used in G mode."
+    label: "Seeding time (G)"
+    description: "Legacy simulation seed time; use the Add seed command."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "seed_time_G"
+      label: "Seeding time (for G): seed_time_G [-]"
+      source: "parameters.m:130; supersaturation_control.m:96; gui_main/snipptets_controller/measure_controller_data.m:15"
+      definition: "Seed-addition time in the original standalone MATLAB simulation for G mode."
+      note: "The current Python controller seeds on an explicit request, not on this timer; the MATLAB GUI path also uses add_seed_request."
+      unit_note: "Uses [s] from parameters.m; the old MATLAB GUI labels seed_time_G [-]."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -808,9 +1339,15 @@ params:
 
   params.R:
     section: "Physical properties"
-    label: "Gas constant params.R"
-    description: "Universal gas constant."
+    label: "Gas constant"
+    description: "Gas constant used in the growth-rate temperature factor."
     unit: "J/(mol*K)"
+    reference:
+      origin: "matlab"
+      name: "params.R"
+      label: "R (gas const.) [J/mol/K]"
+      source: "parameters.m:60"
+      definition: "Gas constant used in the growth-rate temperature factor."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -820,9 +1357,15 @@ params:
 
   k:
     section: "Physical properties"
-    label: "Heat transfer coefficient k"
-    description: "Heat transfer coefficient between jacket and reactor."
+    label: "Heat transfer coefficient"
+    description: "Heat transfer between the jacket and reactor."
     unit: "J/(K*s*m^2)"
+    reference:
+      origin: "matlab"
+      name: "k"
+      label: "Heat transfer:  k [J/(K*s*m^2)]"
+      source: "parameters.m:35"
+      definition: "Heat transfer between the jacket and reactor."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -832,9 +1375,15 @@ params:
 
   k_loss:
     section: "Physical properties"
-    label: "Heat loss coefficient k_loss"
-    description: "Heat loss coefficient between reactor and surroundings."
+    label: "Heat loss coefficient"
+    description: "Heat exchange between the reactor and surroundings."
     unit: "J/(K*s*m^2)"
+    reference:
+      origin: "matlab"
+      name: "k_loss"
+      label: "Heat loss: k_loss [J/(K*s*m^2)]"
+      source: "parameters.m:36"
+      definition: "Heat exchange between the reactor and surroundings."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -844,9 +1393,15 @@ params:
 
   c_p:
     section: "Physical properties"
-    label: "Specific heat capacity c_p"
-    description: "Specific heat capacity of the solvent."
+    label: "Mass-specific heat capacity"
+    description: "Solvent heat capacity per unit mass."
     unit: "J/(kg*K)"
+    reference:
+      origin: "matlab"
+      name: "c_p"
+      label: "Heat capacity: c_p [J/(kg*K)]"
+      source: "parameters.m:37"
+      definition: "Solvent heat capacity per unit mass."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -856,9 +1411,15 @@ params:
 
   rho_solvent:
     section: "Physical properties"
-    label: "Solvent density rho_solvent"
-    description: "Density of the solvent."
+    label: "Solvent density"
+    description: "Converts solvent mass to volume for reactor geometry."
     unit: "kg/m^3"
+    reference:
+      origin: "matlab"
+      name: "rho_solvent"
+      label: "Solvent density: rho_solvent [kg/m^3]"
+      source: "parameters.m:39"
+      definition: "Converts solvent mass to volume for reactor geometry."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -868,9 +1429,15 @@ params:
 
   rho_solute:
     section: "Physical properties"
-    label: "Solute density rho_solute"
-    description: "Density of the solute."
+    label: "Solute density"
+    description: "Converts crystal volume to mass."
     unit: "kg/m^3"
+    reference:
+      origin: "matlab"
+      name: "rho_solute"
+      label: "Solute density: rho_solute [kg/m^3]"
+      source: "parameters.m:40"
+      definition: "Converts crystal volume to mass."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -880,9 +1447,15 @@ params:
 
   m_solvent:
     section: "Physical properties"
-    label: "Solvent mass m_solvent"
-    description: "Mass of solvent in the reactor."
+    label: "Solvent mass"
+    description: "Solvent amount used in heat and mass balances."
     unit: "kg"
+    reference:
+      origin: "matlab"
+      name: "m_solvent"
+      label: "Solvent mass: m_solvent [kg]"
+      source: "parameters.m:41"
+      definition: "Solvent amount used in heat and mass balances."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -892,9 +1465,15 @@ params:
 
   r_reactor:
     section: "Physical properties"
-    label: "Reactor radius r_reactor"
-    description: "Reactor radius used by heat-transfer geometry terms."
+    label: "Reactor cross-section radius"
+    description: "Sets jacket-contact and cross-sectional areas."
     unit: "m"
+    reference:
+      origin: "matlab"
+      name: "r_reactor"
+      label: "Reactor radius: r_reactor [m]"
+      source: "parameters.m:38"
+      definition: "Sets jacket-contact and cross-sectional areas."
     kind: "basic"
     derived: false
     publish_to: [controller]
@@ -904,9 +1483,16 @@ params:
 
   area_1:
     section: "Derived controller parameters"
-    label: "Contact area area_1"
-    description: "Contact area between jacket and reactor."
+    label: "Jacket contact area"
+    description: "Calculated jacket-to-reactor heat-transfer area."
     unit: "m^2"
+    reference:
+      origin: "matlab"
+      name: "area_1"
+      label: "Jackt contact area: area_1 [m^2]"
+      source: "parameters.m:42"
+      definition: "Calculated jacket-to-reactor heat-transfer area."
+      formula: "area_1 = 2 * m_solvent / (rho_solvent * r_reactor);"
     kind: "derived"
     compute_from: "area_1"
     expression: "2 * m_solvent / (rho_solvent * r_reactor)"
@@ -918,9 +1504,16 @@ params:
 
   area_2:
     section: "Derived controller parameters"
-    label: "Heat-loss area area_2"
-    description: "Reactor top or section area used for heat-loss terms."
+    label: "Cross-sectional contact area"
+    description: "Calculated reactor cross-sectional area for heat loss."
     unit: "m^2"
+    reference:
+      origin: "matlab"
+      name: "area_2"
+      label: "Cross-sectional contact: area area_2 [m^2]"
+      source: "parameters.m:43"
+      definition: "Calculated reactor cross-sectional area for heat loss."
+      formula: "area_2 = pi * r_reactor^2;"
     kind: "derived"
     compute_from: "area_2"
     expression: "pi * r_reactor^2"
@@ -932,9 +1525,16 @@ params:
 
   params.tau_1:
     section: "Derived controller parameters"
-    label: "Time constant params.tau_1"
-    description: "Time constant between jacket and reactor."
+    label: "Time parameter 1"
+    description: "Calculated jacket-to-reactor thermal time constant."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "params.tau_1"
+      label: "Time parameter 1: tau_1 [s]"
+      source: "parameters.m:70"
+      definition: "Calculated jacket-to-reactor thermal time constant."
+      formula: "params.tau_1 = (c_p * m_solvent) / (k * area_1);"
     kind: "derived"
     compute_from: "tau_1"
     expression: "(c_p * m_solvent) / (k * area_1)"
@@ -946,9 +1546,16 @@ params:
 
   params.tau_2:
     section: "Derived controller parameters"
-    label: "Time constant params.tau_2"
-    description: "Time constant for heat loss to the environment."
+    label: "Time parameter 2"
+    description: "Calculated heat-loss time constant."
     unit: "s"
+    reference:
+      origin: "matlab"
+      name: "params.tau_2"
+      label: "Time parameter 2: tau_2 (s)"
+      source: "parameters.m:71"
+      definition: "Calculated heat-loss time constant."
+      formula: "params.tau_2 = (c_p * m_solvent) / (k_loss * area_2);"
     kind: "derived"
     compute_from: "tau_2"
     expression: "(c_p * m_solvent) / (k_loss * area_2)"
@@ -960,9 +1567,16 @@ params:
 
   params.rho_solute:
     section: "Derived controller parameters"
-    label: "Mapped density params.rho_solute"
-    description: "Solute density mirrored into the controller params namespace."
+    label: "Solute density in params"
+    description: "Solute density copied into the controller model."
     unit: "kg/m^3"
+    reference:
+      origin: "matlab"
+      name: "params.rho_solute"
+      label: "Solute density (in params): params.rho_solute [kg/m^3]"
+      source: "parameters.m:51"
+      definition: "Solute density copied into the controller model."
+      formula: "params.rho_solute = rho_solute;"
     kind: "derived"
     compute_from: "rho_solute_map"
     expression: "params.rho_solute = rho_solute"
@@ -971,3 +1585,420 @@ params:
     publish_to: [controller]
     ui:
       visible: false
+
+  params.T_R:
+    section: "General"
+    label: "Room temperature"
+    description: "Ambient temperature used by the heat-loss model."
+    unit: "K"
+    reference:
+      origin: "matlab"
+      name: "params.T_R"
+      label: "Room temperature: params.T_R [-]"
+      source: "parameters.m:72; subroutines_controller/control/calc_T_j.m"
+      definition: "Ambient temperature used by the heat-loss model."
+      unit_note: "Uses [K] from parameters.m; the original GUI labels this [-]."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  min_num_adapt:
+    section: "General"
+    label: "Minimal points used for adaptation"
+    description: "Minimum valid samples required before fitting growth parameters."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "min_num_adapt"
+      label: "Minimal points used for adaption: min_num_adapt [-]"
+      source: "parameters.m:136; subroutines_controller/control/adapt_growth_parameters.m"
+      definition: "Adaptation waits until the selected history contains this many usable samples."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  max_num_adapt:
+    section: "General"
+    label: "Maximal points used for adaptation"
+    description: "Maximum recent valid samples included in each fit."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "max_num_adapt"
+      label: "Maximal points used for adaption: min_num_adapt [-]"
+      source: "parameters.m:137; subroutines_controller/control/adapt_growth_parameters.m"
+      definition: "Limits the fitting window to the latest usable adaptation samples."
+      note: "The original GUI label repeats min_num_adapt, but the bound parameter is max_num_adapt."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  min_count_adapt:
+    section: "General"
+    label: "Minimal counts to trigger adaptation"
+    description: "Legacy count threshold; currently unused by adaptation."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "min_count_adapt"
+      label: "Minimal counts to trigger adaption: min_count_adapt [-]"
+      source: "parameters.m:138; supersaturation_control.m:217"
+      definition: "In the standalone MATLAB controller, adaptation is permitted when count_middle exceeds this threshold."
+      note: "The current Python adaptation gate uses enablement and available growth measurements; it does not check min_count_adapt."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  q2_G_measure:
+    section: "General"
+    label: "Process noise for G array"
+    description: "Controls process uncertainty in the measured-growth filter."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "q2_G_measure"
+      label: "Process noise for G array: q2_G_measure [-]"
+      source: "parameters.m:139; subroutines_controller/control/create_EKF_general.m"
+      definition: "Scale of the general three-state filter process covariance."
+      formula: "Q_func = @(q2, dt) [dt^4/4, dt^3/2, dt^2/2; dt^3/2, dt^2, dt; dt^2/2, dt, 1] * q2;"
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  r_diag_G_measure:
+    section: "General"
+    label: "Measurement noise for G array"
+    description: "Three measurement-noise weights for the measured-growth filter."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "r_diag_G_measure"
+      label: "Diagonal array of measurement noise for G array: r_diag_G_measure [-]"
+      source: "parameters.m:140; subroutines_controller/control/create_EKF_general.m"
+      definition: "Three entries of the general three-state filter measurement covariance diagonal, in the original state order."
+      formula: "R = diag(r_diag_general);"
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  q2_n:
+    section: "General"
+    label: "Process noise for n array"
+    description: "Process-noise scale for the n filter; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "q2_n"
+      label: "Process noise for n array: q2_n [-]"
+      source: "parameters.m:142; subroutines_controller/control/create_EKF_general.m"
+      definition: "Scale of the general three-state filter process covariance."
+      formula: "Q_func = @(q2, dt) [dt^4/4, dt^3/2, dt^2/2; dt^3/2, dt^2, dt; dt^2/2, dt, 1] * q2;"
+      note: "The current Python controller initializes this parameter filter, but does not apply it to smooth fitted parameters."
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  r_diag_n:
+    section: "General"
+    label: "Measurement noise for n array"
+    description: "Measurement-noise weights for the n filter; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "r_diag_n"
+      label: "Diagonal array of measurement noise for n array: r_diag_n [-]"
+      source: "parameters.m:143; subroutines_controller/control/create_EKF_general.m"
+      definition: "Three entries of the general three-state filter measurement covariance diagonal, in the original state order."
+      formula: "R = diag(r_diag_general);"
+      note: "The current Python controller initializes this parameter filter, but does not apply it to smooth fitted parameters."
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  q2_k_0:
+    section: "General"
+    label: "Process noise for k_0 array"
+    description: "Process-noise scale for the k_0 filter; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "q2_k_0"
+      label: "Process noise for k_0 array: q2_k_0 [-]"
+      source: "parameters.m:144; subroutines_controller/control/create_EKF_general.m"
+      definition: "Scale of the general three-state filter process covariance."
+      formula: "Q_func = @(q2, dt) [dt^4/4, dt^3/2, dt^2/2; dt^3/2, dt^2, dt; dt^2/2, dt, 1] * q2;"
+      note: "The current Python controller initializes this parameter filter, but does not apply it to smooth fitted parameters."
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  r_diag_k_0:
+    section: "General"
+    label: "Measurement noise for k_0 array"
+    description: "Measurement-noise weights for the k_0 filter; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "r_diag_k_0"
+      label: "Diagonal array of measurement noise for k_0 array: r_diag_k_0 [-]"
+      source: "parameters.m:145; subroutines_controller/control/create_EKF_general.m"
+      definition: "Three entries of the general three-state filter measurement covariance diagonal, in the original state order."
+      formula: "R = diag(r_diag_general);"
+      note: "The current Python controller initializes this parameter filter, but does not apply it to smooth fitted parameters."
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  q2_E_A:
+    section: "General"
+    label: "Process noise for E_A array"
+    description: "Process-noise scale for the E_A filter; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "q2_E_A"
+      label: "Process noise for E_A array: q2_E_A [-]"
+      source: "parameters.m:146; subroutines_controller/control/create_EKF_general.m"
+      definition: "Scale of the general three-state filter process covariance."
+      formula: "Q_func = @(q2, dt) [dt^4/4, dt^3/2, dt^2/2; dt^3/2, dt^2, dt; dt^2/2, dt, 1] * q2;"
+      note: "The current Python controller initializes this parameter filter, but does not apply it to smooth fitted parameters."
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  r_diag_E_A:
+    section: "General"
+    label: "Measurement noise for E_A array"
+    description: "Measurement-noise weights for the E_A filter; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "r_diag_E_A"
+      label: "Diagonal array of measurement noise for E_A array: r_diag_E_A [-]"
+      source: "parameters.m:147; subroutines_controller/control/create_EKF_general.m"
+      definition: "Three entries of the general three-state filter measurement covariance diagonal, in the original state order."
+      formula: "R = diag(r_diag_general);"
+      note: "The current Python controller initializes this parameter filter, but does not apply it to smooth fitted parameters."
+      unit_note: "[-] preserves the original MATLAB GUI convention for filter settings."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  n_c2T:
+    section: "General"
+    label: "IR/controller time interval ratio"
+    description: "Legacy sampling-interval ratio; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "n_c2T"
+      label: "Time interval ratio between IR and controller: n_c2T [-]"
+      source: "parameters.m:127; gui_main/param_section.m:141"
+      definition: "Original ratio between IR concentration sampling and controller intervals."
+      note: "Retained in Python parameters; the current runtime does not use it to schedule sampling."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  m_seed:
+    section: "General"
+    label: "Seed mass"
+    description: "Total seed mass used to generate the simulated population."
+    unit: "kg"
+    reference:
+      origin: "matlab"
+      name: "m_seed"
+      label: "Seed mass: m_seed [-]"
+      source: "parameters.m:131; subroutines_controller/mass_balance/create_size_list.m"
+      definition: "Total seed mass used to generate the simulated population."
+      formula: "size_list_func = @(num) d_mean + d_std * randn(fix(num), 1);"
+      note: "Python uses the same normal size model, estimates population count from expected spherical mass, and clips nonpositive sizes. MATLAB searches the count using random populations."
+      unit_note: "Uses the physical unit from parameters.m; the original GUI labels this [-]."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  d_mean_seed:
+    section: "General"
+    label: "Mean value of seed size"
+    description: "Mean crystal diameter in the simulated seed population."
+    unit: "m"
+    reference:
+      origin: "matlab"
+      name: "d_mean_seed"
+      label: "Mean value of seed size: d_mean_seed [-]"
+      source: "parameters.m:132; subroutines_controller/mass_balance/create_size_list.m"
+      definition: "Mean crystal diameter in the simulated seed population."
+      formula: "size_list_func = @(num) d_mean + d_std * randn(fix(num), 1);"
+      note: "Python uses the same normal size model, estimates population count from expected spherical mass, and clips nonpositive sizes. MATLAB searches the count using random populations."
+      unit_note: "Uses the physical unit from parameters.m; the original GUI labels this [-]."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  d_std_seed:
+    section: "General"
+    label: "Standard deviation of seed size"
+    description: "Spread of crystal diameters in the simulated seed population."
+    unit: "m"
+    reference:
+      origin: "matlab"
+      name: "d_std_seed"
+      label: "Standard deviation of seed size: d_std_seed [-]"
+      source: "parameters.m:133; subroutines_controller/mass_balance/create_size_list.m"
+      definition: "Spread of crystal diameters in the simulated seed population."
+      formula: "size_list_func = @(num) d_mean + d_std * randn(fix(num), 1);"
+      note: "Python uses the same normal size model, estimates population count from expected spherical mass, and clips nonpositive sizes. MATLAB searches the count using random populations."
+      unit_note: "Uses the physical unit from parameters.m; the original GUI labels this [-]."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  t_base:
+    section: "General"
+    label: "Time base"
+    description: "Legacy plot time divisor; currently unused."
+    unit: "s"
+    reference:
+      origin: "matlab"
+      name: "t_base"
+      label: "Time base: t_base [s]"
+      source: "parameters.m:114; subroutines_controller/utils/plot_lines.m"
+      definition: "Original MATLAB plots divide elapsed seconds by this base (60 displays minutes)."
+      note: "Python retains this setting; current web dashboards do not consume it."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  t_string:
+    section: "General"
+    label: "Time unit string"
+    description: "Legacy plot time label; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "t_string"
+      label: "Time unit string: t_string [-]"
+      source: "parameters.m:115"
+      definition: "Time-axis unit label in the original MATLAB display."
+      note: "Python retains this setting; current web dashboards do not consume it."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  C2K:
+    section: "General"
+    label: "Celsius to Kelvin conversion"
+    description: "Legacy offset to add when converting Celsius to kelvin."
+    unit: "K"
+    reference:
+      origin: "matlab"
+      name: "C2K"
+      label: "Celsius to Kelvin conversion: C2K [K]"
+      source: "parameters.m:24"
+      definition: "Legacy offset to add when converting Celsius to kelvin."
+      formula: "C2K = 273.15;"
+      note: "Retained for MATLAB compatibility; Python device adapters use their own temperature conversion and do not read this setting."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  K2C:
+    section: "General"
+    label: "Kelvin to Celsius conversion"
+    description: "Legacy offset to add when converting kelvin to Celsius."
+    unit: "K"
+    reference:
+      origin: "matlab"
+      name: "K2C"
+      label: "Kevin to Celsius conversion: K2C [K]"
+      source: "parameters.m:25"
+      definition: "Legacy offset to add when converting kelvin to Celsius."
+      formula: "K2C = -C2K;"
+      note: "Retained for MATLAB compatibility; Python device adapters use their own temperature conversion and do not read this setting."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  delta_e_target_sigma_threshold:
+    section: "General"
+    label: "Target display tolerance (sigma)"
+    description: "Legacy target-display tolerance; currently unused."
+    unit: "-"
+    reference:
+      origin: "matlab"
+      name: "delta_e_target_sigma_threshold"
+      source: "parameters.m:104; subroutines_controller/utils/initialize_plots.m; subroutines_controller/utils/add_points.m"
+      definition: "Original MATLAB tolerance for target-display error checks and target-centred plot limits. It does not tune the controller."
+      note: "The current Python controller and web dashboard do not consume this display setting."
+      unit_note: "Unit inferred from the corresponding relative-supersaturation or growth-rate target."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true
+
+  delta_e_target_G_threshold:
+    section: "General"
+    label: "Target display tolerance (G)"
+    description: "Legacy target-display tolerance; currently unused."
+    unit: "m/s"
+    reference:
+      origin: "matlab"
+      name: "delta_e_target_G_threshold"
+      source: "parameters.m:105; subroutines_controller/utils/initialize_plots.m; subroutines_controller/utils/add_points.m"
+      definition: "Original MATLAB tolerance for target-display error checks and target-centred plot limits. It does not tune the controller."
+      note: "The current Python controller and web dashboard do not consume this display setting."
+      unit_note: "Unit inferred from the corresponding relative-supersaturation or growth-rate target."
+    kind: "basic"
+    derived: false
+    publish_to: [controller]
+    ui:
+      visible: true

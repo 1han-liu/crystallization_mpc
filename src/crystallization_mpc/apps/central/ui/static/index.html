@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260917-gsensor-activation-1">
+    <link rel="stylesheet" href="/static/styles.css?v=20261001-parameter-details-1">
   </head>
   <body>
     <div class="shell">
@@ -21,8 +21,7 @@
           <div class="panel drawer-panel">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Parameter Drawer</p>
-                <h3>YAML-backed Values</h3>
+                <h3>Parameters</h3>
               </div>
               <div class="hero-actions">
                 <button id="reset-params" class="ghost" type="button">Reset to Defaults</button>
@@ -33,6 +32,7 @@
             <div id="parameter-status" class="parameter-status loading" role="status" aria-live="polite">
               <span id="parameter-status-text">Loading parameters…</span>
             </div>
+            <p id="parameter-source" class="parameter-source"></p>
 
             <section class="drawer-section">
               <div class="panel-head">
@@ -369,22 +369,34 @@
     </div>
 
     <template id="param-field-template">
-      <div class="field">
-        <div class="field-heading">
-          <span class="field-key"></span>
-          <div class="field-actions">
-            <span class="field-modified" hidden>Modified</span>
-            <button class="field-reset ghost" type="button" hidden>Reset</button>
+      <div class="field parameter-field">
+        <div class="field-main">
+          <div class="field-heading">
+            <label class="field-key"></label>
+            <button class="field-info" type="button" aria-expanded="false">ⓘ</button>
+          </div>
+          <div class="field-value">
+            <input class="field-input" type="text">
+            <span class="field-unit"></span>
           </div>
         </div>
-        <div class="field-badges"></div>
         <p class="field-description"></p>
-        <p class="field-expression"></p>
-        <p class="field-depends"></p>
-        <textarea rows="1" class="field-input"></textarea>
+        <div class="field-state" hidden>
+          <span class="field-unsaved" hidden>Unsaved</span>
+          <span class="field-modified" hidden>Non-default</span>
+        </div>
+        <div class="field-details" hidden>
+          <p class="field-definition"></p>
+          <dl class="field-reference"></dl>
+          <p class="field-formula-label" hidden></p>
+          <pre class="field-formula" hidden></pre>
+          <p class="field-unit-note" hidden></p>
+          <p class="field-note" hidden></p>
+          <button class="field-reset ghost" type="button" hidden>Restore default</button>
+        </div>
       </div>
     </template>
 
-    <script src="/static/app.js?v=20260917-gsensor-activation-1"></script>
+    <script src="/static/app.js?v=20261001-parameter-details-1"></script>
   </body>
 </html>

@@ -652,15 +652,123 @@ function valuesEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function valuesMatchDefault(value, defaultValue, meta = {}) {
+  if (valuesEqual(value, defaultValue)) return true;
+  // Presentation only: a documented legacy rounding difference must never
+  // change the saved value or the strict comparison used for unsaved edits.
+  const comparison = meta.ui?.default_comparison;
+  if (!comparison || typeof value !== "number" || typeof defaultValue !== "number"
+      || !Number.isFinite(value) || !Number.isFinite(defaultValue)) return false;
+  const rtol = Number.isFinite(comparison.rtol) && comparison.rtol >= 0 ? comparison.rtol : 0;
+  const atol = Number.isFinite(comparison.atol) && comparison.atol >= 0 ? comparison.atol : 0;
+  return Math.abs(value - defaultValue) <= Math.max(atol, rtol * Math.abs(defaultValue));
+}
+
+function createParameterInput(value, meta = {}) {
+  let input;
+  if ((Array.isArray(meta.choices) && meta.choices.length > 0) || typeof value === "boolean") {
+    input = document.createElement("select");
+    const choices = typeof value === "boolean" ? [true, false] : meta.choices;
+    choices.forEach((choice) => {
+      const option = document.createElement("option");
+      option.value = String(choice);
+      option.textContent = String(choice);
+      input.appendChild(option);
+    });
+  } else if (value !== null && typeof value === "object") {
+    input = document.createElement("textarea");
+    input.rows = 2;
+  } else {
+    input = document.createElement("input");
+    input.type = typeof value === "number" ? "number" : "text";
+    if (input.type === "number") input.step = "any";
+  }
+  input.className = "field-input";
+  input.dataset.valueType = typeof value;
+  input.value = formatFieldValue(value);
+  return input;
+}
+
+function readParameterInput(input) {
+  if (input.dataset.valueType === "string") return input.value;
+  if (input.dataset.valueType === "number") {
+    const raw = input.value.trim();
+    if (raw === "") return null;
+    // Native number fields also accept .5 and 01, which are not JSON numbers.
+    if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw)) {
+      const number = Number(raw);
+      if (Number.isFinite(number)) return number;
+    }
+    return raw;
+  }
+  return parseFieldValue(input.value);
+}
+
+function renderParameterDetails(field, key, meta, defaultValue) {
+  const reference = meta.reference || {};
+  field.querySelector(".field-definition").textContent = reference.definition || meta.description || "";
+  const list = field.querySelector(".field-reference");
+  const addDetail = (name, value) => {
+    if (value === undefined || value === null || value === "") return;
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = name;
+    detail.textContent = String(value);
+    list.appendChild(term);
+    list.appendChild(detail);
+  };
+  if (reference.origin === "matlab") {
+    addDetail("MATLAB variable", reference.name || key);
+    addDetail("Original MATLAB label", reference.label);
+  } else {
+    addDetail("Parameter", reference.name || key);
+  }
+  if (reference.name && reference.name !== key) addDetail("Saved key", key);
+  addDetail("Unit", meta.unit === "-" ? "Dimensionless (−)" : meta.unit);
+  addDetail("Default", formatFieldValue(defaultValue));
+  addDetail(reference.origin === "matlab" ? "MATLAB source" : "Project source", reference.source);
+  addDetail("Sent to", Array.isArray(meta.publish_to) ? meta.publish_to.join(", ") : null);
+  addDetail("Depends on", Array.isArray(meta.depends_on) ? meta.depends_on.join(", ") : null);
+  const formula = reference.formula || meta.expression;
+  const formulaLabel = field.querySelector(".field-formula-label");
+  const formulaContent = field.querySelector(".field-formula");
+  formulaLabel.textContent = reference.origin === "matlab" && reference.formula
+    ? "MATLAB expression" : "Expression";
+  formulaLabel.hidden = !formula;
+  formulaContent.textContent = formula || "";
+  formulaContent.hidden = !formula;
+  for (const [selector, content] of [[".field-note", reference.note], [".field-unit-note", reference.unit_note]]) {
+    const element = field.querySelector(selector);
+    element.textContent = content || "";
+    element.hidden = !content;
+  }
+}
+
+function renderParameterFieldState(field, value, savedValue, defaultValue, meta) {
+  const unsaved = !valuesEqual(value, savedValue);
+  const nonDefault = !valuesMatchDefault(value, defaultValue, meta);
+  const differsExactly = !valuesEqual(value, defaultValue);
+  field.classList.toggle("unsaved", unsaved);
+  field.classList.toggle("modified", nonDefault);
+  field.querySelector(".field-unsaved").hidden = !unsaved;
+  field.querySelector(".field-modified").hidden = !nonDefault || unsaved;
+  field.querySelector(".field-state").hidden = !unsaved && !nonDefault;
+  field.querySelector(".field-reset").hidden = !differsExactly;
+  return { unsaved, differsExactly };
+}
+
 function formatParameterTime(value) {
   if (!value) {
     return null;
   }
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString();
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
 function renderForm(form, params, sectionName) {
+  // Saving remains an explicit action; Enter in a single-line field must not
+  // navigate away from the current parameter draft.
+  form.onsubmit = (event) => event.preventDefault();
   form.innerHTML = "";
   const entries = Object.entries(params)
     .map(([key, value], index) => ({ key, value, index, meta: state.paramMeta[key] || {} }))
@@ -702,58 +810,47 @@ function renderForm(form, params, sectionName) {
     group.items.forEach(({ key, value, meta }) => {
       const field = fieldTemplate.content.firstElementChild.cloneNode(true);
       const label = field.querySelector(".field-key");
-      const badges = field.querySelector(".field-badges");
       const description = field.querySelector(".field-description");
-      const expression = field.querySelector(".field-expression");
-      const depends = field.querySelector(".field-depends");
-      let input = field.querySelector(".field-input");
-      const modifiedBadge = field.querySelector(".field-modified");
+      const info = field.querySelector(".field-info");
+      const details = field.querySelector(".field-details");
       const resetButton = field.querySelector(".field-reset");
       const defaultValue = state.params?.defaults?.[sectionName]?.[key];
+      const input = createParameterInput(value, meta);
+      field.querySelector(".field-input").replaceWith(input);
 
       label.textContent = meta.label || key;
       description.textContent = meta.description || "";
       description.classList.toggle("is-empty", !meta.description);
-
-      expression.textContent = meta.expression ? `Expression: ${meta.expression}` : "";
-      expression.classList.toggle("is-empty", !meta.expression);
-
-      depends.textContent = Array.isArray(meta.depends_on) && meta.depends_on.length > 0
-        ? `Depends on: ${meta.depends_on.join(", ")}`
-        : "";
-      depends.classList.toggle("is-empty", !(Array.isArray(meta.depends_on) && meta.depends_on.length > 0));
-
-      const badgeItems = [];
-      if (meta.unit) {
-        badgeItems.push(`unit: ${meta.unit}`);
-      }
-      if (meta.kind) {
-        badgeItems.push(meta.kind);
-      } else if (meta.derived) {
-        badgeItems.push("derived");
-      }
-      if (Array.isArray(meta.publish_to) && meta.publish_to.length > 0) {
-        badgeItems.push(`publish: ${meta.publish_to.join(", ")}`);
-      }
-      badges.innerHTML = badgeItems.map((item) => `<span class="field-badge">${item}</span>`).join("");
-      badges.classList.toggle("is-empty", badgeItems.length === 0);
-
-      if (Array.isArray(meta.choices) && meta.choices.length > 0) {
-        const select = document.createElement("select");
-        select.className = input.className;
-        meta.choices.forEach((choice) => {
-          const option = document.createElement("option");
-          option.value = choice;
-          option.textContent = choice;
-          select.appendChild(option);
-        });
-        input.replaceWith(select);
-        input = select;
-      }
+      const unit = field.querySelector(".field-unit");
+      unit.textContent = meta.unit === "-" ? "−" : meta.unit || "";
+      unit.setAttribute("aria-label", meta.unit === "-" ? "Dimensionless" : meta.unit || "No physical unit");
+      unit.hidden = !meta.unit;
+      const fieldId = `parameter-${sectionName}-${encodeURIComponent(key)}`;
+      input.id = fieldId;
+      label.setAttribute("for", fieldId);
+      description.id = `${fieldId}-description`;
+      unit.id = `${fieldId}-unit`;
+      input.setAttribute("aria-describedby", `${description.id} ${unit.id}`);
+      details.id = `${fieldId}-details`;
+      info.setAttribute("aria-label", `Details for ${meta.label || key}`);
+      info.setAttribute("aria-controls", details.id);
+      const setDetailsOpen = (open) => {
+        details.hidden = !open;
+        info.setAttribute("aria-expanded", String(open));
+      };
+      info.addEventListener("click", () => setDetailsOpen(details.hidden));
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !details.hidden) {
+          setDetailsOpen(false);
+          info.focus();
+          event.stopPropagation();
+        }
+      });
+      field.classList.toggle("field-wide", input.tagName === "TEXTAREA" || typeof value === "string");
+      renderParameterDetails(field, key, meta, defaultValue);
       input.dataset.key = key;
       input.dataset.section = sectionName;
       input.setAttribute("aria-label", meta.label || key);
-      input.value = formatFieldValue(value);
       input.addEventListener("input", () => {
         state.parameterError = null;
         updateParameterDraftState();
@@ -764,10 +861,7 @@ function renderForm(form, params, sectionName) {
         updateParameterDraftState();
         input.focus();
       });
-      const modified = !valuesEqual(value, defaultValue);
-      field.classList.toggle("modified", modified);
-      modifiedBadge.hidden = !modified;
-      resetButton.hidden = !modified;
+      renderParameterFieldState(field, value, value, defaultValue, meta);
       wrapper.appendChild(field);
     });
 
@@ -778,7 +872,7 @@ function renderForm(form, params, sectionName) {
 function collectForm(form) {
   const data = {};
   form.querySelectorAll(".field-input").forEach((input) => {
-    data[input.dataset.key] = parseFieldValue(input.value);
+    data[input.dataset.key] = readParameterInput(input);
   });
   return data;
 }
@@ -874,22 +968,15 @@ function updateParameterDraftState() {
   document.querySelectorAll(".field-input").forEach((input) => {
     const section = input.dataset.section;
     const key = input.dataset.key;
-    const value = parseFieldValue(input.value);
+    const value = readParameterInput(input);
     const savedValue = state.params?.[section]?.[key];
     const defaultValue = state.params?.defaults?.[section]?.[key];
     input.disabled = state.parameterActionInFlight || locked;
-    if (!valuesEqual(value, savedValue)) {
-      unsavedCount += 1;
-    }
-    const modified = !valuesEqual(value, defaultValue);
-    if (modified) {
-      modifiedCount += 1;
-    }
     const field = input.closest(".field");
-    field.classList.toggle("modified", modified);
-    field.querySelector(".field-modified").hidden = !modified;
+    const fieldState = renderParameterFieldState(field, value, savedValue, defaultValue, state.paramMeta[key]);
+    if (fieldState.unsaved) unsavedCount += 1;
+    if (fieldState.differsExactly) modifiedCount += 1;
     const fieldReset = field.querySelector(".field-reset");
-    fieldReset.hidden = !modified;
     fieldReset.disabled = state.parameterActionInFlight || locked;
   });
 
@@ -924,6 +1011,13 @@ function renderParameterStatus(unsavedCount = 0) {
 
   parameterStatus.className = `parameter-status ${kind}`;
   parameterStatusText.textContent = message;
+  const source = document.getElementById("parameter-source");
+  if (source) {
+    const savedTime = formatParameterTime(state.params?.status?.saved_at);
+    source.textContent = savedTime
+      ? `Source: saved parameter set · ${savedTime}. Reopening or creating an experiment keeps this set.`
+      : "Source: project defaults. Saving keeps your settings for the next experiment.";
+  }
 }
 
 function formatExperimentTime(value) {
