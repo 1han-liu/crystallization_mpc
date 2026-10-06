@@ -26,6 +26,17 @@ config/rabbitmq.env
 matlab_source_local/
 references_local/
 
+# Local editor settings
+/.vscode/
+
+# Historical parameter analysis notes retained locally for reference
+/controller_and_gsensor_param.json
+/param_controller.json
+/param_gsensor.json
+/params_usage.json
+/与切换G_sigma无关的derived和涉及计算.json
+/切换sigma_G的target.json
+
 # Local Gsensor Hough/DSCGR comparison outputs
 /dscgr_runs*/
 
