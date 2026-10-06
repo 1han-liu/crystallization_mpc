@@ -20,12 +20,9 @@ from pydantic import BaseModel, Field
 
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.params import (
-    ParameterValidationError,
     load_param_meta,
     load_params,
     load_runtime_params,
-    save_params_document,
-    validate_params_section,
 )
 from crystallization_mpc.apps.gsensor.alignment import (
     alignment_capabilities,
@@ -124,11 +121,6 @@ def _serialize_initial_line(uv_struct: Any) -> Dict[str, Any]:
         "rho": float(uv_struct.rho_0),
         "is_opposite": bool(uv_struct.is_opposite),
     }
-
-
-class GsensorParamsUpdate(BaseModel):
-    version: int = 1
-    params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class InitializationSessionRequest(BaseModel):
@@ -2332,109 +2324,6 @@ class GsensorService:
     def ui_config(self) -> Dict[str, str | bool]:
         return ui_mode_payload(self.ui_mode)
 
-    def default_params_payload(self) -> Dict[str, Any]:
-        shared, gsensor, _controller, version = load_params(str(self.default_params_path))
-        return {
-            "version": version,
-            "params": {**shared, **gsensor},
-            "defaults": {
-                "version": version,
-                "params": {**shared, **gsensor},
-            },
-            "meta": self.load_param_meta(),
-            "source_file": str(self.default_params_path),
-            "runtime_file": str(self.params_path),
-        }
-
-    def apply_ui_params(self, params: Dict[str, Any], version: int = 1) -> Dict[str, Any]:
-        with self._lock:
-            if self._experiment_in_progress_locked():
-                raise ValueError(
-                    "Parameters are locked while an experiment is running. "
-                    "Stop the experiment before editing them."
-                )
-        shared, gsensor, controller, current_version = self._load_persisted_params()
-        if int(version) != current_version:
-            raise ParameterValidationError(
-                "The Gsensor parameter draft changed on the server. Reload it before saving."
-            )
-        default_shared, default_gsensor, _default_controller, _default_version = load_params(
-            str(self.default_params_path)
-        )
-        meta = self.load_param_meta()
-        expected_keys = set(default_shared) | set(default_gsensor)
-        unknown = sorted(set(params) - expected_keys)
-        if unknown:
-            raise ParameterValidationError(
-                f"Unknown Gsensor parameter(s): {', '.join(unknown)}."
-            )
-        submitted_shared = {**default_shared, **shared}
-        submitted_shared.update({key: params[key] for key in default_shared if key in params})
-        submitted_gsensor = {**default_gsensor, **gsensor}
-        submitted_gsensor.update({key: params[key] for key in default_gsensor if key in params})
-        next_shared = validate_params_section(
-            "shared", submitted_shared, default_shared, meta
-        )
-        next_gsensor = validate_params_section(
-            "gsensor", submitted_gsensor, default_gsensor, meta
-        )
-        changed = (next_shared, next_gsensor) != (shared, gsensor)
-        next_version = current_version + 1 if changed else current_version
-        if changed:
-            save_params_document(
-                str(self.params_path),
-                version=next_version,
-                shared=next_shared,
-                gsensor=next_gsensor,
-                controller=controller,
-            )
-
-        with self._lock:
-            self.params.update(next_shared)
-            self.params.update(next_gsensor)
-
-        result = self.params_payload()
-        result["saved"] = True
-        result["changed"] = changed
-        return result
-
-    def reset_ui_params_to_default(self) -> Dict[str, Any]:
-        with self._lock:
-            if self._experiment_in_progress_locked():
-                raise ValueError(
-                    "Parameters are locked while an experiment is running. "
-                    "Stop the experiment before resetting them."
-                )
-        default_shared, default_gsensor, _default_controller, default_version = load_params(
-            str(self.default_params_path)
-        )
-        shared, gsensor, controller, current_version = self._load_persisted_params()
-        defaults = {**default_shared, **default_gsensor}
-        changed = defaults != {**shared, **gsensor}
-        next_version = current_version + 1 if changed else current_version
-        if changed:
-            save_params_document(
-                str(self.params_path),
-                version=next_version,
-                shared=default_shared,
-                gsensor=default_gsensor,
-                controller=controller,
-            )
-
-        with self._lock:
-            self.params = {
-                key: value
-                for key, value in self.params.items()
-                if key not in default_shared and key not in default_gsensor
-            }
-            self.params.update(default_shared)
-            self.params.update(default_gsensor)
-
-        result = self.params_payload()
-        result["saved"] = True
-        result["changed"] = changed
-        return result
-
     def _ui_parameter_status(
         self,
         *,
@@ -3294,22 +3183,6 @@ def get_alignment_capabilities() -> Dict[str, Any]:
     return {"methods": [item.to_dict() for item in alignment_capabilities()]}
 
 
-@web_app.post("/api/params")
-def update_params(payload: GsensorParamsUpdate) -> Dict[str, Any]:
-    try:
-        return service.apply_ui_params(payload.params, payload.version)
-    except Exception as exc:
-        _raise_http_error(exc)
-
-
-@web_app.post("/api/params/reset")
-def reset_params() -> Dict[str, Any]:
-    try:
-        return service.reset_ui_params_to_default()
-    except Exception as exc:
-        _raise_http_error(exc)
-
-
 def _raise_http_error(exc: Exception) -> None:
     if isinstance(exc, ExperimentNotSelectedError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3457,7 +3330,6 @@ def run_dscgr(payload: DscgrRunRequest) -> Dict[str, Any]:
 
 
 __all__ = [
-    "GsensorParamsUpdate",
     "GsensorService",
     "DscgrRunRequest",
     "Initialization3DChoiceRequest",

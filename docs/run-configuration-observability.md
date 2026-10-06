@@ -39,8 +39,10 @@ algorithm state; neither fitting formulas nor numerical strategy were changed.
 
 Version-1 JSON journals `.controller_runtime_history.json` and
 `.central_runtime_history.json` live under each service's experiment root. Each
-service owns its file (single Central process). Atomic replacement and fsync
-protect persisted entries. `(run_id,event_id)` identifies an operation; retry
+service owns its file (single Central process). Writes flush and fsync the file
+before atomic replacement. Platforms with `os.O_DIRECTORY` also fsync the parent
+directory; native Windows skips that unsupported directory operation.
+`(run_id,event_id)` identifies an operation; retry
 updates one record. A new event cannot reuse that identity with different data.
 Pending, timeout and rejected submissions are retained. Central-side revision
 rejections are labelled as Central decisions, never Controller applications.
@@ -66,11 +68,18 @@ event tags and exact timestamp make retries idempotent. Network failures retain
 pending/failed state for retry, and the UI labels Grafana synchronization as
 incomplete. An InfluxDB outage does not stop the Controller algorithm clock.
 
-`CENTRAL_RUNTIME_INFLUX_ENABLED` defaults to `CONTROLLER_INFLUX_ENABLED`. It uses
-the existing `CONTROLLER_INFLUX_URL/TOKEN/ORG/BUCKET` settings. Disabled or missing
-configuration is not displayed as successful synchronization. Never put tokens
-in Git or browser responses. The normal fresh-simulation launcher already passes
-the whitelisted local telemetry settings to both services.
+`CENTRAL_RUNTIME_INFLUX_ENABLED` defaults to `CONTROLLER_INFLUX_ENABLED`. Compose
+enables both by default and loads Central's credentials from the same
+`config/influxdb.env` as Controller and Grafana. Nonempty
+`CONTROLLER_INFLUX_URL/TOKEN/ORG/BUCKET` settings take precedence over their
+`INFLUX_URL/TOKEN/ORG/BUCKET` counterparts. URL, organization and bucket defaults
+match Controller (`http://influxdb:8086`, `lab`, `process`); a token is required.
+Set `CENTRAL_RUNTIME_INFLUX_ENABLED=false` to disable only event export.
+For native Windows, supply these environment variables through the launcher,
+using `http://localhost:8087` for the locally published InfluxDB port. Disabled or
+missing configuration is not displayed as successful synchronization. Never put
+tokens in Git or browser responses. The normal fresh-simulation launcher already
+passes the whitelisted local telemetry settings to both services.
 
 The annotation template is `grafana/runtime-configuration-annotation.json`.
 It is deliberately outside the live provisioning mount: implementation must not

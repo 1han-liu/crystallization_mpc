@@ -139,11 +139,6 @@ textarea {
   color: var(--muted);
 }
 
-.drawer-panel .field-badge {
-  background: #f3f3f3;
-  color: var(--muted);
-}
-
 .drawer-section {
   margin-top: 20px;
 }
@@ -516,20 +511,9 @@ textarea:disabled {
   border-color: #b99128;
 }
 
-.field.compact {
-  min-width: 180px;
-  margin-bottom: 0;
-}
-
 .field span {
   font-size: 0.9rem;
   color: var(--muted);
-}
-
-.field-badges {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
 }
 
 .field-description {
@@ -539,30 +523,8 @@ textarea:disabled {
   color: var(--muted);
 }
 
-.field-expression,
-.field-depends {
-  margin: -2px 0 2px;
-  font-size: 0.8rem;
-  line-height: 1.35;
-  color: var(--muted);
-}
-
-.field-description.is-empty,
-.field-expression.is-empty,
-.field-depends.is-empty,
-.field-badges.is-empty {
+.field-description.is-empty {
   display: none;
-}
-
-.field-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 4px 8px;
-  font-size: 0.72rem;
-  line-height: 1;
-  background: #f3f3f3;
-  color: var(--muted);
 }
 
 .field textarea,

@@ -2,9 +2,28 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 
+from crystallization_mpc.infra.influxdb.client import InfluxSettings
+
 RUNTIME_EVENT_MEASUREMENT = "controller_runtime_event"
+
+
+def load_runtime_influx_settings() -> InfluxSettings:
+    # Match Controller's destination and credential precedence, using only the
+    # process environment supplied by Compose or the native service launcher.
+    values = {
+        key.lower(): (os.getenv(f"CONTROLLER_INFLUX_{key}", "").strip()
+                      or os.getenv(f"INFLUX_{key}", default).strip())
+        for key, default in {
+            "URL": "http://influxdb:8086", "TOKEN": "",
+            "ORG": "lab", "BUCKET": "process",
+        }.items()
+    }
+    if not values["token"]:
+        raise RuntimeError("INFLUX_TOKEN or CONTROLLER_INFLUX_TOKEN is required.")
+    return InfluxSettings(**values)
 
 
 def write_runtime_event(writer, entry):

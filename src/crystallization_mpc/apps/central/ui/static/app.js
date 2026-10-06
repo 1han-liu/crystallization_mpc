@@ -852,10 +852,12 @@ function renderForm(form, params, sectionName) {
       input.dataset.section = sectionName;
       input.setAttribute("aria-label", meta.label || key);
       input.addEventListener("input", () => {
+        state.parameterRequestId += 1;
         state.parameterError = null;
         updateParameterDraftState();
       });
       resetButton.addEventListener("click", () => {
+        state.parameterRequestId += 1;
         input.value = formatFieldValue(defaultValue);
         state.parameterError = null;
         updateParameterDraftState();
@@ -920,7 +922,14 @@ async function fetchJson(url, options = {}) {
 
 async function loadParams() {
   const requestId = ++state.parameterRequestId;
-  const payload = await fetchJson("/api/params");
+  let payload;
+  try {
+    payload = await fetchJson("/api/params");
+  } catch (error) {
+    // A newer read, local edit, or explicit action supersedes this request.
+    if (requestId !== state.parameterRequestId) return;
+    throw error;
+  }
   if (requestId !== state.parameterRequestId) return;
   state.params = payload;
   state.paramMeta = state.params.meta || {};
@@ -1351,25 +1360,6 @@ function renderExperiments() {
   state.lastRenderedExperimentStatus = status;
   renderRunConfiguration();
   renderGsensorActivation();
-}
-
-async function loadExperiments() {
-  const requestId = ++state.experimentRequestId;
-  const payload = await fetchJson("/api/experiments");
-  if (requestId !== state.experimentRequestId) return;
-  if (state.currentRunId !== (payload.current_run_id || null)) {
-    state.systemStatusFresh = false;
-    state.gsensorActivationRequestId += 1;
-    state.gsensorActivationInFlight = false;
-    state.gsensorActivationCommand = null;
-    state.gsensorActivationError = "";
-    state.gsensorActivationErrorSource = null;
-    state.gsensorActivation = null;
-  }
-  state.experiments = payload.experiments || [];
-  state.currentRunId = payload.current_run_id || null;
-  renderExperiments();
-  updateParameterDraftState();
 }
 
 function updateCentralOverlay(runId, frameSeq, { final = false, force = false } = {}) {

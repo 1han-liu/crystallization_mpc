@@ -52,77 +52,11 @@ def build_tagged_point(
     return point
 
 
-def build_point(
-    fields: dict[str, Any],
-    *,
-    source: str = "test_sine",
-    run_id: str = "test_sigma_001",
-    mode: str = "test",
-    target: str = "sigma",
-    measurement: str = SIGMA_MEASUREMENT,
-    timestamp: datetime | None = None,
-) -> Any:
-    return build_tagged_point(
-        fields,
-        tags={
-            "source": source,
-            "run_id": run_id,
-            "mode": mode,
-            "target": target,
-        },
-        measurement=measurement,
-        timestamp=timestamp,
-    )
-
-
-def build_sigma_point(
-    sigma: float,
-    *,
-    source: str = "test_sine",
-    run_id: str = "test_sigma_001",
-    mode: str = "test",
-    target: str = "sigma",
-    measurement: str = SIGMA_MEASUREMENT,
-    timestamp: datetime | None = None,
-) -> Any:
-    return build_point(
-        {"sigma": sigma},
-        source=source,
-        run_id=run_id,
-        mode=mode,
-        target=target,
-        measurement=measurement,
-        timestamp=timestamp,
-    )
-
-
 class InfluxWriter:
     def __init__(self, settings: InfluxSettings | None = None) -> None:
         self.settings = settings or load_influx_settings()
         self.client = create_influx_client(self.settings)
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
-
-    def write_fields(
-        self,
-        fields: dict[str, Any],
-        *,
-        source: str = "test_sine",
-        run_id: str = "test_sigma_001",
-        mode: str = "test",
-        target: str = "sigma",
-        measurement: str = SIGMA_MEASUREMENT,
-        timestamp: datetime | None = None,
-    ) -> None:
-        point = build_point(
-            fields,
-            source=source,
-            run_id=run_id,
-            mode=mode,
-            target=target,
-            measurement=measurement,
-            timestamp=timestamp,
-        )
-        self.write_api.write(bucket=self.settings.bucket, record=point)
 
     def write_tagged_fields(
         self,
@@ -140,27 +74,6 @@ class InfluxWriter:
         )
         self.write_api.write(bucket=self.settings.bucket, record=point)
 
-    def write_sigma(
-        self,
-        sigma: float,
-        *,
-        source: str = "test_sine",
-        run_id: str = "test_sigma_001",
-        mode: str = "test",
-        target: str = "sigma",
-        measurement: str = SIGMA_MEASUREMENT,
-        timestamp: datetime | None = None,
-    ) -> None:
-        self.write_fields(
-            {"sigma": sigma},
-            source=source,
-            run_id=run_id,
-            mode=mode,
-            target=target,
-            measurement=measurement,
-            timestamp=timestamp,
-        )
-
     def close(self) -> None:
         self.client.close()
 
@@ -171,33 +84,8 @@ class InfluxWriter:
         self.close()
 
 
-def write_sigma(
-    sigma: float,
-    *,
-    source: str = "test_sine",
-    run_id: str = "test_sigma_001",
-    mode: str = "test",
-    target: str = "sigma",
-    measurement: str = SIGMA_MEASUREMENT,
-    timestamp: datetime | None = None,
-) -> None:
-    with InfluxWriter() as writer:
-        writer.write_sigma(
-            sigma,
-            source=source,
-            run_id=run_id,
-            mode=mode,
-            target=target,
-            measurement=measurement,
-            timestamp=timestamp,
-        )
-
-
 __all__ = [
     "InfluxWriter",
     "SIGMA_MEASUREMENT",
-    "build_point",
-    "build_sigma_point",
     "build_tagged_point",
-    "write_sigma",
 ]

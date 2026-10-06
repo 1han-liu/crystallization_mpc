@@ -35,11 +35,15 @@ class RuntimeHistory:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            # Windows has no O_DIRECTORY; file fsync and atomic replacement
+            # still apply. Preserve directory durability where supported.
+            directory_flag = getattr(os, "O_DIRECTORY", None)
+            if directory_flag is not None:
+                directory = os.open(self.path.parent, os.O_RDONLY | directory_flag)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
         finally:
             temporary.unlink(missing_ok=True)
 

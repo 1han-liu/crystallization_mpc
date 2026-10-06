@@ -9,6 +9,8 @@ services:
     command: ["uvicorn", "crystallization_mpc.apps.central.ui.app:web_app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
+    env_file:
+      - config/influxdb.env
     environment:
       - UI_MODE=${UI_MODE:-production}
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
@@ -16,6 +18,8 @@ services:
       - RABBIT_QUEUE=central.in
       - RABBIT_HEARTBEAT_SEC=0
       - CONTROLLER_STATUS_URL=http://controller:8002/api/status
+      - CENTRAL_RUNTIME_INFLUX_ENABLED=${CENTRAL_RUNTIME_INFLUX_ENABLED:-${CONTROLLER_INFLUX_ENABLED:-true}}
+      - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
       - PARAMS_DEFAULT_FILE=/app/params_default.yaml
       - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
       - PARAM_META_FILE=/app/param_meta.yaml
@@ -30,6 +34,7 @@ services:
     depends_on:
       - rabbitmq
       - controller
+      - influxdb
     restart: unless-stopped
 
   gsensor:

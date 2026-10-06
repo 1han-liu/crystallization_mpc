@@ -650,8 +650,7 @@ class CentralService:
                 "grafana_error": self.runtime_export_error}
 
     def _runtime_monitor(self):
-        from crystallization_mpc.apps.central.runtime_telemetry import export_pending
-        from crystallization_mpc.infra.influxdb.client import InfluxSettings
+        from crystallization_mpc.apps.central.runtime_telemetry import export_pending, load_runtime_influx_settings
         from crystallization_mpc.infra.influxdb.write import InfluxWriter
         writer = None
         try:
@@ -665,9 +664,7 @@ class CentralService:
                             self.runtime_request_store.observe(run["run_id"], controller)
                     if self.runtime_export_enabled:
                         if writer is None:
-                            writer = InfluxWriter(InfluxSettings(
-                                url=os.environ["CONTROLLER_INFLUX_URL"], token=os.environ["CONTROLLER_INFLUX_TOKEN"],
-                                org=os.environ["CONTROLLER_INFLUX_ORG"], bucket=os.environ["CONTROLLER_INFLUX_BUCKET"]))
+                            writer = InfluxWriter(load_runtime_influx_settings())
                         export_pending(self.runtime_request_store.history, writer)
                     self.runtime_export_error = None
                 except Exception as exc:
