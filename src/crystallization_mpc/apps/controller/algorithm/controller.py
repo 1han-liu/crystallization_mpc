@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
+from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnosticsSnapshot
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
@@ -113,9 +114,22 @@ class CrystallizationController:
         self.size_list = np.empty(0, dtype=float)
         self.simulation_state: dict[str, float] | None = None
         self.control_T_j_reference_K: float | None = None
-        # MATLAB only assigns this indexed array when adaptation executes.
-        # Continuous dashboard measurements are not filter prehistory.
+        # Only contiguous, eligible measurements feed growth derivatives.
+        # Display/audit history is independent from the active fitting segment.
         self.fitting_G_measure_history: list[float] = []
+        self.fitting_segment: dict[str, list[Any]] = {
+            "G": [], "sigma": [], "T": [], "ticks": [],
+        }
+        self.fitting_last_tick: int | None = None
+        self.segment_id = 0
+        self.segment_start_tick = 0
+        self.segment_history_start = 0
+        self.refresh_count = 0
+        self.last_refresh_event: dict[str, Any] | None = None
+        # Staged numerical state can be aborted after a failed actuator write
+        # or checkpoint. The physical process has already advanced once.
+        # This token is deliberately transient, never serialized.
+        self._runtime_refresh_transaction: dict[str, Any] | None = None
         self.ekf: ExtendedKalmanFilter | None = None
         self.ekf_G_measure: ExtendedKalmanFilter | None = None
         self.ekf_n: ExtendedKalmanFilter | None = None
@@ -127,6 +141,186 @@ class CrystallizationController:
             "last_status": "not_run", "fit_count": 0, "failure_count": 0,
             "last_tick": None, "last_mode": None,
         }
+        # Diagnostics are transient copies, never algorithm recovery state.
+        self._diagnostic_tick_data: dict[str, Any] | None = None
+        self._diagnostic_snapshot: ControllerDiagnosticsSnapshot | None = None
+        self._diagnostic_capture_failed = False
+
+    def _diagnostic_filters(self) -> dict[str, ExtendedKalmanFilter | None]:
+        return {
+            "main": self.ekf, "G": self.ekf_G_measure, "E_A": self.ekf_E_A,
+            "k_0": self.ekf_k_0, "n": self.ekf_n,
+        }
+
+    def _attach_diagnostic_observers(self) -> None:
+        try:
+            for name, filter_ in self._diagnostic_filters().items():
+                if filter_ is not None:
+                    filter_.diagnostic_capture_failed = False
+                    filter_.diagnostic_observer = (
+                        lambda stage, values, name=name: self._capture_filter_diagnostics(name, stage, values)
+                    )
+        except Exception:
+            self._diagnostic_capture_failed = True
+
+    def _capture_filter_diagnostics(
+        self, name: str, stage: str, values: Mapping[str, Any]
+    ) -> None:
+        try:
+            if self._diagnostic_tick_data is None:
+                return
+            record = self._diagnostic_tick_data["filters"].setdefault(name, {})
+            record[stage] = {
+                key: value.tolist() if isinstance(value, np.ndarray) else copy.deepcopy(value)
+                for key, value in values.items()
+            }
+        except Exception:
+            self._diagnostic_capture_failed = True
+
+    def _capture_control_diagnostics(self, values: Mapping[str, Any]) -> None:
+        try:
+            if self._diagnostic_tick_data is not None:
+                self._diagnostic_tick_data["control"].update(values)
+        except Exception:
+            self._diagnostic_capture_failed = True
+
+    def _capture_initial_diagnostics(self) -> None:
+        try:
+            self._attach_diagnostic_observers()
+            if self._diagnostic_tick_data is not None:
+                initialized = {
+                    name: {"state": filter_.state.tolist(), "covariance": filter_.covariance.tolist()}
+                    for name, filter_ in self._diagnostic_filters().items()
+                    if filter_ is not None
+                }
+                # Freeze at the initialization boundary, not only when the
+                # cycle's final diagnostic snapshot is assembled later.
+                self._diagnostic_tick_data["refresh_init"] = ControllerDiagnosticsSnapshot.from_data(
+                    tick_seq=self.frame_index, elapsed_s=self.elapsed_s, run_id=str(self.run_id),
+                    fields={"diag_snapshot_stage": "refresh_init"},
+                    raw={"refresh_init": initialized},
+                )
+        except Exception:
+            self._diagnostic_capture_failed = True
+
+    def diagnostics_snapshot(self) -> ControllerDiagnosticsSnapshot | None:
+        """Never expose staged or rolled-back refresh evidence."""
+        if self._runtime_refresh_transaction is not None:
+            return None
+        return self._diagnostic_snapshot
+
+    def _finish_diagnostics(
+        self, *, T: float, c: float, T_j: float, G_measure: float | None,
+        refreshed: bool, growth_updated: bool, growth_reanchored: bool,
+        projected: np.ndarray, dT_dt_request: float | None, T_j_set: float,
+    ) -> None:
+        try:
+            if (self._diagnostic_capture_failed or self._diagnostic_tick_data is None
+                    or any(filter_.diagnostic_capture_failed for filter_ in self._diagnostic_filters().values()
+                           if filter_ is not None)):
+                self._diagnostic_snapshot = None
+                return
+            data = self._diagnostic_tick_data
+            fields: dict[str, int | float | str | bool] = {
+                "diag_snapshot_stage": "refresh_init" if refreshed else "posterior",
+                "diag_refresh_applied": refreshed,
+                "diag_refresh_count": int(self.refresh_count),
+                "diag_segment_id": int(self.segment_id),
+                "diag_segment_start_tick": int(self.segment_start_tick),
+                "diag_sample_count": sum(value > 0 for value in self.fitting_segment["G"]),
+                "diag_minimum_samples": int(self.params["min_num_adapt"]),
+                "diag_fit_count": int(self.adaptation_diagnostics["fit_count"]),
+                "diag_fit_failures": int(self.adaptation_diagnostics["failure_count"]),
+                "diag_main_T_measured": T, "diag_main_c_measured": c,
+                "diag_int_target": float(self.int_e_target_dt),
+                "diag_int_dT_dt": float(self.int_e_dT_dt_dt),
+                "diag_int_T": float(self.int_e_T_dt),
+                "diag_T_j_actual": T_j, "diag_T_j_selected": T_j_set,
+                "diag_control_hold_reason": str(data["control"].get("hold_reason", self.last_control_hold_reason or "")),
+                "diag_physical_limit": bool(data["control"].get("physical_limit", False)),
+                "diag_non_increasing_limit": bool(data["control"].get("non_increasing_limit", False)),
+                "diag_T_j_selected_branch": str(data["control"].get("selected_branch", "held")),
+            }
+            if data["control"].get("request_physical_limit") is not None:
+                fields["diag_request_physical_limit"] = bool(data["control"]["request_physical_limit"])
+            if data["control"].get("zero_physical_limit") is not None:
+                fields["diag_zero_physical_limit"] = bool(data["control"]["zero_physical_limit"])
+            if dT_dt_request is not None:
+                fields["diag_dT_dt_request"] = dT_dt_request
+            for index, label in enumerate(("T", "dT_dt", "c", "dc_dt")):
+                fields[f"diag_projected_{label}"] = float(projected[index])
+            lifecycle = {
+                "main": "refresh_init" if refreshed else "updated",
+                "G": ("refresh_init" if refreshed else
+                      "reanchored_updated" if growth_updated and growth_reanchored else
+                      "updated" if growth_updated else "paused"),
+                **{name: "refresh_reserved" if refreshed else "reserved" for name in ("E_A", "k_0", "n")},
+            }
+            raw_filters: dict[str, Any] = {}
+            for name, filter_ in self._diagnostic_filters().items():
+                if filter_ is None or filter_._diagnostic_initial_covariance is None:
+                    raise ValueError("Missing filter diagnostic initialization.")
+                fields[f"diag_{name}_lifecycle"] = lifecycle[name]
+                observed = data["filters"].get(name, {})
+                raw_filters[name] = {
+                    **observed, "state": filter_.state.tolist(),
+                    "covariance": filter_.covariance.tolist(),
+                    "initial_covariance": filter_._diagnostic_initial_covariance.tolist(),
+                }
+                if name == "main":
+                    for index, label in enumerate(("T", "dT_dt", "c", "dc_dt")):
+                        fields[f"diag_main_{label}_state"] = float(filter_.state[index])
+                        fields[f"diag_main_P_{label}"] = float(filter_.covariance[index, index])
+                        fields[f"diag_main_P_{label}_initial"] = float(filter_._diagnostic_initial_covariance[index, index])
+                    prior = observed.get("prior")
+                    if prior is not None:
+                        fields["diag_main_T_prior"] = float(prior["state"][0])
+                        fields["diag_main_c_prior"] = float(prior["state"][2])
+                    posterior = observed.get("posterior")
+                    if posterior is not None:
+                        for index, label in enumerate(("T", "c")):
+                            fields[f"diag_main_innovation_{label}"] = float(posterior["innovation"][index])
+                            fields[f"diag_main_S_{label}"] = float(posterior["innovation_covariance"][index][index])
+                elif name == "G":
+                    for index, label in enumerate(("G", "dG_dt", "d2G_dt2")):
+                        fields[f"diag_G_P_{label}"] = float(filter_.covariance[index, index])
+                        fields[f"diag_G_P_{label}_initial"] = float(filter_._diagnostic_initial_covariance[index, index])
+                    if G_measure is not None:
+                        fields["diag_G_input"] = G_measure
+                    if growth_updated:
+                        fields["diag_G_state"] = float(filter_.state[0])
+                        prior = observed.get("prior")
+                        if prior is not None:
+                            fields["diag_G_prior"] = float(prior["state"][0])
+                        posterior = observed.get("posterior")
+                        if posterior is not None:
+                            fields["diag_G_innovation_G"] = float(posterior["innovation"][0])
+                            fields["diag_G_S_G"] = float(posterior["innovation_covariance"][0][0])
+            for source, target in (
+                ("candidate_raw", "diag_T_j_candidate_raw"),
+                ("candidate_bounded", "diag_T_j_candidate_bounded"),
+                ("zero_raw", "diag_T_j_zero_raw"),
+                ("zero_bounded", "diag_T_j_zero_bounded"),
+            ):
+                value = data["control"].get(source)
+                if value is not None:
+                    fields[target] = float(value)
+            self._diagnostic_snapshot = ControllerDiagnosticsSnapshot.from_data(
+                tick_seq=self.frame_index, elapsed_s=self.elapsed_s, run_id=str(self.run_id),
+                fields=fields,
+                raw={
+                    "filters": raw_filters,
+                    "refresh_init": (data["refresh_init"].raw_data["refresh_init"]
+                                     if data["refresh_init"] is not None else None),
+                    "lifecycle": lifecycle, "control": {
+                        **data["control"], "selected_branch": fields["diag_T_j_selected_branch"],
+                        "selected": T_j_set,
+                    },
+                },
+            )
+        except Exception:
+            self._diagnostic_snapshot = None
+            self._diagnostic_capture_failed = True
 
     def configure(self, params: Mapping[str, Any], run_id: str) -> None:
         if not isinstance(params, Mapping):
@@ -211,6 +405,11 @@ class CrystallizationController:
         self.ekf_E_A = create_EKF_general(
             dt, float(self.params["q2_E_A"]), self.params["r_diag_E_A"], np.zeros(3)
         )
+        # Copy every new filter immediately; do not wait for its next update.
+        try:
+            self._capture_initial_diagnostics()
+        except Exception:
+            self._diagnostic_capture_failed = True
 
     def _noise_value(self, name: str, index: int, seed: int, scale: float) -> float:
         supplied = self._fixture_simulation_noise
@@ -288,7 +487,7 @@ class CrystallizationController:
             "E_A": self.ekf_E_A,
         }.items():
             filters[name] = (
-                (filter_.state.copy(), filter_.covariance.copy())
+                (filter_, filter_.state.copy(), filter_.covariance.copy())
                 if filter_ is not None
                 else None
             )
@@ -307,7 +506,14 @@ class CrystallizationController:
                 else None
             ),
             "num_adapt": self.num_adapt,
-            "fitting_G_measure_length": len(self.fitting_G_measure_history),
+            "fitting_G_measure_history": list(self.fitting_G_measure_history),
+            "fitting_segment": copy.deepcopy(self.fitting_segment),
+            "fitting_last_tick": self.fitting_last_tick,
+            "segment": (self.segment_id, self.segment_start_tick, self.segment_history_start),
+            "refresh": (self.refresh_count, copy.deepcopy(self.last_refresh_event)),
+            "adaptation": (self.adaptation_enabled, self.adaptation_mode),
+            "diagnostics": copy.deepcopy(self.adaptation_diagnostics),
+            "pause_reasons": (self.last_adaptation_pause_reason, self.last_control_hold_reason),
         }
 
     def _restore_numeric_state(self, snapshot: Mapping[str, Any]) -> None:
@@ -320,31 +526,109 @@ class CrystallizationController:
         ) = snapshot["integrals"]
         self.params = copy.deepcopy(snapshot["params"])
         self.num_adapt = int(snapshot["num_adapt"])
-        del self.fitting_G_measure_history[int(snapshot["fitting_G_measure_length"]) :]
+        self.fitting_G_measure_history = list(snapshot["fitting_G_measure_history"])
+        self.fitting_segment = copy.deepcopy(snapshot["fitting_segment"])
+        self.fitting_last_tick = snapshot["fitting_last_tick"]
+        self.segment_id, self.segment_start_tick, self.segment_history_start = snapshot["segment"]
+        self.refresh_count, self.last_refresh_event = snapshot["refresh"]
+        self.adaptation_enabled, self.adaptation_mode = snapshot["adaptation"]
+        self.adaptation_diagnostics = copy.deepcopy(snapshot["diagnostics"])
+        self.last_adaptation_pause_reason, self.last_control_hold_reason = snapshot["pause_reasons"]
         if self.simulation_state is not None:
             self.simulation_state["T_j_set"] = float(snapshot["simulation_T_j_set"])
-        for name, filter_ in {
-            "controller": self.ekf,
-            "G_measure": self.ekf_G_measure,
-            "n": self.ekf_n,
-            "k_0": self.ekf_k_0,
-            "E_A": self.ekf_E_A,
+        for name, attribute in {
+            "controller": "ekf", "G_measure": "ekf_G_measure",
+            "n": "ekf_n", "k_0": "ekf_k_0", "E_A": "ekf_E_A",
         }.items():
             saved = snapshot["filters"][name]
-            if filter_ is not None and saved is not None:
-                filter_.state = saved[0].copy()
-                filter_.covariance = saved[1].copy()
+            if saved is not None:
+                filter_ = saved[0]
+                setattr(self, attribute, filter_)
+                filter_.state = saved[1].copy()
+                filter_.covariance = saved[2].copy()
+
+    def _refresh_at_measurement(
+        self, update: Mapping[str, Any], T: float, c: float
+    ) -> bool:
+        """Apply one validated request, using this tick's fresh measured state."""
+        event_id = str(update["event_id"])
+        if self.last_refresh_event and self.last_refresh_event["event_id"] == event_id:
+            return False
+        candidate, configuration = self._runtime_candidate(update["changes"])
+        old = self.runtime_configuration()
+        changed = {key: configuration[key] for key in configuration if configuration[key] != old[key]}
+        if not changed:
+            return False
+        self.params = candidate
+        self.adaptation_enabled = configuration["adaptation_enabled"]
+        self.adaptation_mode = configuration["adaptation_mode"]
+        self._initialize_filters(T, c)
+        self.int_e_target_dt = self.int_e_dT_dt_dt = self.int_e_T_dt = 0.0
+        self.num_adapt = 0
+        self.fitting_G_measure_history = []
+        self.fitting_segment = {key: [] for key in self.fitting_segment}
+        self.fitting_last_tick = None
+        self.segment_id += 1
+        self.segment_start_tick = self.frame_index
+        self.segment_history_start = len(self.history["t"])
+        self.refresh_count += 1
+        self.last_refresh_event = {
+            "event_id": event_id, "effective_tick": self.frame_index,
+            "elapsed_s": self.elapsed_s, "reason": ",".join(sorted(changed)),
+            "changes": changed,
+        }
+        self.last_adaptation_pause_reason = "controller_refresh"
+        self.last_control_hold_reason = "controller_refresh"
+        self.adaptation_diagnostics.update(
+            last_status="waiting_for_samples" if self.adaptation_enabled else "not_run",
+            last_tick=self.frame_index, last_mode=self.adaptation_mode,
+        )
+        return True
+
+    def refresh_status(self) -> dict[str, Any]:
+        return {
+            "count": self.refresh_count, "segment_id": self.segment_id,
+            "last_event": copy.deepcopy(self.last_refresh_event),
+        }
+
+    def rollback_runtime_refresh(self, event_id: str) -> bool:
+        transaction = self._runtime_refresh_transaction
+        if transaction is None or transaction["event_id"] != event_id:
+            return False
+        self._restore_numeric_state(transaction["snapshot"])
+        self._runtime_refresh_transaction = None
+        self._diagnostic_snapshot = None
+        self._diagnostic_tick_data = None
+        return True
+
+    def commit_runtime_refresh(self, event_id: str) -> bool:
+        transaction = self._runtime_refresh_transaction
+        if transaction is None or transaction["event_id"] != event_id:
+            return False
+        self._runtime_refresh_transaction = None
+        return True
 
     def step(self, tick_input: ControllerTickInput) -> ControllerStepResult | None:
         if not self.running:
             raise RuntimeError("CrystallizationController is not running.")
         if not isinstance(tick_input, ControllerTickInput):
             raise TypeError("step() requires ControllerTickInput.")
+        if self._runtime_refresh_transaction is not None:
+            raise RuntimeError("Previous runtime refresh must be committed or rolled back before another tick.")
+        self._diagnostic_snapshot = None
+        self._diagnostic_capture_failed = False
+        self._diagnostic_tick_data = {"filters": {}, "refresh_init": None, "control": {}}
+        try:
+            self._attach_diagnostic_observers()
+        except Exception:
+            self._diagnostic_capture_failed = True
         dt = float(tick_input.controller_dt_s)
         if not math.isclose(dt, float(self.params["dt"]), rel_tol=0.0, abs_tol=1e-12):
             raise ValueError("controller_dt_s does not match parameter dt.")
         if tick_input.tick_seq != self.frame_index + 1:
             raise ValueError("Controller tick sequence must be contiguous.")
+        if tick_input.runtime_update is not None:
+            self.validate_runtime_update(tick_input.runtime_update["changes"])
         if self.control_T_j_reference_K is None or self.ekf is None:
             return ControllerStepResult(
                 valid=False, error="Experiment activation ProcessState has not been initialized."
@@ -373,16 +657,30 @@ class CrystallizationController:
                 return ControllerStepResult(valid=False, error="Process input violates physical bounds.")
 
             rollback_state = self._snapshot_numeric_state()
+            refreshed = (
+                self._refresh_at_measurement(tick_input.runtime_update, T, c)
+                if tick_input.runtime_update is not None else False
+            )
+            if refreshed:
+                self._runtime_refresh_transaction = {
+                    "event_id": tick_input.runtime_update["event_id"],
+                    "snapshot": rollback_state,
+                }
             for key, value in (("t", self.elapsed_s), ("T", T), ("T_j", T_j),
                                ("c", c), ("count_middle", count_middle)):
                 self.history[key].append(value)
-            dT_dt = calc_dT_dt(self.history["T"], dt)
-            dc_dt = calc_dc_dt(self.history["c"], dt)
+            dT_dt = calc_dT_dt(self.history["T"][self.segment_history_start :], dt)
+            dc_dt = calc_dc_dt(self.history["c"][self.segment_history_start :], dt)
             self.history["dT_dt"].append(dT_dt)
             self.history["dc_dt"].append(dc_dt)
             if self.ekf is None:
                 raise RuntimeError("Controller EKF is missing.")
-            filtered = smooth_EKF(self.ekf, self.params, np.array([T, dT_dt, c, dc_dt]))
+            # A refresh initializes at this measurement; predicting immediately
+            # would advance the estimator a second time relative to the plant.
+            filtered = (
+                self.ekf.state.copy() if refreshed else
+                smooth_EKF(self.ekf, self.params, np.array([T, dT_dt, c, dc_dt]))
+            )
             T_KF, dT_dt_KF, c_KF, dc_dt_KF = map(float, filtered)
             for key, value in (("T_KF", T_KF), ("dT_dt_KF", dT_dt_KF),
                                ("c_KF", c_KF), ("dc_dt_KF", dc_dt_KF)):
@@ -408,7 +706,7 @@ class CrystallizationController:
                 tick_input, c_KF, T_KF
             )
             hold_growth_control = target == "G" and not adaptation_allowed
-            self.last_control_hold_reason = (
+            self.last_control_hold_reason = "controller_refresh" if refreshed else (
                 pause_reason or "growth_measurement_unavailable"
                 if hold_growth_control
                 else None
@@ -422,12 +720,14 @@ class CrystallizationController:
             self.history["t_lag_perc"].append(lag_percentage)
             self.history["t_lag"].append(lag)
             projected = filtered + np.array([filtered[1], 0.0, filtered[3], 0.0]) * lag
-            if hold_growth_control:
+            dT_dt_request: float | None = None
+            if refreshed or hold_growth_control:
                 # A live G target is undefined without a fresh measurement.
                 # Re-assert the equipment's current jacket setpoint and leave
                 # every control integral untouched until a valid sample arrives.
                 dT_dt_set = 0.0
                 T_j_set = current_T_j_set
+                self._capture_control_diagnostics({"hold_reason": self.last_control_hold_reason or ""})
             elif abs(float(calc_relative_sigma(projected[2], projected[0]))) < float(self.params["sigma_threshold"]):
                 if not self.history["T_j_set"] or self.history["T_j_set"][-1] is None:
                     # The frozen reference indexes ii-1 here. At ii=1 its outer
@@ -443,18 +743,21 @@ class CrystallizationController:
                     return None
                 dT_dt_set = float(self.history["dT_dt_set"][-1])
                 T_j_set = float(self.history["T_j_set"][-1])
+                self._capture_control_diagnostics({"hold_reason": "sigma_threshold"})
             else:
                 dT_dt_set, self.int_e_target_dt = calc_dT_dt_set(
                     self.params, projected, str(self.params["mode"]), target, target_set,
                     float(self.params["dT_dt_min"]), float(self.params["dT_dt_max"]),
                     dt, self.int_e_target_dt,
                 )
+                dT_dt_request = dT_dt_set
                 # Original MATLAB passes the activation scalar in both modes;
                 # dynamic T_j remains separate in the plant and telemetry.
                 T_j_set, self.int_e_dT_dt_dt, self.int_e_T_dt = calc_T_j_set(
                     self.params, projected, dT_dt_set, self.int_e_dT_dt_dt,
                     self.int_e_T_dt, self.control_T_j_reference_K, float(self.params["T_j_min"]),
                     float(self.params["T_j_max"]), dt, target == "G",
+                    observer=self._capture_control_diagnostics,
                 )
             objective = objective_function(self.params, filtered, target, dT_dt_set, target_set, dt)
             self.history["dT_dt_set"].append(dT_dt_set)
@@ -475,23 +778,35 @@ class CrystallizationController:
                 for key in ("G_u", "G_u_KF", "G_v", "G_v_KF"):
                     self.history[key].append(None)
             self.history["G_measure"].append(G_measure)
-            should_adapt = self.adaptation_enabled and adaptation_allowed and G_measure is not None
-            self.last_adaptation_pause_reason = None
+            should_adapt = (
+                not refreshed and self.adaptation_enabled and adaptation_allowed
+                and G_measure is not None
+            )
+            self.last_adaptation_pause_reason = "controller_refresh" if refreshed else None
+            growth_reanchored = False
             if should_adapt:
                 if self.ekf_G_measure is None:
                     raise RuntimeError("Growth measurement EKF is missing.")
-                self.fitting_G_measure_history.extend(
-                    [0.0] * (len(self.history["G_measure"]) - 1 - len(self.fitting_G_measure_history))
-                )
+                if self.fitting_last_tick != self.frame_index - 1:
+                    # Missing/ineligible periods are not zero growth samples.
+                    # Begin derivatives afresh and reanchor the growth estimate.
+                    self.fitting_G_measure_history = []
+                    self.ekf_G_measure.state = np.array([G_measure, 0.0, 0.0])
+                    growth_reanchored = True
                 self.fitting_G_measure_history.append(float(G_measure))
+                self.fitting_G_measure_history = self.fitting_G_measure_history[-3:]
+                self.fitting_last_tick = self.frame_index
                 G_measure_KF = smooth_EKF_general(self.fitting_G_measure_history, self.ekf_G_measure, dt)
                 self.history["G_measure_KF"].append(G_measure_KF)
                 self.history["to_adapt"].append(True)
-                growth_history = [float("nan") if value is None else float(value)
-                                  for value in self.history["G_measure_KF"]]
+                for key, value in (("G", G_measure_KF), ("sigma", sigma),
+                                   ("T", T), ("ticks", self.frame_index)):
+                    self.fitting_segment[key].append(value)
+                    self.fitting_segment[key] = self.fitting_segment[key][-int(self.params["max_num_adapt"]):]
                 self.params, self.num_adapt = adapt_growth_parameters(
-                    self.params, growth_history, self.history["sigma"], self.history["T"],
-                    self.history["to_adapt"], int(self.params["max_num_adapt"]),
+                    self.params, self.fitting_segment["G"], self.fitting_segment["sigma"],
+                    self.fitting_segment["T"], [True] * len(self.fitting_segment["G"]),
+                    int(self.params["max_num_adapt"]),
                     int(self.params["min_num_adapt"]), self.adaptation_mode,
                 )
                 fitted = self.num_adapt >= int(self.params["min_num_adapt"])
@@ -507,7 +822,9 @@ class CrystallizationController:
                 self.history["G_measure_KF"].append(None)
                 self.history["to_adapt"].append(False)
                 if self.adaptation_enabled:
-                    self.last_adaptation_pause_reason = pause_reason or "adaptation_not_allowed"
+                    self.last_adaptation_pause_reason = (
+                        "controller_refresh" if refreshed else pause_reason or "adaptation_not_allowed"
+                    )
                     self.adaptation_diagnostics.update(
                         last_status="waiting_for_samples", last_tick=self.frame_index,
                         last_mode=self.adaptation_mode,
@@ -522,9 +839,22 @@ class CrystallizationController:
             numerical = (T_j_set, sigma, G_model, objective, self.params["n"],
                          self.params["k_0"], self.params["E_A"])
             if not all(math.isfinite(float(value)) for value in numerical):
+                if refreshed:
+                    self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
                 return ControllerStepResult(valid=False, error="Controller calculation produced a non-finite value.")
             if not float(self.params["T_j_min"]) <= T_j_set <= float(self.params["T_j_max"]):
+                if refreshed:
+                    self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
                 return ControllerStepResult(valid=False, error="Controller setpoint violates jacket bounds.")
+            try:
+                self._finish_diagnostics(
+                    T=T, c=c, T_j=T_j, G_measure=G_measure, refreshed=refreshed,
+                    growth_updated=should_adapt, growth_reanchored=growth_reanchored,
+                    projected=projected, dT_dt_request=dT_dt_request, T_j_set=T_j_set,
+                )
+            except Exception:
+                self._diagnostic_snapshot = None
+                self._diagnostic_capture_failed = True
             return ControllerStepResult(
                 T=T, T_j=T_j, c=c, dT_dt=dT_dt, dc_dt=dc_dt, T_KF=T_KF,
                 dT_dt_KF=dT_dt_KF, c_KF=c_KF, dc_dt_KF=dc_dt_KF, sigma=sigma,
@@ -536,6 +866,8 @@ class CrystallizationController:
                 t_lag=lag, t_lag_perc=lag_percentage,
             )
         except AdaptationError as exc:
+            if tick_input.runtime_update is not None:
+                self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
             # controller_for_gui's outer catch does not undo earlier control,
             # history, integral or EKF changes. Failed function output assignment
             # leaves caller params/num_adapt unchanged, and skips later recording
@@ -552,7 +884,15 @@ class CrystallizationController:
         except (OptimizationError, FloatingPointError) as exc:
             if rollback_state is not None:
                 self._restore_numeric_state(rollback_state)
+            self._runtime_refresh_transaction = None
             return ControllerStepResult(valid=False, error=str(exc))
+        except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+            if tick_input.runtime_update is None:
+                raise
+            if rollback_state is not None:
+                self._restore_numeric_state(rollback_state)
+            self._runtime_refresh_transaction = None
+            return ControllerStepResult(valid=False, error=f"Controller refresh failed: {exc}")
 
     def stop(self) -> None:
         self.running = False
@@ -580,17 +920,25 @@ class CrystallizationController:
         }
 
     def adaptation_status(self) -> dict[str, Any]:
+        # A failed optimizer call does not return num_adapt. Report the
+        # currently eligible window, rather than the last returned fit count.
+        eligible_samples = sum(value > 0 for value in self.fitting_segment["G"])
         return {
             **copy.deepcopy(self.adaptation_diagnostics),
             "enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
-            "sample_count": self.num_adapt,
+            "sample_count": eligible_samples,
+            "last_fit_sample_count": self.num_adapt,
             "minimum_samples": int(self.params["min_num_adapt"]),
             "pause_reason": self.last_adaptation_pause_reason,
             "control_hold_reason": self.last_control_hold_reason,
+            "segment_id": self.segment_id,
+            "segment_sample_count": eligible_samples,
+            "segment_start_tick": self.segment_start_tick,
         }
 
-    def update_runtime(self, changes: Mapping[str, Any]) -> dict[str, Any]:
-        """Change only runtime settings, preserving every numerical state."""
+    def _runtime_candidate(
+        self, changes: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not self.running:
             raise RuntimeError("Cannot update a Controller that is not running.")
         patch = validate_runtime_changes(changes)
@@ -614,10 +962,15 @@ class CrystallizationController:
                 candidate[key] = value
             if candidate["dT_dt_min"] > candidate["dT_dt_max"]:
                 raise ValueError("Target temperature gradient bounds are inverted.")
-        self.params = candidate
-        self.adaptation_enabled = configuration["adaptation_enabled"]
-        self.adaptation_mode = configuration["adaptation_mode"]
-        return self.runtime_configuration()
+        return candidate, configuration
+
+    def validate_runtime_update(self, changes: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate without applying; the measured tick owns the commit."""
+        return self._runtime_candidate(changes)[1]
+
+    def update_runtime(self, changes: Mapping[str, Any]) -> dict[str, Any]:
+        del changes
+        raise RuntimeError("Runtime updates must be submitted at a fresh measured control tick.")
 
     def set_adaptation(
         self, enabled: bool, mode: str, event: Mapping[str, Any] | None = None
@@ -655,9 +1008,15 @@ class CrystallizationController:
                            "size_list": self.size_list, "pending_seed": self.pending_seed,
                            "mark_seed": self.mark_seed},
             "filters": filters,
+            "refresh": {"count": self.refresh_count, "segment_id": self.segment_id,
+                        "segment_start_tick": self.segment_start_tick,
+                        "segment_history_start": self.segment_history_start,
+                        "last_event": copy.deepcopy(self.last_refresh_event)},
             "adaptation": {"enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
                            "num_adapt": self.num_adapt,
                            "fitting_G_measure_history": self.fitting_G_measure_history,
+                           "fitting_segment": copy.deepcopy(self.fitting_segment),
+                           "fitting_last_tick": self.fitting_last_tick,
                            "pause_reason": self.last_adaptation_pause_reason,
                            "control_hold_reason": self.last_control_hold_reason,
                            "diagnostics": copy.deepcopy(self.adaptation_diagnostics)},
@@ -721,13 +1080,14 @@ class CrystallizationController:
             if not isinstance(fitting_history, list):
                 raise ValueError("Recovery fitting history is missing.")
             self.fitting_G_measure_history = [float(value) for value in fitting_history]
-            assigned = [i for i, selected in enumerate(self.history["to_adapt"]) if selected]
-            expected_length = assigned[-1] + 1 if assigned else 0
-            if (len(self.fitting_G_measure_history) != expected_length
-                    or not all(math.isfinite(value) for value in self.fitting_G_measure_history)
-                    or any(value != 0.0 for i, value in enumerate(self.fitting_G_measure_history)
-                           if not self.history["to_adapt"][i])):
-                raise ValueError("Recovery fitting history is incompatible.")
+            self.fitting_segment = copy.deepcopy(dict(adaptation["fitting_segment"]))
+            self.fitting_last_tick = adaptation["fitting_last_tick"]
+            refresh = state["refresh"]
+            self.refresh_count = int(refresh["count"])
+            self.segment_id = int(refresh["segment_id"])
+            self.segment_start_tick = int(refresh["segment_start_tick"])
+            self.segment_history_start = int(refresh["segment_history_start"])
+            self.last_refresh_event = copy.deepcopy(refresh["last_event"])
             self.last_adaptation_pause_reason = adaptation.get("pause_reason")
             self.last_control_hold_reason = adaptation.get("control_hold_reason")
             diagnostics = adaptation.get("diagnostics")

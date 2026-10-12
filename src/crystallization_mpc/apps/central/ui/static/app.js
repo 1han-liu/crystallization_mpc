@@ -359,7 +359,9 @@ function renderConfigurationDetails(configuration, live) {
     const identity = result.event_id === entry.command.event_id && result.run_id === state.currentRunId;
     if (entry.status === "applied" && identity) {
       const saved = state.controllerStatus?.recovery?.status !== "persistence_error" && !entry.persistence_error;
-      element.textContent = `${saved ? "Applied" : "Applied, but not durably saved"}: ${runtimeChangeDescription(entry, key)} Revision ${result.revision}; effective tick ${result.effective_tick ?? "unavailable"}.`;
+      const refreshOutcome = result.no_change ? "Value unchanged; Controller not refreshed."
+        : result.refreshed ? "Controller refreshed." : "Controller refresh unconfirmed.";
+      element.textContent = `${saved ? "Applied" : "Applied, but not durably saved"}: ${runtimeChangeDescription(entry, key)} ${refreshOutcome} Revision ${result.revision}; effective tick ${result.effective_tick ?? "unavailable"}.`;
       if (state.controllerStatus?.runtime_controls?.history_error) element.textContent += " History persistence incomplete.";
       if (entry.persistence_error) element.textContent += ` ${entry.persistence_error}`;
       element.classList.toggle("error", !saved);
@@ -367,7 +369,7 @@ function renderConfigurationDetails(configuration, live) {
       element.textContent = `Rejected: ${result.reason || entry.transport_error || "Update was not accepted."}`;
       element.classList.add("error");
     } else {
-      element.textContent = `${entry.status === "timeout" ? "Confirmation timed out. " : ""}Waiting for Controller confirmation.${entry.transport_error ? " " + entry.transport_error : ""}`;
+      element.textContent = `${entry.status === "timeout" ? "Confirmation timed out. " : ""}Waiting for the next control tick and a valid measurement to refresh Controller.${entry.transport_error ? " " + entry.transport_error : ""}`;
     }
   });
   const panel = document.querySelector("#runtime-fitting");
@@ -384,12 +386,17 @@ function renderConfigurationDetails(configuration, live) {
   const states = { not_run: "Not run", waiting_for_samples: "Waiting for samples",
     fit_succeeded: "Last fit succeeded", fit_failed: "Last fit failed" };
   const value = field => fitting?.[field] ?? "unavailable";
+  const refresh = status.runtime_controls?.refresh;
+  const refreshText = refresh ? ` Controller refresh ${refresh.state || "unavailable"}; count ${refresh.count ?? "unavailable"}; segment ${refresh.segment_id ?? "unavailable"}; effective tick ${refresh.effective_tick ?? "unavailable"}.`
+    + (refresh.reason ? ` ${refresh.reason}.` : "") : "";
   panel.textContent = `Adaptation ${adaptation.enabled ? "enabled" : "disabled"}. Selected parameters: ${modes}. `
     + (!adaptation.enabled ? "Parameter updates stopped; control continues with existing parameters. Historical fitting results: " : "")
     + (fitting ? `${states[fitting.last_status] || "Status unavailable"}. Samples ${value("sample_count")}/${value("minimum_samples")}; completed fits ${value("fit_count")}; failures ${value("failure_count")}. Last successful fit: ${fitting.last_success_at ? formatExperimentTime(fitting.last_success_at) : "unavailable"}.`
       + (fitting.last_failure_reason ? ` Last failure: ${fitting.last_failure_reason}.` : "")
-      + (fitting.pause_reason ? ` Current reason: ${fitting.pause_reason}.` : "") : "Fitting diagnostics unavailable.");
-  panel.classList.toggle("error", adaptation.enabled && fitting?.last_status === "fit_failed");
+      + (fitting.pause_reason ? ` Current reason: ${fitting.pause_reason}.` : "") : "Fitting diagnostics unavailable.")
+    + (fitting?.segment_id !== undefined ? ` Current fitting segment ${fitting.segment_id}; segment samples ${fitting.segment_sample_count ?? fitting.sample_count ?? "unavailable"}.` : "")
+    + refreshText;
+  panel.classList.toggle("error", (adaptation.enabled && fitting?.last_status === "fit_failed") || refresh?.state === "failed");
 }
 
 async function loadRuntimeHistory(older = false) {
@@ -413,7 +420,8 @@ async function loadRuntimeHistory(older = false) {
       const result = entry.result || {};
       const tr = document.createElement("tr");
       const changes = Object.keys(entry.command.changes).map(key => runtimeChangeDescription(entry, key)).join(" ");
-      const outcome = `${entry.status}; revision ${result.revision ?? "unavailable"}; effective tick ${result.effective_tick ?? "unavailable"}${result.reason ? "; " + result.reason : ""}${entry.persistence === "persistence_error" ? "; active state not durably saved" : ""}`;
+      const refreshOutcome = result.no_change ? "; unchanged, no refresh" : result.refreshed ? "; Controller refreshed" : entry.status === "pending" ? "; waiting for tick-boundary refresh" : "";
+      const outcome = `${entry.status}${refreshOutcome}; revision ${result.revision ?? "unavailable"}; effective tick ${result.effective_tick ?? "unavailable"}${result.reason ? "; " + result.reason : ""}${entry.persistence === "persistence_error" ? "; active state not durably saved" : ""}`;
       const sync = !page.grafana_enabled ? "Not configured" : (entry.grafana_sync === "synced" ? "Synced"
         : entry.grafana_sync === "not_applicable" ? "No change annotation" : `Incomplete: ${entry.grafana_error || entry.grafana_sync || "pending"}`);
       for (const text of [formatExperimentTime(entry.command.requested_at),
@@ -468,11 +476,12 @@ function renderLiveConfiguration() {
     message = "Controller is unavailable, stopped or belongs to another run. Editing is locked.";
   } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
     label = timedOut || request?.status === "timeout" ? "confirmation timeout" : "awaiting confirmation";
-    message = `Request ${request?.command?.event_id || "…"}: Controller application is not yet confirmed. Retry uses the same event.`;
+    message = `Request ${request?.command?.event_id || "…"}: waiting for the next control tick and a valid measurement to apply settings and refresh Controller. Retry uses the same event.`;
     if (request?.transport_error) message += ` ${request.transport_error}`;
   } else if (request?.status === "applied") {
     label = "applied";
-    message += ` Last request applied at revision ${request.result.revision}, effective tick ${request.result.effective_tick}.`;
+    message += request.result.no_change ? " Last request did not change values; no Controller refresh."
+      : ` Last request applied at revision ${request.result.revision}, effective tick ${request.result.effective_tick}; Controller refresh ${request.result.refreshed ? "completed" : "unconfirmed"}.`;
   } else if (request?.status === "rejected") {
     label = "rejected";
     message = request.result?.reason || "Controller rejected the update; prior settings remain.";

@@ -90,7 +90,9 @@ class RuntimeRequestStore:
         for result in results:
             if (result.get("event_id") == entry["command"]["event_id"]
                     and result.get("run_id") == run_id
-                    and result.get("status") in {"applied", "rejected"}):
+                    and result.get("status") in {"pending", "applied", "rejected"}):
+                if entry["status"] in {"applied", "rejected"} and result["status"] == "pending":
+                    continue
                 entry = {**entry, "status": result["status"], "result": copy.deepcopy(result)}
                 break
         if entry["status"] not in {"applied", "rejected"} and time.time() - entry["created_at"] >= 30:

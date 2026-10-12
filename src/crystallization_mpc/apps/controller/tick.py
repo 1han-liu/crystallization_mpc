@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
@@ -17,6 +18,7 @@ class ControllerTickInput:
     growth_sample: GrowthRateSamplePayload | None = None
     growth_sample_age_s: float | None = None
     process_state: ProcessState | None = None
+    runtime_update: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.tick_seq, bool) or int(self.tick_seq) < 1:
@@ -31,6 +33,14 @@ class ControllerTickInput:
                 raise ValueError("growth_sample_age_s must be finite and nonnegative.")
         if self.growth_sample is None and self.growth_sample_age_s is not None:
             raise ValueError("A growth sample age requires a growth sample.")
+        if self.runtime_update is not None:
+            if not isinstance(self.runtime_update, Mapping):
+                raise ValueError("runtime_update must be an object.")
+            event_id = self.runtime_update.get("event_id")
+            if not isinstance(event_id, str) or not event_id.strip():
+                raise ValueError("runtime_update requires event_id.")
+            if not isinstance(self.runtime_update.get("changes"), Mapping):
+                raise ValueError("runtime_update requires changes.")
 
 
 __all__ = ["ControllerTickInput"]

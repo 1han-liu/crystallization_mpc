@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 import numpy as np
@@ -67,12 +67,39 @@ class ExtendedKalmanFilter:
     process_noise: np.ndarray
     measurement_noise: np.ndarray
     covariance: np.ndarray
+    diagnostic_observer: Callable[[str, Mapping[str, Any]], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _diagnostic_initial_covariance: np.ndarray | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    diagnostic_capture_failed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Observational only: constructor P remains unchanged and this copy is
+        # deliberately absent from the recovery wire format.
+        try:
+            self._diagnostic_initial_covariance = self.covariance.copy()
+        except Exception:
+            self._diagnostic_initial_covariance = None
+
+    def _observe(self, stage: str, **values: Any) -> None:
+        try:
+            if self.diagnostic_observer is not None:
+                self.diagnostic_observer(stage, {
+                    key: value.copy() if isinstance(value, np.ndarray) else value
+                    for key, value in values.items()
+                })
+        except Exception:
+            # A chart must never turn a valid numerical cycle into a failure.
+            self.diagnostic_capture_failed = True
 
     def predict(self) -> np.ndarray:
         prior = self.state.copy()
         F = _forward_jacobian(self.transition, prior)
         self.state = np.asarray(self.transition(prior), dtype=float)
         self.covariance = F @ self.covariance @ F.T + self.process_noise
+        self._observe("prior", state=self.state, covariance=self.covariance)
         return self.state.copy()
 
     def correct(self, observed: np.ndarray) -> np.ndarray:
@@ -88,6 +115,11 @@ class ExtendedKalmanFilter:
         self.covariance = (self.covariance + self.covariance.T) / 2.0
         if not np.isfinite(self.state).all() or not np.isfinite(self.covariance).all():
             raise FloatingPointError("EKF produced non-finite state or covariance.")
+        self._observe(
+            "posterior", state=self.state, covariance=self.covariance,
+            innovation=observed_array - expected,
+            innovation_covariance=innovation_covariance,
+        )
         return self.state.copy()
 
     def to_dict(self) -> dict[str, Any]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -18,6 +18,16 @@ class OptimizationError(RuntimeError):
 
 
 MPC_OPTIMIZER_TIMEOUT_S = 4.0
+
+
+def _observe_control(
+    observer: Callable[[Mapping[str, Any]], None] | None, values: Mapping[str, Any]
+) -> None:
+    try:
+        if observer is not None:
+            observer(values)
+    except Exception:
+        pass
 
 
 def clip(value: float, lower: float, upper: float) -> float:
@@ -192,6 +202,8 @@ def calc_T_j_set_inner(
     T_j_min: float,
     T_j_max: float,
     dt: float,
+    *,
+    observer: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[float, float, float]:
     T_j_calc = calc_T_j(params, x, dT_dt_set)
     e_dT_dt = calc_e_dT_dt(params, x, T_j_calc, dT_dt_set)
@@ -207,7 +219,12 @@ def calc_T_j_set_inner(
         - float(params["K_P_target"]) * e_T
         - float(params["K_I_T"]) * next_int_T
     )
-    return clip(T_j_set, T_j_min, T_j_max), next_int_dT, next_int_T
+    bounded = clip(T_j_set, T_j_min, T_j_max)
+    _observe_control(observer, {
+        "candidate_raw": T_j_set, "candidate_bounded": bounded,
+        "physical_limit": bounded != T_j_set,
+    })
+    return bounded, next_int_dT, next_int_T
 
 
 def calc_T_j_set(
@@ -221,7 +238,12 @@ def calc_T_j_set(
     T_j_max: float,
     dt: float,
     non_increasing: bool,
+    *,
+    observer: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[float, float, float]:
+    candidate_diagnostics: dict[str, Any] = {}
+    zero_diagnostics: dict[str, Any] = {}
+    selected_branch = "requested"
     selected = calc_T_j_set_inner(
         params,
         x,
@@ -232,6 +254,7 @@ def calc_T_j_set(
         T_j_min,
         T_j_max,
         dt,
+        observer=candidate_diagnostics.update if observer is not None else None,
     )
     if non_increasing:
         zero = calc_T_j_set_inner(
@@ -244,9 +267,31 @@ def calc_T_j_set(
             T_j_min,
             T_j_max,
             dt,
+            observer=zero_diagnostics.update if observer is not None else None,
         )
         if selected[0] > zero[0]:
             selected = zero
+            selected_branch = "zero"
+    _observe_control(observer, {
+        **candidate_diagnostics,
+        "zero_raw": zero_diagnostics.get("candidate_raw"),
+        "zero_bounded": zero_diagnostics.get("candidate_bounded"),
+        "request_physical_limit": bool(candidate_diagnostics.get("physical_limit", False)),
+        "zero_physical_limit": (
+            bool(zero_diagnostics.get("physical_limit", False)) if non_increasing else None
+        ),
+        # Both candidates were evaluated. This aggregate reports any physical
+        # clipping in that evaluation, not only clipping of the final branch.
+        "physical_limit": bool(
+            candidate_diagnostics.get("physical_limit", False)
+            or zero_diagnostics.get("physical_limit", False)
+        ),
+        "selected": selected[0],
+        "selected_branch": selected_branch,
+        "non_increasing_limit": (
+            non_increasing and candidate_diagnostics.get("candidate_bounded", selected[0]) > selected[0]
+        ),
+    })
     return selected
 
 

@@ -16,6 +16,66 @@ state, startup defaults, existing MATLAB adaptation policy and all GSensor code.
 The authoritative objective is the user's Central runtime-controls long-term
 plan. This document records progress; it does not reduce its acceptance scope.
 
+## Current automatic-refresh protocol (2026-10-09)
+
+This section supersedes the historical state-preserving-without-refresh behavior
+documented below. MATLAB is a read-only reference; all implementation changes
+are confined to MPCrystal_final. Simulation and Experiment share one numerical
+refresh implementation; only the source of fresh temperature/concentration differs.
+
+- A successful actual change of control target, adaptation enablement, adaptive
+  mode, sigma_set or G_set stages one pending request. Standby setpoint changes
+  and mode changes while adaptation is disabled also refresh. A batch refreshes
+  once. No-op values, invalid/rejected/conflicting requests, repeated event IDs,
+  polling and automatically fitted kinetic parameters do not refresh.
+- The actual configuration and revision remain unchanged until the next control
+  tick supplies valid fresh T/c. That tick reconstructs the five Controller EKFs,
+  initializes the main state to [T, 0, c, 0], clears three integrals, holds the
+  previous jacket command and starts a new fitting segment. It does not perform
+  an extra EKF prediction or advance the simulated plant twice.
+- Historical measurements and cumulative fit/failure counts are retained. Only
+  eligible post-refresh samples enter the active bounded fitting window. Missing
+  samples are not zero growth, and derivatives do not cross gaps or refreshes.
+- Run identity, startup reference, physical state, seeds and fitted kinetic
+  parameters are preserved. No GSensor filter, annotation or tracking state is
+  reconstructed by these five Controller configuration operations.
+- Status exposes pending/completed/failed refresh, event ID, count, segment and
+  actual effective tick. Central explicitly reports unchanged values without
+  refresh and new-segment sample accumulation. Durable applied acknowledgment
+  follows a successful checkpoint save; storage failure stops Controller without
+  claiming success. Pending requests and applied IDs survive a compatible restart.
+- Older checkpoints missing this required numerical state are rejected and
+  preserved, not populated with invented state or overwritten automatically.
+  Start a separate new session when upgrading from such an archive.
+
+### Four-phase numerical acceptance
+
+Use the isolated accelerated driver with Simulation + Simulated, MPC, dt=dt_G=15s,
+sigma_set=0.035, G_set=3e-8m/s, E_A=150000J/mol, k_0=2e15m/s, n=1.75 and 1g seed.
+These are per-run overrides; production default dt=5s and physical _proc
+kinetics/actuator limits are not changed. All timing gates use simulated elapsed
+seconds. Do not use the cleanup launcher for this acceptance.
+
+1. Adaptation off, no seed: sigma positive and within 0.005 of 0.035 for 60s.
+2. One confirmed seed addition, remain in sigma, enable E_A only: accumulate
+   eligible samples and require four successful updates changing E_A by <10%,
+   with k_0/n fixed. A flat line without successful fitting is not convergence.
+3. In one request switch to G and all three adaptive parameters: exactly one
+   refresh; new samples must accumulate. Require four successful stable updates
+   (<10% each) and 60s with both calculated/filtered-measured G within 20% of the
+   target and their difference within 20% of the target (6e-9m/s).
+4. Retain G/all adaptation to the unchanged jacket lower limit: setpoint within
+   0.01K and actual jacket within 0.5K continuously for 60s. Non-actuator-limited
+   tracking failure sustained for 60s is a FAIL; limit-induced error is reported
+   separately. Stop by 120 simulated minutes; do not force phase transitions.
+
+The paper's 0.03 prose vs 0.035 figure discrepancy uses the approved figure value.
+Reactor 15C is not the endpoint. Published final parameters and 80-minute duration
+are references, not hard-coded expected outcomes. Image warmup (>8 frames), FBRM,
+physical seed dissolution, nucleation and size-distribution control are NOT RUN
+in a numerical-source acceptance. All historical test totals below refer only
+to their original dates; current evidence is produced by this new run.
+
 ## Baseline (2026-09-10)
 
 - Checkout: `final`, `06b5c5ea04c45122101be91f1c09563b989f972b`.

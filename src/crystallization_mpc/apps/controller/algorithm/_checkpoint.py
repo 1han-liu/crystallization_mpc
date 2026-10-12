@@ -142,16 +142,66 @@ def validate_checkpoint(
     count = _integer(adaptation["num_adapt"], "num_adapt")
     # This is the last returned fitting-window count. A failed fit preserves
     # that value; do not recompute it from the current eligibility flags.
-    if count > min(length, int(params["max_num_adapt"])):
-        raise ValueError("Checkpoint adaptation count exceeds its history/window.")
+    refresh = _mapping(state["refresh"], "refresh")
+    refresh_count = _integer(refresh["count"], "refresh.count")
+    segment_id = _integer(refresh["segment_id"], "refresh.segment_id")
+    start_tick = _integer(refresh["segment_start_tick"], "refresh.segment_start_tick")
+    history_start = _integer(refresh["segment_history_start"], "refresh.segment_history_start")
+    if refresh_count != segment_id or refresh_count > frame or start_tick > frame or history_start > length:
+        raise ValueError("Checkpoint refresh boundary is inconsistent.")
+    event = refresh["last_event"]
+    if refresh_count == 0:
+        if event is not None or start_tick != 0 or history_start != 0:
+            raise ValueError("Checkpoint initial refresh state is inconsistent.")
+    else:
+        event = _mapping(event, "refresh.last_event")
+        if not isinstance(event["event_id"], str) or not event["event_id"].strip():
+            raise ValueError("Checkpoint refresh event ID is invalid.")
+        if _integer(event["effective_tick"], "refresh.effective_tick") != start_tick:
+            raise ValueError("Checkpoint refresh event tick does not match its segment.")
+        event_time = _number(event["elapsed_s"], "refresh.elapsed_s", minimum=0)
+        if event_time > elapsed or not isinstance(event["reason"], str) or not event["reason"]:
+            raise ValueError("Checkpoint refresh event metadata is invalid.")
+        from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
+        if not validate_runtime_changes(_mapping(event["changes"], "refresh.changes")):
+            raise ValueError("Checkpoint refresh changes are empty.")
+        if history_start >= length or history["t"][history_start] != event_time:
+            raise ValueError("Checkpoint refresh boundary is not recorded in history.")
+
+    segment = _mapping(adaptation["fitting_segment"], "adaptation.fitting_segment")
+    if set(segment) != {"G", "sigma", "T", "ticks"}:
+        raise ValueError("Checkpoint fitting segment fields are incompatible.")
+    for key in ("G", "sigma", "T"):
+        _vector(segment[key], f"fitting_segment.{key}")
+    ticks = segment["ticks"]
+    if not isinstance(ticks, list) or any(_integer(tick, "fitting tick") <= start_tick or tick > frame for tick in ticks):
+        raise ValueError("Checkpoint fitting samples cross a refresh boundary.")
+    if any(b <= a for a, b in zip(ticks, ticks[1:])):
+        raise ValueError("Checkpoint fitting ticks are not increasing.")
+    if len({len(segment[key]) for key in segment}) != 1 or len(ticks) > int(params["max_num_adapt"]):
+        raise ValueError("Checkpoint fitting segment lengths are inconsistent.")
+    if count > len(ticks):
+        raise ValueError("Checkpoint adaptation count exceeds its segment/window.")
+    history_by_time = {time: i for i, time in enumerate(history["t"])}
+    for position, tick in enumerate(ticks):
+        index = history_by_time.get(tick * float(params["dt"]))
+        if index is None or not history["to_adapt"][index]:
+            raise ValueError("Checkpoint fitting sample has no eligible recorded tick.")
+        for key, historical in (("G", "G_measure_KF"), ("sigma", "sigma"), ("T", "T")):
+            if segment[key][position] != history[historical][index]:
+                raise ValueError("Checkpoint fitting segment disagrees with history.")
     fitting = _vector(adaptation["fitting_G_measure_history"], "fitting history")
-    assigned = [i for i, selected in enumerate(history["to_adapt"]) if selected]
-    if len(fitting) != (assigned[-1] + 1 if assigned else 0):
-        raise ValueError("Checkpoint fitting history length is inconsistent.")
-    if any(value != 0 for i, value in enumerate(fitting) if not history["to_adapt"][i]):
-        raise ValueError("Checkpoint fitting history gaps must remain zero.")
-    if any(fitting[i] != history["G_measure"][i] for i in assigned):
-        raise ValueError("Checkpoint fitting samples disagree with recorded measurements.")
+    last_tick = adaptation["fitting_last_tick"]
+    if last_tick is None:
+        if fitting or ticks:
+            raise ValueError("Checkpoint fitting derivatives lack a last tick.")
+    else:
+        if not ticks or _integer(last_tick, "fitting_last_tick") != ticks[-1] or not 1 <= len(fitting) <= 3:
+            raise ValueError("Checkpoint fitting derivative boundary is inconsistent.")
+        for offset, value in enumerate(reversed(fitting)):
+            index = history_by_time.get((last_tick - offset) * float(params["dt"]))
+            if index is None or not history["to_adapt"][index] or value != history["G_measure"][index]:
+                raise ValueError("Checkpoint fitting derivative history crosses a gap.")
     for key in ("pause_reason", "control_hold_reason"):
         if adaptation[key] is not None and not isinstance(adaptation[key], str):
             raise ValueError("Checkpoint pause reason must be text or null.")

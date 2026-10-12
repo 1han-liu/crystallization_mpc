@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Mapping
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
+from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnosticsSnapshot
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
@@ -85,8 +86,36 @@ class ControllerAdapter(ABC):
         """Atomically apply validated settings; never report a no-op as success."""
         raise NotImplementedError("This Controller adapter does not support runtime updates.")
 
+    def supports_runtime_refresh(self) -> bool:
+        """Whether measured tick-boundary runtime updates are supported."""
+        return False
+
+    def validate_runtime_update(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Validate a candidate without changing configuration or estimator state."""
+        raise NotImplementedError("This Controller adapter does not support runtime refresh.")
+
+    def refresh_status(self) -> Mapping[str, Any] | None:
+        """Report the last completed numerical refresh and its calculation segment."""
+        return None
+
+    def rollback_runtime_refresh(self, event_id: str) -> bool:
+        """Abort a staged numerical refresh without rewinding the physical process."""
+        if self.supports_runtime_refresh():
+            raise NotImplementedError("Runtime refresh requires a numerical rollback hook.")
+        return False
+
+    def commit_runtime_refresh(self, event_id: str) -> bool:
+        """Release transient rollback state only after checkpoint persistence."""
+        if self.supports_runtime_refresh():
+            raise NotImplementedError("Runtime refresh requires a commit hook.")
+        return False
+
     def adaptation_status(self) -> Mapping[str, Any] | None:
         """Report actual fitting progress when supported, not merely enablement."""
+        return None
+
+    def diagnostics_snapshot(self) -> ControllerDiagnosticsSnapshot | None:
+        """Return the last committed cycle's optional observational evidence."""
         return None
 
     def export_state(self) -> Mapping[str, Any] | None:

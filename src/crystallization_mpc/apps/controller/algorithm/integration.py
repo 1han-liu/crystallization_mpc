@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from crystallization_mpc.apps.controller.adapter import ControllerAdapter
+from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnosticsSnapshot
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
@@ -92,10 +93,28 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def update_runtime(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
         return self.controller.update_runtime(changes)
 
+    def supports_runtime_refresh(self) -> bool:
+        return True
+
+    def validate_runtime_update(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.controller.validate_runtime_update(changes)
+
+    def refresh_status(self) -> Mapping[str, Any]:
+        return self.controller.refresh_status()
+
+    def rollback_runtime_refresh(self, event_id: str) -> bool:
+        return self.controller.rollback_runtime_refresh(event_id)
+
+    def commit_runtime_refresh(self, event_id: str) -> bool:
+        return self.controller.commit_runtime_refresh(event_id)
+
     def adaptation_status(self) -> Mapping[str, Any] | None:
         if not self.controller.configured:
             return None
         return self.controller.adaptation_status()
+
+    def diagnostics_snapshot(self) -> ControllerDiagnosticsSnapshot | None:
+        return self.controller.diagnostics_snapshot()
 
     def export_state(self) -> Mapping[str, Any] | None:
         return self.controller.export_state()

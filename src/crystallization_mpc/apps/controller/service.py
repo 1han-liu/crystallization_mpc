@@ -23,6 +23,7 @@ from crystallization_mpc.apps.controller.adapter import (
     load_controller_adapter,
 )
 from crystallization_mpc.apps.controller.config import ControllerSettings
+from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnosticsSnapshot
 from crystallization_mpc.apps.controller.process import (
     NoOpProcessAdapter,
     OpcUaNodeConfig,
@@ -36,6 +37,7 @@ from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.apps.controller.telemetry import (
     ControllerMeasurementRecord,
+    capture_controller_diagnostics,
     write_controller_measurement,
 )
 from crystallization_mpc.infra.influxdb.client import InfluxSettings
@@ -159,6 +161,10 @@ class ControllerService:
         self.last_process_state: dict[str, Any] | None = None
         self.last_process_write: dict[str, Any] | None = None
         self.last_control_output: dict[str, Any] | None = None
+        # Observational, current-tick only. Never checkpointed or exposed through
+        # the status/command API; acceptance can retain the full raw snapshot.
+        self._last_committed_diagnostics: ControllerDiagnosticsSnapshot | None = None
+        self._last_diagnostics_capture_error: str | None = None
         self.control_output_count = 0
         self.invalid_control_output_count = 0
         self.influx_write_success_count = 0
@@ -199,6 +205,10 @@ class ControllerService:
         self.runtime_configuration_current: dict[str, Any] | None = None
         self.runtime_events: dict[str, dict[str, Any]] = {}
         self.runtime_last_result: dict[str, Any] | None = None
+        self.runtime_pending: dict[str, Any] | None = None
+        self.runtime_refresh: dict[str, Any] = {"state": "completed", "event_id": None,
+                                              "count": 0, "segment_id": 0}
+        self._persistence_halted = False
         self.runtime_history_error: str | None = None
         self.recovery_status = "disabled"
         self.recovery_error: str | None = None
@@ -265,7 +275,7 @@ class ControllerService:
         if adapter_state is not None and not isinstance(adapter_state, Mapping):
             raise ValueError("Controller adapter export_state() must return an object or None.")
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "updated_at": utc_ts(),
             "state": self.state.value,
             "parameters": copy.deepcopy(self.parameters),
@@ -275,6 +285,8 @@ class ControllerService:
                 "configuration": copy.deepcopy(self.runtime_configuration_current),
                 "events": copy.deepcopy(self.runtime_events),
                 "last_result": copy.deepcopy(self.runtime_last_result),
+                "pending": copy.deepcopy(self.runtime_pending),
+                "refresh": copy.deepcopy(self.runtime_refresh),
             },
             "current_run_id": self.current_run_id,
             "started_at": self.started_at,
@@ -362,11 +374,13 @@ class ControllerService:
             },
         }
 
-    def _try_persist_state_locked(self) -> None:
+    def _try_persist_state_locked(self) -> bool:
         # An unreadable/incompatible archive is evidence, not a fresh state file.
         # In particular, shutdown and rejected messages must not overwrite it.
-        if self.state_path is None or self.recovery_status == "error":
-            return
+        if self.state_path is None:
+            return True
+        if self.recovery_status == "error" or self._persistence_halted:
+            return False
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             document = self._state_document_locked()
@@ -395,6 +409,8 @@ class ControllerService:
             self.recovery_status = "persistence_error"
             self.recovery_error = str(exc)
             logger.exception("Could not persist Controller runtime state.")
+            return False
+        return True
 
     def _restore_persisted_state(self) -> None:
         assert self.state_path is not None
@@ -405,7 +421,7 @@ class ControllerService:
             document = json.loads(self.state_path.read_text(encoding="utf-8"))
             if not isinstance(document, dict):
                 raise ValueError("Controller runtime state must be an object.")
-            if int(document.get("schema_version", 0)) != 1:
+            if int(document.get("schema_version", 0)) != 2:
                 raise ValueError("Unsupported Controller runtime-state schema.")
             state = ControllerState(str(document.get("state") or ""))
             parameters = document.get("parameters")
@@ -655,11 +671,13 @@ class ControllerService:
                         "Preserve the checkpoint and create a new experiment in a new session "
                         "directory; do not substitute the latest process temperature."
                     )
-                self.adapter.set_adaptation(
-                    self.adaptation_enabled,
-                    self.adaptation_mode,
-                    copy.deepcopy(self.last_adaptation_event),
-                )
+                # The checkpoint owns algorithm adaptation state. Overwriting
+                # it here would hide corruption before consistency checks.
+                restored_configuration = self.adapter.runtime_configuration()
+                if restored_configuration is not None and (
+                        restored_configuration.get("adaptation_enabled") != self.adaptation_enabled
+                        or restored_configuration.get("adaptation_mode") != self.adaptation_mode):
+                    raise ValueError("Adaptation state disagrees with recovered algorithm.")
                 if self.settings.opcua_enabled:
                     self.process_adapter.connect()
                 now = self._monotonic_clock()
@@ -695,13 +713,61 @@ class ControllerService:
                 self.runtime_configuration_current = copy.deepcopy(saved_configuration)
                 self.runtime_events = copy.deepcopy(events)
                 self.runtime_last_result = copy.deepcopy(runtime.get("last_result"))
+                pending = runtime.get("pending")
+                refresh = runtime.get("refresh")
+                if not isinstance(refresh, dict) or refresh.get("state") not in {"pending", "completed", "failed"}:
+                    raise ValueError("Invalid runtime refresh recovery state.")
+                for key in ("count", "segment_id"):
+                    if type(refresh.get(key)) is not int or refresh[key] < 0:
+                        raise ValueError("Invalid runtime refresh counter.")
+                if pending is not None:
+                    if not isinstance(pending, dict):
+                        raise ValueError("Invalid pending runtime command.")
+                    pending_command = ControllerRuntimeUpdatePayload.from_mapping(pending["command"])
+                    pending_entry = events.get(pending_command.event_id)
+                    if (state != ControllerState.RUNNING or pending_command.run_id != self.current_run_id
+                            or pending_command.expected_revision != revision
+                            or pending_entry is None or pending_entry["result"].get("status") != "pending"
+                            or pending_entry["command"] != pending_command.to_dict()
+                            or refresh.get("state") != "pending"
+                            or refresh.get("event_id") != pending_command.event_id):
+                        raise ValueError("Pending runtime command disagrees with checkpoint.")
+                    candidate = dict(self.adapter.validate_runtime_update(pending_command.changes))
+                    if candidate != pending.get("configuration"):
+                        raise ValueError("Pending runtime candidate disagrees with checkpoint.")
+                elif any(entry["result"].get("status") == "pending" for entry in events.values()):
+                    raise ValueError("Runtime journal has an orphaned pending command.")
+                actual_refresh = self.adapter.refresh_status() or {}
+                if state == ControllerState.RUNNING and (
+                        actual_refresh.get("count", 0) != refresh["count"]
+                        or actual_refresh.get("segment_id", 0) != refresh["segment_id"]):
+                    raise ValueError("Runtime refresh counters disagree with recovered algorithm.")
+                if state == ControllerState.RUNNING:
+                    last_completed = actual_refresh.get("last_event")
+                    if refresh["count"] > 0:
+                        if not isinstance(last_completed, Mapping):
+                            raise ValueError("Algorithm refresh receipt is missing.")
+                        completed_id = last_completed.get("event_id")
+                        completed = events.get(completed_id, {}).get("result", {})
+                        if (completed.get("status") != "applied" or completed.get("refreshed") is not True
+                                or completed.get("refresh_count") != refresh["count"]
+                                or completed.get("segment_id") != refresh["segment_id"]
+                                or completed.get("effective_tick") != last_completed.get("effective_tick")
+                                or completed.get("elapsed_s") != last_completed.get("elapsed_s")
+                                or completed.get("configuration") != actual_configuration):
+                            raise ValueError("Runtime journal disagrees with algorithm refresh receipt.")
+                        if refresh.get("state") == "completed" and any(
+                                refresh.get(key) != last_completed.get(key)
+                                for key in ("event_id", "effective_tick", "elapsed_s")):
+                            raise ValueError("Runtime refresh receipt disagrees with algorithm boundary.")
+                    elif last_completed is not None:
+                        raise ValueError("Unexpected algorithm refresh receipt before any refresh.")
+                    if revision != refresh["count"]:
+                        raise ValueError("Runtime revision disagrees with completed refresh count.")
+                self.runtime_pending = copy.deepcopy(pending)
+                self.runtime_refresh = copy.deepcopy(refresh)
             else:
-                # Old archives already contain the algorithm's actual parameters
-                # and adaptation settings. No migration of GSensor state is needed.
-                self.runtime_configuration_current = (
-                    copy.deepcopy(dict(actual_configuration))
-                    if actual_configuration is not None else None
-                )
+                raise ValueError("Controller checkpoint is missing runtime refresh state.")
             self.recovery_status = "restored"
             self.recovery_error = None
         except Exception as exc:
@@ -720,8 +786,9 @@ class ControllerService:
             self.recovery_error = str(exc)
             logger.exception("Could not restore Controller runtime state.")
 
-    def start(self) -> None:
-        if not self._control_thread or not self._control_thread.is_alive():
+    def start(self, *, scheduler_enabled: bool = True, consumer_enabled: bool = True) -> None:
+        """Start the consumer, optionally leaving ticks to an isolated test clock."""
+        if scheduler_enabled and (not self._control_thread or not self._control_thread.is_alive()):
             self._control_stop.clear()
             self._control_thread = threading.Thread(
                 target=self._control_forever,
@@ -729,6 +796,8 @@ class ControllerService:
                 daemon=True,
             )
             self._control_thread.start()
+        if not consumer_enabled:
+            return
         with self._lock:
             if self._consumer_thread and self._consumer_thread.is_alive():
                 return
@@ -747,6 +816,7 @@ class ControllerService:
         self._control_wakeup.set()
         with self._lock:
             if self.state == ControllerState.RUNNING:
+                self._reject_pending_runtime_locked("Controller shutdown before refresh.")
                 # Capture the live adapter before asking it to release resources.
                 self._try_persist_state_locked()
                 try:
@@ -1022,6 +1092,9 @@ class ControllerService:
             self.runtime_revision = 0
             self.runtime_events.clear()
             self.runtime_last_result = None
+            self.runtime_pending = None
+            self.runtime_refresh = {"state": "completed", "event_id": None,
+                                    "count": 0, "segment_id": 0}
             self.runtime_configuration_current = None
 
             try:
@@ -1086,6 +1159,7 @@ class ControllerService:
                 raise ValueError("experiment.stop run_id does not match current experiment.")
             if self.state == ControllerState.STOPPED:
                 return {"accepted": True, "duplicate": True, "kind": "stop"}
+            self._reject_pending_runtime_locked("Experiment stopped before refresh.")
             try:
                 self.adapter.stop()
             except Exception as exc:
@@ -1211,31 +1285,139 @@ class ControllerService:
                     raise ValueError("Runtime configuration revision conflict.")
                 if before is None:
                     raise ValueError("This Controller adapter does not support runtime updates.")
-                after = dict(self.adapter.update_runtime(event.changes))
+                if not self.adapter.supports_runtime_refresh():
+                    raise ValueError("This Controller adapter does not support runtime refresh.")
+                if (type(self.adapter).rollback_runtime_refresh is ControllerAdapter.rollback_runtime_refresh
+                        or type(self.adapter).commit_runtime_refresh is ControllerAdapter.commit_runtime_refresh):
+                    raise ValueError("This Controller adapter does not support atomic runtime refresh.")
+                if self.runtime_pending is not None:
+                    raise ValueError("Another runtime refresh is pending.")
+                after = dict(self.adapter.validate_runtime_update(event.changes))
             except (ValueError, TypeError, NotImplementedError) as exc:
                 result.update(accepted=False, status="rejected", reason=str(exc),
-                              configuration=before)
+                              configuration=before, refreshed=False)
             else:
-                self.runtime_revision += 1
-                self.runtime_configuration_current = copy.deepcopy(after)
-                self.adaptation_enabled = after["adaptation_enabled"]
-                self.adaptation_mode = after["adaptation_mode"]
-                if {"adaptation_enabled", "adaptation_mode"} & event.changes.keys():
-                    self.adaptation_event_count += 1
-                    self._processed_adaptation_event_ids.add(event.event_id)
-                    self.last_adaptation_event = {
-                        "run_id": event.run_id, "event_id": event.event_id,
-                        "enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
-                        "requested_at": event.requested_at,
-                    }
-                result.update(accepted=True, status="applied", revision=self.runtime_revision,
-                              configuration=after, effective_tick=self.control_tick_count + 1,
-                              no_change=before == after, applied_at=utc_ts())
+                if before == after:
+                    result.update(accepted=True, status="applied", configuration=before,
+                                  effective_tick=self.control_tick_count, no_change=True,
+                                  refreshed=False, applied_at=utc_ts())
+                else:
+                    result.update(accepted=True, status="pending", configuration=before,
+                                  pending_configuration=after, no_change=False,
+                                  refreshed=False)
+                    self.runtime_pending = {"command": command, "configuration": after}
+                    self.runtime_refresh.update(state="pending", event_id=event.event_id,
+                                                reason="runtime_configuration_changed")
             self.runtime_events[event.event_id] = {
                 "command": command, "result": copy.deepcopy(result),
             }
             self.runtime_last_result = copy.deepcopy(result)
+            if not self._try_persist_state_locked():
+                self._runtime_persistence_failure_locked(event.event_id)
+                return copy.deepcopy(self.runtime_last_result)
             return result
+
+    def _reject_pending_runtime_locked(self, reason: str) -> None:
+        """Produce a terminal result without pretending the staged patch applied."""
+        if self.runtime_pending is None:
+            return
+        event_id = self.runtime_pending["command"]["event_id"]
+        try:
+            self.adapter.rollback_runtime_refresh(event_id)
+            if dict(self.adapter.runtime_configuration() or {}) != self.runtime_configuration_current:
+                raise RuntimeError("Algorithm configuration did not roll back.")
+            if (self.adapter.refresh_status() or {}).get("count", 0) != self.runtime_refresh["count"]:
+                raise RuntimeError("Algorithm refresh counter did not roll back.")
+        except Exception as exc:
+            reason = f"{reason} Numerical rollback failed: {exc}"
+            self._persistence_halted = True
+            self.state = ControllerState.ERROR
+            self._next_tick_monotonic = None
+        entry = self.runtime_events[event_id]
+        entry["result"].update(accepted=False, status="rejected", reason=reason,
+                               refreshed=False, processed_at=utc_ts(),
+                               configuration=copy.deepcopy(self.runtime_configuration_current))
+        entry["result"].pop("pending_configuration", None)
+        self.runtime_last_result = copy.deepcopy(entry["result"])
+        self.runtime_pending = None
+        self.runtime_refresh.update(state="failed", event_id=event_id, reason=reason)
+        self._archive_runtime_event(entry["command"], entry["result"])
+
+    def _runtime_persistence_failure_locked(self, event_id: str) -> None:
+        reason = "Runtime refresh checkpoint persistence failed; Controller stopped."
+        if self.runtime_pending is not None:
+            self._reject_pending_runtime_locked(reason)
+        else:
+            self.adapter.rollback_runtime_refresh(event_id)
+            entry = self.runtime_events[event_id]
+            entry["result"].update(accepted=False, status="rejected", reason=reason,
+                                  refreshed=False, configuration=copy.deepcopy(self.runtime_configuration_current))
+            entry["result"].pop("applied_at", None)
+            self.runtime_last_result = copy.deepcopy(entry["result"])
+            self.runtime_refresh.update(state="failed", event_id=event_id, reason=reason)
+            self._archive_runtime_event(entry["command"], entry["result"])
+        self._persistence_halted = True
+        self.state = ControllerState.ERROR
+        self._next_tick_monotonic = None
+        self.last_error = reason
+        self.process_adapter.disconnect()
+
+    def _complete_pending_runtime_locked(self, tick: ControllerTickInput,
+                                         output: ControllerStepResult | None) -> None:
+        if self.runtime_pending is None:
+            return
+        pending = self.runtime_pending
+        command = pending["command"]
+        event_id = command["event_id"]
+        refresh = self.adapter.refresh_status() or {}
+        event = refresh.get("last_event") or {}
+        actual = self.adapter.runtime_configuration()
+        if (output is None or not output.valid or event.get("event_id") != event_id
+                or event.get("effective_tick") != tick.tick_seq
+                or event.get("elapsed_s") != tick.elapsed_s
+                or dict(actual or {}) != pending["configuration"]
+                or refresh.get("count") != self.runtime_refresh["count"] + 1
+                or refresh.get("segment_id") != self.runtime_refresh["segment_id"] + 1):
+            raise RuntimeError("Controller adapter did not complete the pending runtime refresh.")
+        before = copy.deepcopy(self.runtime_configuration_current)
+        revision_before = self.runtime_revision
+        adaptation_before = (self.adaptation_enabled, self.adaptation_mode,
+                             self.adaptation_event_count, copy.deepcopy(self.last_adaptation_event))
+        self.runtime_revision += 1
+        self.runtime_configuration_current = copy.deepcopy(pending["configuration"])
+        self.adaptation_enabled = self.runtime_configuration_current["adaptation_enabled"]
+        self.adaptation_mode = self.runtime_configuration_current["adaptation_mode"]
+        if {"adaptation_enabled", "adaptation_mode"} & command["changes"].keys():
+            self.adaptation_event_count += 1
+            self._processed_adaptation_event_ids.add(event_id)
+            self.last_adaptation_event = {"run_id": command["run_id"], "event_id": event_id,
+                                         "enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
+                                         "requested_at": command["requested_at"]}
+        result = self.runtime_events[event_id]["result"]
+        result.update(accepted=True, status="applied", configuration=copy.deepcopy(self.runtime_configuration_current),
+                      revision=self.runtime_revision, effective_tick=tick.tick_seq,
+                      elapsed_s=tick.elapsed_s, no_change=False, refreshed=True,
+                      applied_at=utc_ts(), refresh_count=refresh["count"], segment_id=refresh["segment_id"])
+        result.pop("pending_configuration", None)
+        self.runtime_pending = None
+        prior_refresh = copy.deepcopy(self.runtime_refresh)
+        self.runtime_refresh = {"state": "completed", "event_id": event_id,
+                                "count": refresh["count"], "segment_id": refresh["segment_id"],
+                                "effective_tick": tick.tick_seq, "elapsed_s": tick.elapsed_s,
+                                "reason": "runtime_configuration_changed"}
+        self.runtime_last_result = copy.deepcopy(result)
+        if not self._try_persist_state_locked():
+            self.runtime_revision = revision_before
+            self.runtime_configuration_current = before
+            (self.adaptation_enabled, self.adaptation_mode, self.adaptation_event_count,
+             self.last_adaptation_event) = adaptation_before
+            self._processed_adaptation_event_ids.discard(event_id)
+            result["revision"] = revision_before
+            self.runtime_refresh = prior_refresh
+            self._runtime_persistence_failure_locked(event_id)
+            raise RuntimeError(self.last_error)
+        self.adapter.commit_runtime_refresh(event_id)
+        self._archive_runtime_event(command, result)
 
     def _invalidate_growth_input_locked(
         self,
@@ -1583,10 +1765,15 @@ class ControllerService:
         with self._lock:
             if self.state != ControllerState.RUNNING:
                 return {"executed": False, "reason": "not_running"}
+            self._last_committed_diagnostics = None
+            self._last_diagnostics_capture_error = None
             now_value = self._monotonic_clock() if now is None else float(now)
             dt = float(self.parameters.get("dt", 5.0))
             if not math.isfinite(dt) or dt <= 0:
+                self._reject_pending_runtime_locked("Controller parameter dt is invalid.")
                 self.state = ControllerState.ERROR
+                self._next_tick_monotonic = None
+                self._try_persist_state_locked()
                 raise RuntimeError("Controller parameter dt must be finite and positive.")
             self.control_tick_count += 1
             tick_seq = self.control_tick_count
@@ -1611,10 +1798,18 @@ class ControllerService:
                     self.process_error_count += 1
                     self.control_tick_error_count += 1
                     self.last_process_error = str(exc)
+                    self._reject_pending_runtime_locked(f"Fresh process measurement failed: {exc}")
                     self.state = ControllerState.ERROR
                     self._next_tick_monotonic = None
                     self.process_adapter.disconnect()
+                    self._try_persist_state_locked()
                     raise RuntimeError(f"Controller process read failed: {exc}") from exc
+                if not isinstance(process_state, ProcessState):
+                    self._reject_pending_runtime_locked("Fresh process measurement is invalid.")
+                    self.state = ControllerState.ERROR
+                    self._next_tick_monotonic = None
+                    self._try_persist_state_locked()
+                    raise RuntimeError("Fresh process measurement must be a ProcessState.")
                 self.last_process_state = process_state.to_dict()
                 self.last_process_error = None
 
@@ -1625,6 +1820,11 @@ class ControllerService:
                 growth_sample=sample,
                 growth_sample_age_s=age,
                 process_state=process_state,
+                runtime_update=(
+                    {"event_id": self.runtime_pending["command"]["event_id"],
+                     "changes": copy.deepcopy(self.runtime_pending["command"]["changes"])}
+                    if self.runtime_pending is not None else None
+                ),
             )
             try:
                 fits_before = (self.adapter.adaptation_status() or {}).get("fit_count")
@@ -1639,9 +1839,11 @@ class ControllerService:
             except Exception as exc:
                 self.adapter_error_count += 1
                 self.control_tick_error_count += 1
+                self._reject_pending_runtime_locked(f"Controller refresh/control tick failed: {exc}")
                 self.state = ControllerState.ERROR
                 self._next_tick_monotonic = None
                 self.process_adapter.disconnect()
+                self._try_persist_state_locked()
                 raise RuntimeError(f"Controller adapter step failed: {exc}") from exc
 
             output_status: dict[str, Any] | None = None
@@ -1664,22 +1866,42 @@ class ControllerService:
                         self.control_tick_error_count += 1
                         self.last_process_error = str(exc)
                         process_write_error = str(exc)
+                        self._reject_pending_runtime_locked(f"Controller process write failed: {exc}")
                         self.state = ControllerState.ERROR
                         self._next_tick_monotonic = None
                         self.process_adapter.disconnect()
                     else:
                         self.last_process_write = process_write.to_dict()
                         self.last_process_error = None
+                if process_write_error is None:
+                    try:
+                        self._complete_pending_runtime_locked(tick, output)
+                    except Exception as exc:
+                        self._reject_pending_runtime_locked(f"Controller refresh failed: {exc}")
+                        self.state = ControllerState.ERROR
+                        self._next_tick_monotonic = None
+                        self.process_adapter.disconnect()
+                        self._try_persist_state_locked()
+                        raise
                 output_status = self._record_control_output_locked(
                     tick,
-                    output,
+                    output if process_write_error is None else ControllerStepResult(
+                        valid=False, error=f"Controller process write failed: {process_write_error}"
+                    ),
                     process_state=process_state,
                     process_write=process_write,
                     process_write_attempted=process_write_attempted,
                     process_write_error=process_write_error,
                 )
                 if process_write_error is not None:
+                    self._try_persist_state_locked()
                     raise RuntimeError(f"Controller process write failed: {process_write_error}")
+            elif self.runtime_pending is not None:
+                self._reject_pending_runtime_locked("Controller refresh produced no output.")
+                self.state = ControllerState.ERROR
+                self._next_tick_monotonic = None
+                self._try_persist_state_locked()
+                raise RuntimeError("Controller refresh produced no output.")
             if self.state == ControllerState.RUNNING:
                 previous_deadline = self._next_tick_monotonic or now_value
                 self._next_tick_monotonic = max(previous_deadline + dt, now_value + dt)
@@ -1709,6 +1931,20 @@ class ControllerService:
     ) -> dict[str, Any]:
         computed_at = utc_ts()
         written: bool | None = None
+        diagnostics: ControllerDiagnosticsSnapshot | None = None
+        diagnostic_error: str | None = None
+        if not output.valid:
+            diagnostic_error = "invalid_output"
+        elif process_write_error is not None:
+            diagnostic_error = "process_write_failed"
+        else:
+            # _control_tick_once reaches this point only after its pending
+            # runtime refresh has been durably persisted and committed.
+            diagnostics, diagnostic_error = capture_controller_diagnostics(
+                self.adapter, run_id=str(self.current_run_id), tick=tick
+            )
+        self._last_committed_diagnostics = diagnostics
+        self._last_diagnostics_capture_error = diagnostic_error
         record = ControllerMeasurementRecord(
             run_id=str(self.current_run_id),
             tick=tick,
@@ -1727,6 +1963,8 @@ class ControllerService:
                 else _configured_control_target(self.parameters)
             ),
             runtime_revision=self.runtime_revision,
+            diagnostics=diagnostics,
+            diagnostics_capture_error=diagnostic_error,
         )
         if self.measurement_writer is not None:
             try:
@@ -1771,6 +2009,7 @@ class ControllerService:
             "computed_at": computed_at,
             "runtime_configuration": copy.deepcopy(self.runtime_configuration_current),
             "runtime_revision": self.runtime_revision,
+            "runtime_refresh": copy.deepcopy(self.runtime_refresh),
             "result": output.to_dict(),
             "process_state": (
                 process_state.to_dict() if process_state is not None else None
@@ -1860,6 +2099,8 @@ class ControllerService:
                     "revision": self.runtime_revision,
                     "configuration": copy.deepcopy(self.runtime_configuration_current),
                     "last_result": copy.deepcopy(self.runtime_last_result),
+                    "pending": copy.deepcopy(self.runtime_pending),
+                    "refresh": copy.deepcopy(self.runtime_refresh),
                     "recent_events": [
                         copy.deepcopy(entry["result"])
                         for entry in list(self.runtime_events.values())[-50:]

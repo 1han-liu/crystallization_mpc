@@ -64,6 +64,9 @@ class RuntimeHistory:
                     raise ValueError("Runtime history event identity reused.")
                 if previous.get("result") and not result:
                     return  # A late pending response cannot erase a confirmed outcome.
+                if ((previous.get("result") or {}).get("status") in {"applied", "rejected"}
+                        and (result or {}).get("status") == "pending"):
+                    return  # Tick-boundary refresh requests have an explicit pending result.
                 merged = {**previous, **entry, "sequence": previous["sequence"]}
                 if result and result.get("status") == "applied" and not result.get("no_change") and previous.get("grafana_sync") == "not_applicable":
                     merged["grafana_sync"] = "pending"
