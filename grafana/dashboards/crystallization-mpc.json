@@ -99,7 +99,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -270,7 +270,7 @@
       ],
       "title": "Target & obj. fun (sigma)",
       "type": "timeseries",
-      "description": "紫色曲线显示整个实验过程的相对过饱和度 sigma，切换到 G 控制后仍持续显示。设定值、绝对误差和优化目标函数只显示明确标记为 sigma 控制阶段的记录。左轴：sigma、设定值与绝对误差（无量纲）；右轴：优化目标函数值 objective。无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "The purple curve shows relative supersaturation sigma throughout the experiment, including after switching to G control. Setpoint, absolute error and optimization objective are shown only for records explicitly marked as sigma control. Left axis: sigma, setpoint and absolute error (dimensionless); right axis: optimization objective value. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -322,7 +322,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -493,7 +493,7 @@
       ],
       "title": "Target & obj. fun (G)",
       "type": "timeseries",
-      "description": "只显示明确标记为 G 目标的记录。左轴由 m/s 换算为 μm/s；右轴为优化目标函数值 objective，保持原值。没有目标类型标签的历史记录不在此图显示。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Only records explicitly marked with a G target are shown. The left axis converts m/s to μm/s; the right axis shows the unscaled optimization objective value. Historical records without a target-type label are excluded. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "collapsed": false,
@@ -558,7 +558,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -713,7 +713,7 @@
       ],
       "title": "Reactor & jacket temperature",
       "type": "timeseries",
-      "description": "反应器温度、滤波温度、夹套温度和夹套设定值。温度由 K 换算为 °C。T_j_set 是计算设定值，不代表设备已执行。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Reactor temperature, filtered temperature, jacket temperature and jacket setpoint. Temperatures are converted from K to °C. T_j_set is a calculated setpoint and does not confirm device execution. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -765,7 +765,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -872,7 +872,7 @@
       ],
       "title": "Reactor temperature",
       "type": "timeseries",
-      "description": "反应器温度 T 与滤波值 T_KF，显示单位 °C。滤波曲线需要 Controller 实际输出。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Reactor temperature T and filtered value T_KF in °C. The filtered curve requires actual output from Controller. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -924,7 +924,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -1060,7 +1060,7 @@
       ],
       "title": "Temperature gradient",
       "type": "timeseries",
-      "description": "温度变化率及设定值，单位 K/s；这里的温差变化率不减 273.15。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Temperature change rate and setpoint in K/s; no 273.15 offset is applied to rates. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -1112,7 +1112,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -1219,7 +1219,7 @@
       ],
       "title": "Concentration",
       "type": "timeseries",
-      "description": "浓度及滤波值，按项目约定显示 g/gH₂O；设备接入时需要保证传入值遵守这一单位。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Concentration and filtered values in g/gH₂O, as defined by the project. Device inputs must use this unit. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -1271,7 +1271,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -1378,7 +1378,7 @@
       ],
       "title": "Concentration gradient",
       "type": "timeseries",
-      "description": "浓度变化率及滤波值，单位 (g/gH₂O)/s。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Concentration change rate and filtered values in (g/gH₂O)/s. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -1430,7 +1430,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -1493,7 +1493,7 @@
       ],
       "title": "Count",
       "type": "timeseries",
-      "description": "显示设备返回的 process_count_middle 原始计数；具体计数口径和单位待设备/算法负责人确认。只有启用过程读取且设备返回该值时才有数据。按窗口取最后值，不做累加。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Raw process_count_middle returned by the device. The counting definition and unit require confirmation by the device/algorithm owners. Data require process reading to be enabled and the value to be returned. Uses the last value per window without accumulation. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -1545,7 +1545,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -1623,7 +1623,7 @@
       ],
       "title": "Relative supersaturation",
       "type": "timeseries",
-      "description": "相对过饱和度 sigma，无量纲。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Relative supersaturation sigma (dimensionless). If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -1675,7 +1675,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -1905,7 +1905,7 @@
       ],
       "title": "Growth rate",
       "type": "timeseries",
-      "description": "Controller 的模型与测量生长率，以及 GSensor 的 u/v 原始和滤波生长率，统一显示 μm/s。G_measure_KF 只在满足自适应条件时输出。两服务分别使用计算/处理时间，未强行对齐采样点。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Controller model and measured growth rates, plus GSensor raw and filtered u/v growth rates, all in μm/s. G_measure_KF is output only when the adaptive conditions are met. The services use their own calculation/processing timestamps; sample times are not forced to align. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -1957,7 +1957,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无数据"
+          "noValue": "No data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -2085,7 +2085,7 @@
       ],
       "title": "Growth parameters",
       "type": "timeseries",
-      "description": "保留原图缩放：n × 100、k₀ / 10¹⁴、E_A / 1000（kJ/mol），用于同图比较。当前接口没有 n_KF、k_0_KF、E_A_KF，暂不绘制这三条滤波曲线。 无数据时，请检查所选实验和右上角时间范围；未产生的字段不会补零。"
+      "description": "Retains the original scaling for comparison in one plot: n × 100, k₀ / 10¹⁴ and E_A / 1000 (kJ/mol). The current interface has no n_KF, k_0_KF or E_A_KF, so these three filtered curves are not plotted. If no data appear, check the selected experiment and the upper-right time range; missing fields are not zero-filled."
     },
     {
       "datasource": {
@@ -2137,7 +2137,7 @@
               }
             ]
           },
-          "noValue": "所选实验 / 时段暂无 Lag 数据"
+          "noValue": "No lag data for the selected experiment or time range"
         },
         "overrides": [
           {
@@ -2264,7 +2264,7 @@
       ],
       "title": "Lag time & increase percentage",
       "type": "timeseries",
-      "description": "原 MATLAB 第 12 图的两条曲线：蓝色实线为动态滞后时间 t_lag，左轴单位秒；粉色点线为相对基础滞后时间的增加百分比 (t_lag_perc - 1) × 100，右轴单位 %。t_lag_perc 是 Controller 本次计算的倍率，不是配置中的增加比例。只展示已写入的计算结果；更新前未保存这些字段的历史实验不会补零或补画。无数据时，请检查所选实验和右上角时间范围。"
+      "description": "Two curves from the original MATLAB Figure 12: solid blue shows dynamic lag time t_lag on the left axis (s); dotted pink shows the percentage increase over the base lag, (t_lag_perc - 1) × 100, on the right axis (%). t_lag_perc is the multiplier computed in the current Controller cycle, not the configured increase ratio. Displays recorded results only; historical experiments without these fields are not zero-filled or backfilled. If no data appear, check the selected experiment and the upper-right time range."
     },
     {
       "collapsed": true,
@@ -4383,7 +4383,7 @@
         "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"run_id\", predicate: (r) => r._measurement == \"controller_measurement\" or r._measurement == \"gsensor_measurement\", start: v.timeRangeStart, stop: v.timeRangeStop)",
         "hide": 0,
         "includeAll": true,
-        "label": "有数据的实验",
+        "label": "Experiment",
         "multi": true,
         "name": "run_id",
         "options": [],
@@ -4393,7 +4393,7 @@
         "skipUrlSync": false,
         "sort": 2,
         "type": "query",
-        "description": "列出当前时间范围内已写入 Controller 或 GSensor 数据的实验；尚未产生数据的实验不会出现在列表中。"
+        "description": "Lists experiments with recorded Controller or GSensor data in the current time range; experiments without data are excluded."
       }
     ]
   },
@@ -4407,5 +4407,5 @@
   "uid": "crystallization-mpc-analysis",
   "version": 5,
   "weekStart": "",
-  "description": "控制目标与过程数据分区展示：Control Targets 包含 sigma、G 目标跟踪、误差与目标函数；Process Measurements & Diagnostics 展示温度、浓度、实际 sigma/G、计数、参数和滞后。两个分区可独立折叠，共用实验与时间筛选。先选择有数据的实验，再调整右上角时间范围；图例保留实验编号，没有输出的曲线不补零。参数 KF 的缺项详见对应图说明。"
+  "description": "Control Targets shows sigma/G target tracking, errors and optimization objectives. Process Measurements & Diagnostics shows temperature, concentration, actual sigma/G, counts, parameters and lag. Both sections collapse independently and share experiment and time filters. Select an experiment with data, then adjust the upper-right time range. Legends retain experiment IDs; missing curves are not zero-filled. See the Growth parameters description for unavailable KF fields."
 }

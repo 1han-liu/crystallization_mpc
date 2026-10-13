@@ -9,7 +9,7 @@
 [实时仪表盘](http://127.0.0.1:3000/d/crystallization-mpc-analysis?from=now-15m&to=now&refresh=5s)
 
 也可以点击 Central 顶部的 Grafana。右上角选择 Last 15 minutes 和 5s 刷新；
-“有数据的实验”选择当前 run_id。默认首页可能显示更长时间范围，需要自行缩短。
+`Experiment` 选择当前 run_id。默认首页可能显示更长时间范围，需要自行缩短。
 本机免登录仅授予 Viewer 权限；管理账户随机密码保存在本地受限文件中，不在文档或 Git 中公开。
 
 图表包含温度、浓度、sigma、G、目标/误差/目标函数、E_A/k_0/n 和滞后时间。
@@ -20,6 +20,10 @@
 `Samples / completed fits / failures` 仍在 Central 的拟合状态行；新采集诊断的
 实验另在下方默认折叠诊断分组中显示本段样本、最低样本要求和刷新次数。
 真实拟合参数变化可查看 Growth parameters。
+
+2026-10-13：默认仪表盘的说明、无数据提示及实验筛选标签已统一为英文；
+实验下拉框显示为 `Experiment`，筛选变量仍为 `run_id`。本轮只调整 Grafana
+显示文字，不改变查询、字段、单位、坐标轴、面板布局或已有英文诊断分区。
 
 ## 自动刷新四阶段验收（2026-10-09）
 
