@@ -1894,6 +1894,37 @@ class CentralService:
             "End the current experiment before creating or switching experiments."
         )
 
+    def _require_controller_start_ready(self, run_id: str) -> None:
+        """Reject known startup blockers before locking or publishing a run."""
+
+        controller = self.controller_status()
+        if not controller.get("available"):
+            raise RuntimeError(
+                "Controller is unavailable; the experiment was not started. "
+                "Restore the Controller service and retry Start."
+            )
+        recovery = controller.get("recovery") or {}
+        if recovery.get("status") == "error":
+            reason = recovery.get("error") or "The saved Controller state is incompatible."
+            raise InvalidExperimentStateError(
+                f"Controller checkpoint recovery failed: {reason} "
+                "The experiment was not started. Preserve the old session directory, "
+                "set EXPERIMENT_HOST_ROOT to a new directory, and recreate Central, "
+                "Controller and GSensor before starting a new experiment."
+            )
+        if (controller.get("adapter") or {}).get("safe_noop"):
+            raise InvalidExperimentStateError(
+                "The Controller algorithm adapter is not enabled. Set "
+                "CONTROLLER_ADAPTER to the algorithm implementation and recreate "
+                "Controller before starting an experiment."
+            )
+        if (controller.get("status") == "running"
+                and controller.get("current_run_id") != run_id):
+            raise InvalidExperimentStateError(
+                "Controller is running another experiment. End that experiment "
+                "before starting the selected Central experiment."
+            )
+
     def start_experiment(self, params: ParamsUpdate | None = None) -> Dict[str, Any]:
         run_id = self.experiments.current_run_id()
         if run_id is None:
@@ -1905,6 +1936,7 @@ class CentralService:
             raise InvalidExperimentStateError(
                 f"Cannot start experiment {run_id} from state {manifest.status.value}."
             )
+        self._require_controller_start_ready(run_id)
         if params is not None:
             self.save_params(
                 params,
@@ -1962,6 +1994,7 @@ class CentralService:
             ) from exc
         return {
             "triggered": True,
+            "startup_status": "sent",
             "key": "experiment_active",
             "value": True,
             "parameter_messages": parameter_messages,

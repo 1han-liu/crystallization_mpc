@@ -882,7 +882,8 @@ class ControllerService:
                     break
                 with self._lock:
                     self.consumer_status = "reconnecting"
-                    self.last_error = f"RabbitMQ consumer error: {exc}"
+                    if self.recovery_status != "error":
+                        self.last_error = f"RabbitMQ consumer error: {exc}"
                 logger.exception("Controller RabbitMQ consumer stopped; retrying.")
                 self._consumer_stop.wait(5)
 
@@ -913,6 +914,11 @@ class ControllerService:
                     self.last_error = result.get("reason")
 
         with self._lock:
+            if self.recovery_status == "error":
+                # A later bus message must not hide the reason recovery failed
+                # or make an incompatible checkpoint look ready to run.
+                self.state = ControllerState.ERROR
+                self.last_error = self._recovery_failure_reason_locked()
             self.last_message_result = copy.deepcopy(result)
             self._try_persist_state_locked()
             if result.get("kind") == "runtime" and result.get("event_id") in self.runtime_events:
@@ -994,6 +1000,8 @@ class ControllerService:
         normalized = {str(key): copy.deepcopy(value) for key, value in params.items()}
 
         with self._lock:
+            if self.recovery_status == "error":
+                raise ValueError(self._recovery_failure_reason_locked())
             if self.state == ControllerState.RUNNING:
                 if version == self.parameter_version and normalized == self.parameters:
                     return {"accepted": True, "duplicate": True, "kind": "params"}
@@ -1008,6 +1016,9 @@ class ControllerService:
             "parameter_version": version,
             "parameter_count": len(normalized),
         }
+
+    def _recovery_failure_reason_locked(self) -> str:
+        return f"Controller recovery failed: {self.recovery_error}"
 
     def _start_experiment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         _positive_int(payload.get("parameter_version"), "parameter_version")
@@ -2067,6 +2078,7 @@ class ControllerService:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            recovery_failed = self.recovery_status == "error"
             thread_alive = bool(
                 self._consumer_thread and self._consumer_thread.is_alive()
             )
@@ -2087,8 +2099,8 @@ class ControllerService:
             )
             return {
                 "role": ROLE,
-                "status": self.state.value,
-                "active": self.state == ControllerState.RUNNING,
+                "status": ControllerState.ERROR.value if recovery_failed else self.state.value,
+                "active": self.state == ControllerState.RUNNING and not recovery_failed,
                 "current_run_id": self.current_run_id,
                 "parameter_version": self.parameter_version,
                 "parameter_count": len(self.parameters),
@@ -2180,7 +2192,11 @@ class ControllerService:
                 },
                 "last_message": copy.deepcopy(self.last_message),
                 "last_message_result": copy.deepcopy(self.last_message_result),
-                "last_error": self.last_error,
+                "last_error": (
+                    self._recovery_failure_reason_locked()
+                    if recovery_failed
+                    else self.last_error
+                ),
                 "consumer": {
                     "status": self.consumer_status,
                     "thread_alive": thread_alive,

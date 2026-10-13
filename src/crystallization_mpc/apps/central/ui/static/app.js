@@ -51,6 +51,7 @@ const state = {
   gsensorStatusRunId: null,
   selectionSentRunId: null,
   selectionRetryRunId: null,
+  startSentRunId: null,
 };
 
 const shell = document.querySelector(".shell");
@@ -237,12 +238,29 @@ function runtimeRunActive() {
   return Boolean(status) && !["created", "completed", "error"].includes(status);
 }
 
-function runtimeReady() {
+function controllerRunningForRun(runId) {
   const controller = state.controllerStatus;
+  return Boolean(runId) && state.systemStatusFresh && controller?.available
+    && controller.current_run_id === runId && controller.status === "running"
+    && controller.active === true && controller.recovery?.status !== "error";
+}
+
+function runtimeReady() {
   return runtimeRunActive() && currentExperiment()?.status !== "stopping"
-    && state.systemStatusFresh && controller?.available
-    && controller.current_run_id === state.currentRunId
-    && controller.status === "running" && controller.runtime_controls?.supported;
+    && controllerRunningForRun(state.currentRunId)
+    && state.controllerStatus.runtime_controls?.supported
+    && Boolean(state.controllerStatus.runtime_controls?.configuration);
+}
+
+function controllerFailureMessage(controller = state.controllerStatus) {
+  if (controller?.recovery?.status === "error") {
+    return `Controller recovery failed: ${controller.recovery.error || "the saved state could not be restored."}`;
+  }
+  if (controller?.recovery?.status === "persistence_error" && controller.recovery.error) {
+    return `Controller state could not be saved: ${controller.recovery.error}`;
+  }
+  return controller?.error || controller?.last_error
+    || (controller?.status === "error" ? "Controller reported an error." : "");
 }
 
 function runtimeUnconfirmed(request = state.runtimeRequest) {
@@ -374,7 +392,7 @@ function renderConfigurationDetails(configuration, live) {
   });
   const panel = document.querySelector("#runtime-fitting");
   const status = state.controllerStatus;
-  const adaptation = live && status?.available && status.current_run_id === state.currentRunId
+  const adaptation = live && controllerRunningForRun(state.currentRunId)
     ? status.adaptation : null;
   if (!adaptation) {
     panel.textContent = "Fitting diagnostics unavailable. No confirmed live Controller data.";
@@ -449,21 +467,23 @@ async function loadRuntimeHistory(older = false) {
 function renderLiveConfiguration() {
   const runtime = state.systemStatusFresh && state.controllerStatus?.available && state.controllerStatus?.current_run_id === state.currentRunId
     ? state.controllerStatus?.runtime_controls : null;
-  const configuration = runtime?.configuration;
+  const ready = runtimeReady();
+  const configuration = ready ? runtime?.configuration : null;
+  const displayedConfiguration = configuration || state.runConfiguration;
   runConfigurationControls.forEach((control) => { control.disabled = true; });
-  adaptationEnableLabel.textContent = "Adaptation";
-  const disabled = !runtimeReady() || mutationInFlight() || runtimeUnconfirmed();
-  if (configuration) {
-    controlTargetSelect.value = configuration.control_target;
-    adaptationEnabledSelect.value = String(configuration.adaptation_enabled);
+  adaptationEnableLabel.textContent = configuration ? "Adaptation" : "Adaptation at Start (unconfirmed)";
+  const disabled = !ready || mutationInFlight() || runtimeUnconfirmed();
+  if (displayedConfiguration) {
+    controlTargetSelect.value = displayedConfiguration.control_target;
+    adaptationEnabledSelect.value = String(displayedConfiguration.adaptation_enabled);
   } else {
     controlTargetSelect.value = "";
     adaptationEnabledSelect.value = "";
   }
   controlTargetSelect.disabled = disabled;
   adaptationEnabledSelect.disabled = disabled;
-  renderAdaptiveSelection(configuration?.adaptation_mode || "", disabled);
-  renderSetpoints(configuration, disabled);
+  renderAdaptiveSelection(displayedConfiguration?.adaptation_mode || "", disabled);
+  renderSetpoints(configuration || state.params?.controller, disabled);
   renderConfigurationDetails(configuration, true);
   const request = state.runtimeRequest;
   const timedOut = runtimeUnconfirmed() && Date.now() / 1000 - (request.created_at || 0) >= 30;
@@ -471,9 +491,15 @@ function renderLiveConfiguration() {
   retryRuntimeButton.disabled = !runtimeReady() || mutationInFlight();
   let label = "live";
   let message = `Actual Controller settings · revision ${runtime?.revision ?? "—"}. Changes affect this run only.`;
-  if (!runtimeReady()) {
-    label = "unconfirmed";
-    message = "Controller is unavailable, stopped or belongs to another run. Editing is locked.";
+  if (!ready) {
+    const controller = state.controllerStatus;
+    const failed = controller?.status === "error" || controller?.recovery?.status === "error";
+    label = failed ? "Controller error" : "unconfirmed";
+    message = failed ? controllerFailureMessage(controller)
+      : controller?.current_run_id && controller.current_run_id !== state.currentRunId
+        ? `Controller belongs to another experiment (${controller.current_run_id}).`
+        : "Controller has not confirmed running settings for this experiment.";
+    message += " Saved start settings are shown; they are not confirmed as active. Editing is locked.";
   } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
     label = timedOut || request?.status === "timeout" ? "confirmation timeout" : "awaiting confirmation";
     message = `Request ${request?.command?.event_id || "…"}: waiting for the next control tick and a valid measurement to apply settings and refresh Controller. Retry uses the same event.`;
@@ -486,7 +512,7 @@ function renderLiveConfiguration() {
     label = "rejected";
     message = request.result?.reason || "Controller rejected the update; prior settings remain.";
   }
-  const persistenceFailed = runtimeReady() && state.controllerStatus?.recovery?.status === "persistence_error";
+  const persistenceFailed = ready && state.controllerStatus?.recovery?.status === "persistence_error";
   if (persistenceFailed) {
     if (label === "applied" || label === "live") label = "active — not saved";
     message += " Controller state could not be saved. Active settings are not guaranteed to survive a restart; resolve the storage error before restarting.";
@@ -497,10 +523,10 @@ function renderLiveConfiguration() {
     message += ` ${state.runtimeHistoryError} Controller settings remain authoritative; history may be incomplete.`;
   }
   runConfigurationStatus.textContent = label;
-  runConfigurationStatus.className = ["rejected", "unconfirmed", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
+  runConfigurationStatus.className = ["rejected", "unconfirmed", "Controller error", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
     ? "status error" : (label === "applied" ? "status success" : "status running");
   runConfigurationMessage.textContent = message;
-  runConfigurationMessage.classList.toggle("error", Boolean(state.runtimeError || state.runtimeHistoryError) || label === "rejected" || persistenceFailed);
+  runConfigurationMessage.classList.toggle("error", Boolean(state.runtimeError || state.runtimeHistoryError) || ["rejected", "Controller error"].includes(label) || persistenceFailed);
 }
 
 function applyRunConfigurationPayload(payload) {
@@ -1070,6 +1096,37 @@ function setExperimentMessage(message, { error = false } = {}) {
   experimentMessage.classList.toggle("error", error);
 }
 
+function renderControllerStartStatus() {
+  if (!state.startSentRunId) return;
+  const current = currentExperiment();
+  if (current?.run_id !== state.startSentRunId
+      || !["starting", "waiting_for_initial_image", "initializing", "measuring"].includes(current.status)) {
+    state.startSentRunId = null;
+    return;
+  }
+  if (!state.systemStatusFresh) return;
+  const controller = state.controllerStatus;
+  const rejected = controller?.last_message?.name === "experiment.start"
+    && controller.last_message.payload?.run_id === current.run_id
+    && controller.last_message_result?.accepted === false;
+  if (controller?.status === "error" || controller?.recovery?.status === "error" || rejected) {
+    commandStatus.textContent = "start blocked";
+    commandStatus.className = "status error";
+    const reason = controllerFailureMessage(controller)
+      || controller.last_message_result?.reason || "Controller rejected the start command.";
+    setExperimentMessage(`Controller did not start ${displayNameForExperiment(current)}. ${reason}`, { error: true });
+  } else if (controllerRunningForRun(current.run_id)) {
+    commandStatus.textContent = "running";
+    commandStatus.className = "status success";
+    setExperimentMessage(`Controller confirmed running for ${displayNameForExperiment(current)}.`);
+    state.startSentRunId = null;
+  } else {
+    commandStatus.textContent = "awaiting Controller";
+    commandStatus.className = "status idle";
+    setExperimentMessage(`Start sent for ${displayNameForExperiment(current)}. Waiting for Controller to confirm this experiment is running.`);
+  }
+}
+
 function currentExperiment() {
   return state.experiments.find((item) => item.run_id === state.currentRunId) || null;
 }
@@ -1315,7 +1372,8 @@ function renderExperiments() {
     && status === "completed";
   const isTerminal = ["completed", "error"].includes(status);
   const canCreate = !hasCurrent || isTerminal;
-  const canStart = ["created", "starting"].includes(status);
+  const controllerRunning = controllerRunningForRun(current?.run_id);
+  const canStart = ["created", "starting"].includes(status) && !controllerRunning;
   const selectionRetryRequired = status === "created"
     && state.selectionRetryRunId === current?.run_id;
   const canRetrySelection = status === "created" && (selectionRetryRequired
@@ -1332,8 +1390,9 @@ function renderExperiments() {
     state.historyCursor = null;
   }
 
-  experimentStatus.textContent = current?.status || "not selected";
-  experimentStatus.className = `status ${current?.status || "idle"}`;
+  const displayedStatus = status === "starting" && controllerRunning ? "running" : status;
+  experimentStatus.textContent = displayedStatus || "not selected";
+  experimentStatus.className = `status ${displayedStatus || "idle"}`;
   experimentDisplayName.textContent = displayNameForExperiment(current);
   experimentRunId.textContent = current?.run_id || "—";
   experimentCreatedAt.textContent = formatExperimentTime(current?.created_at);
@@ -1357,7 +1416,8 @@ function renderExperiments() {
   newExperimentButton.textContent = action === "create" ? "Creating…" : "Create Experiment";
   startExperimentButton.textContent = action === "start"
     ? "Starting…"
-    : (status === "starting" ? "Retry Start" : "Start Experiment");
+    : controllerRunning ? "Controller Running"
+      : (status === "starting" ? "Retry Start" : "Start Experiment");
   endExperimentButton.textContent = action === "end"
     ? "Ending…"
     : (status === "stopping" ? "Retry End" : "End Experiment");
@@ -1421,9 +1481,11 @@ function renderSystemStatus(payload) {
   gsensorLiveError.textContent = gsensorStatus.error || gsensor.consumer_error || "";
   gsensorLiveError.hidden = !gsensorLiveError.textContent;
 
-  controllerLiveStatus.textContent = controller.status || "unavailable";
+  const recoveryFailed = controller.recovery?.status === "error";
+  controllerLiveStatus.textContent = recoveryFailed ? "error" : controller.status || "unavailable";
   controllerLiveStatus.className = controller.available
-    ? (controller.status === "error" ? "status error" : "status running")
+    ? (recoveryFailed || controller.status === "error" ? "status error"
+      : controller.status === "running" ? "status running" : "status idle")
     : "status error";
   controllerRunId.textContent = controller.current_run_id || "—";
   controllerLastFrame.textContent = controller.last_frame_seq ?? "—";
@@ -1439,14 +1501,15 @@ function renderSystemStatus(payload) {
     ? `Last fitting status: ${fitting.last_status}; mode ${fitting.last_mode || "—"}; tick ${fitting.last_tick ?? "—"}. Samples ${fitting.sample_count}/${fitting.minimum_samples}; completed fits ${fitting.fit_count}; failures ${fitting.failure_count}.${fitting.pause_reason ? " " + fitting.pause_reason : ""}`
     : "Fitting diagnostics unavailable.";
   adaptationActionMessage.classList.toggle("error", fitting?.last_status === "fit_failed");
-  const previousConnectionError = !controller.error
+  const previousConnectionError = !controller.error && !recoveryFailed
+    && controller.recovery?.status !== "persistence_error"
     && typeof controller.last_error === "string"
     && controller.last_error.startsWith("RabbitMQ consumer error:")
     && controller.consumer?.status === "consuming"
     && controller.consumer?.thread_alive === true;
   controllerLiveError.textContent = previousConnectionError
     ? `Previous connection error; connection currently reported active. ${controller.last_error}`
-    : (controller.error || controller.last_error || "");
+    : controllerFailureMessage(controller);
   controllerLiveError.hidden = !controllerLiveError.textContent;
 
   const lastSeedEventId = controller.seed_events?.last?.event_id || null;
@@ -1466,6 +1529,8 @@ function renderSystemStatus(payload) {
   }
 
 
+  renderExperiments();
+  renderControllerStartStatus();
   renderRuntimeControls();
   renderGsensorActivation();
 
@@ -1487,9 +1552,7 @@ function renderRuntimeControls() {
     "initializing",
     "measuring",
   ].includes(current.status);
-  const controllerReady = state.systemStatusFresh && controller.available
-    && controller.status === "running"
-    && controller.current_run_id === current?.run_id;
+  const controllerReady = controllerRunningForRun(current?.run_id);
   const runtimeActionInFlight = mutationInFlight()
     || Boolean(state.pendingSeedEventId);
   addSeedButton.disabled = runtimeActionInFlight || !activeExperiment || !controllerReady;
@@ -2041,16 +2104,17 @@ async function startExperimentCommand() {
     state.params = payload.parameters;
     renderParameterForms();
     commandResult.textContent = JSON.stringify(payload, null, 2);
-    commandStatus.textContent = "start accepted";
-    commandStatus.className = "status success";
+    state.startSentRunId = payload.experiment?.run_id || state.currentRunId;
+    commandStatus.textContent = "start sent";
+    commandStatus.className = "status idle";
+    setExperimentMessage(`Start sent for ${displayNameForExperiment(payload.experiment)}. Waiting for Controller confirmation.`);
     await loadSystemStatus();
-    setExperimentMessage(`Start accepted for ${displayNameForExperiment(payload.experiment)}. Service status is shown below.`);
     return payload;
   } catch (error) {
     if (accepted) {
-      commandStatus.textContent = "start accepted";
-      commandStatus.className = "status success";
-      const message = `Start accepted for ${displayNameForExperiment(accepted.experiment)}, but status refresh failed: ${error.message} Confirm the current status before retrying.`;
+      commandStatus.textContent = "start sent; unconfirmed";
+      commandStatus.className = "status error";
+      const message = `Start sent for ${displayNameForExperiment(accepted.experiment)}, but status refresh failed: ${error.message} Controller startup is unconfirmed; refresh status before retrying.`;
       setExperimentMessage(message, { error: true });
       commandResult.textContent = message;
       return accepted;
