@@ -7,6 +7,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from crystallization_mpc.infra.influxdb.durable import initialize_outbox, enqueue_record, inspect_archive_queue
+from crystallization_mpc.infra.influxdb.process_events import process_event
+
 from .commands import WriteCommand
 
 
@@ -18,6 +21,7 @@ class CommandJournal:
     """
 
     def __init__(self, path: str) -> None:
+        self.path = path
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
@@ -45,6 +49,7 @@ class CommandJournal:
             );
             """
         )
+        initialize_outbox(self.connection)
         self.recovered_count = self._recover_executing()
 
     def _recover_executing(self) -> int:
@@ -114,6 +119,7 @@ class CommandJournal:
                 "INSERT OR IGNORE INTO experiments(run_id, run_started_at) VALUES (?, ?)",
                 (command.run_id, command.run_started_at.timestamp()),
             )
+            self._audit(json.loads(command.fingerprint()), "executing")
         return None
 
     def finish(self, command_id: str, result: dict[str, Any]) -> None:
@@ -125,6 +131,19 @@ class CommandJournal:
             "UPDATE commands SET state=?, result=? WHERE command_id=?",
             (result["status"], json.dumps(result, allow_nan=False), command_id),
         )
+        self._audit(result, "result")
+
+    def _audit(self, payload: dict[str, Any], stage: str) -> None:
+        enqueue_record(self.connection, **process_event(payload, "opcua_writer", stage))
+
+    def audit_rejection(self, result: dict[str, Any]) -> None:
+        with self.connection:
+            self._audit(result, "invalid")
 
     def close(self) -> None:
         self.connection.close()
+
+
+def inspect_writer_outbox(path: str | Path | None, run_id: str | None = None):
+    """Pending here means journal events not yet handed to the durable archive."""
+    return inspect_archive_queue(path, run_id)

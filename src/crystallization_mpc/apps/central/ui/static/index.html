@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20261006-parameter-refresh-1">
+    <link rel="stylesheet" href="/static/styles.css?v=20261014-experiment-archive">
   </head>
   <body>
     <div class="shell">
@@ -131,11 +131,12 @@
               <legend>Adaptive Mode</legend>
               <input type="hidden" id="adaptation-mode" value="E_A">
               <div class="adaptation-checkboxes">
+                <label title="Select all parameters. Uncheck to restore the previous partial selection."><input type="checkbox" id="adaptation-all"> All</label>
                 <label><input type="checkbox" data-adaptive-parameter="E_A" checked> E_A</label>
                 <label><input type="checkbox" data-adaptive-parameter="k_0"> k_0</label>
                 <label><input type="checkbox" data-adaptive-parameter="n"> n</label>
               </div>
-              <small>Select one or more parameters. Disable Adaptation to stop fitting.</small>
+              <small>Select All or choose individual parameters. At least one is required. Disable Adaptation to stop fitting.</small>
               <small id="feedback-adaptation_mode" class="runtime-field-feedback" aria-live="polite"></small>
             </fieldset>
           </div>
@@ -236,6 +237,40 @@
           </div>
 
           <p id="experiment-message" class="experiment-message" role="status" aria-live="polite"></p>
+          <p id="current-export-status" role="status" aria-live="polite">CSV export: Not exported</p>
+        </section>
+
+        <section class="panel" aria-labelledby="archive-heading">
+          <details id="experiment-history">
+            <summary id="archive-heading">Experiment History &amp; Exports</summary>
+            <p>Browse saved experiments without changing the active run. Dates and folder timestamps use UTC.</p>
+            <form id="archive-search" class="archive-filters">
+              <label>Experiment name or Run ID<input id="archive-query" type="search" maxlength="200" placeholder="Search saved experiments"></label>
+              <label>From (UTC)<input id="archive-from" type="date"></label>
+              <label>To (UTC)<input id="archive-to" type="date"></label>
+              <button type="submit" class="ghost">Search</button>
+            </form>
+            <p id="archive-message" role="status" aria-live="polite">Open to load experiments.</p>
+            <div class="archive-layout">
+              <div id="archive-list" class="archive-list" aria-label="Saved experiments"></div>
+              <article id="archive-detail" hidden>
+                <h4 id="archive-name"></h4>
+                <dl class="archive-facts">
+                  <div><dt>Run ID</dt><dd><code id="archive-run-id"></code> <button id="archive-copy-id" type="button" class="ghost">Copy ID</button></dd></div>
+                  <div><dt>Saved folder</dt><dd id="archive-folder" class="monospace"></dd></div>
+                  <div><dt>Experiment period (UTC)</dt><dd id="archive-period"></dd></div>
+                  <div><dt>CSV export</dt><dd id="archive-state"></dd></div>
+                </dl>
+                <p id="archive-errors" role="status"></p>
+                <div class="experiment-action-row">
+                  <button id="archive-export" type="button" class="ghost">Export CSV files</button>
+                  <a id="archive-grafana" target="_blank" rel="noopener noreferrer">View in Grafana</a>
+                </div>
+                <ul id="archive-downloads"></ul>
+                <details><summary>Saved run configuration</summary><pre id="archive-configuration"></pre></details>
+              </article>
+            </div>
+          </details>
         </section>
 
         <section class="panel system-status-panel" aria-labelledby="system-status-heading">
@@ -397,6 +432,7 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20261009-controller-auto-refresh"></script>
+    <script src="/static/app.js?v=20261014-experiment-archive"></script>
+    <script src="/static/archive.js?v=20261014-1"></script>
   </body>
 </html>

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
+import threading
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -58,6 +60,15 @@ class ExperimentRegistry:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve(strict=False)
         self.root.mkdir(parents=True, exist_ok=True)
+        # Cache parsed documents, never filesystem observations: every lookup
+        # checks current metadata so other services' atomic replacements remain
+        # visible. Opening and resolving every historical JSON on each status
+        # poll is especially expensive on Docker Desktop bind mounts.
+        self._index_lock = threading.RLock()
+        self._directory_cache: dict[Path, tuple[int, ...]] = {}
+        self._manifest_cache: dict[
+            Path, tuple[tuple[int, ...], ExperimentManifest]
+        ] = {}
 
     def create(
         self,
@@ -66,16 +77,24 @@ class ExperimentRegistry:
         now: datetime | None = None,
     ) -> ExperimentManifest:
         normalized_label = _normalize_label(label)
-        created_at = _utc_iso(now)
+        current = _utc_datetime(now)
+        created_at = _utc_iso(current)
 
         for _attempt in range(10):
-            run_id = _new_run_id(now)
-            run_dir = self._resolve_run_dir(run_id)
-            try:
-                run_dir.mkdir(parents=False, exist_ok=False)
-            except FileExistsError:
+            run_id = _new_run_id(current)
+            if any(item.run_id == run_id for item in self.list()):
                 continue
-
+            directory_name = _directory_name(current, normalized_label)
+            for suffix in range(1, 10001):
+                name = directory_name if suffix == 1 else f"{directory_name}_{suffix}"
+                run_dir = self.root / name
+                try:
+                    run_dir.mkdir(parents=False, exist_ok=False)
+                except FileExistsError:
+                    continue
+                break
+            else:
+                raise ExperimentRegistryError("Could not allocate an experiment directory.")
             image_dir = run_dir / IMAGE_DIRECTORY_NAME
             image_dir.mkdir(parents=False, exist_ok=False)
             manifest = ExperimentManifest(
@@ -83,21 +102,26 @@ class ExperimentRegistry:
                 label=normalized_label,
                 created_at=created_at,
             )
-            self._write_manifest(manifest)
+            _atomic_write_text(
+                run_dir / MANIFEST_FILENAME,
+                json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False) + "\n",
+            )
             return manifest
 
         raise ExperimentRegistryError("Could not allocate a unique experiment run_id.")
 
     def list(self) -> list[ExperimentManifest]:
-        manifests: list[ExperimentManifest] = []
-        for child in self.root.iterdir():
-            if not child.is_dir() or not RUN_ID_PATTERN.fullmatch(child.name):
-                continue
-            manifest_path = child / MANIFEST_FILENAME
-            if not manifest_path.is_file():
-                continue
-            manifests.append(self._read_manifest(manifest_path, expected_run_id=child.name))
-        return sorted(manifests, key=lambda item: item.created_at, reverse=True)
+        return [manifest for _path, manifest in self.list_with_directories()]
+
+    def list_with_directories(self) -> list[tuple[Path, ExperimentManifest]]:
+        """Read a complete, validated index once for history and batch operations."""
+
+        return sorted(self._entries(), key=lambda item: item[1].created_at, reverse=True)
+
+    def run_dir(self, run_id: str) -> Path:
+        """Resolve the stable run ID through its manifest, including legacy names."""
+
+        return self._resolve_existing_run_dir(run_id)
 
     def get(self, run_id: str) -> ExperimentManifest:
         run_dir = self._resolve_existing_run_dir(run_id)
@@ -119,6 +143,7 @@ class ExperimentRegistry:
     def image_dir(self, run_id: str) -> Path:
         manifest = self.get(run_id)
         image_dir = self._resolve_existing_run_dir(run_id) / manifest.image_directory
+        self._contained_path(image_dir)
         if not image_dir.is_dir():
             raise ExperimentNotFoundError(f"Experiment image directory not found: {run_id}")
         return image_dir
@@ -264,26 +289,96 @@ class ExperimentRegistry:
         self._write_manifest(updated)
         return updated
 
-    def _resolve_run_dir(self, run_id: str) -> Path:
+    def _validate_run_id(self, run_id: str) -> None:
         if not RUN_ID_PATTERN.fullmatch(str(run_id)):
             raise InvalidExperimentIdentifierError(f"Invalid experiment run_id: {run_id!r}")
-        candidate = (self.root / run_id).resolve(strict=False)
+
+    def _contained_path(self, path: Path) -> Path:
+        candidate = path.resolve(strict=False)
         try:
             candidate.relative_to(self.root)
         except ValueError as exc:
             raise InvalidExperimentIdentifierError(
-                f"Experiment path escapes configured root: {run_id!r}"
+                f"Experiment path escapes configured root: {path}"
             ) from exc
         return candidate
 
+    def _entries(self) -> list[tuple[Path, ExperimentManifest]]:
+        with self._index_lock:
+            return self._scan_entries()
+
+    def _scan_entries(self) -> list[tuple[Path, ExperimentManifest]]:
+        entries: list[tuple[Path, ExperimentManifest]] = []
+        seen: set[str] = set()
+        directory_cache: dict[Path, tuple[int, ...]] = {}
+        manifest_cache: dict[Path, tuple[tuple[int, ...], ExperimentManifest]] = {}
+        self._contained_path(self.root)
+        with os.scandir(self.root) as children:
+            for entry in children:
+                if entry.name.startswith((".", "_")):
+                    continue
+                child = self.root / entry.name
+                try:
+                    directory_stat = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if _is_link(directory_stat):
+                    self._contained_path(child)
+                    raise ExperimentRegistryError(
+                        f"Linked experiment directory is not allowed: {child}"
+                    )
+                if not stat.S_ISDIR(directory_stat.st_mode):
+                    continue
+                directory_stamp = _stat_stamp(directory_stat)
+                if self._directory_cache.get(child) != directory_stamp:
+                    if self._contained_path(child) != child:
+                        raise ExperimentRegistryError(
+                            f"Linked experiment directory is not allowed: {child}"
+                        )
+                directory_cache[child] = directory_stamp
+                manifest_path = child / MANIFEST_FILENAME
+                try:
+                    manifest_stat = manifest_path.lstat()
+                except FileNotFoundError:
+                    continue
+                if _is_link(manifest_stat):
+                    self._contained_path(manifest_path)
+                    raise ExperimentRegistryError(
+                        f"Linked experiment manifest is not allowed: {manifest_path}"
+                    )
+                if not stat.S_ISREG(manifest_stat.st_mode):
+                    continue
+                stamp = _stat_stamp(manifest_stat)
+                cached = self._manifest_cache.get(manifest_path)
+                if cached is not None and cached[0] == stamp:
+                    manifest = cached[1]
+                else:
+                    self._contained_path(manifest_path)
+                    expected = entry.name if RUN_ID_PATTERN.fullmatch(entry.name) else None
+                    manifest = self._read_manifest(manifest_path, expected_run_id=expected)
+                    self._validate_run_id(manifest.run_id)
+                manifest_cache[manifest_path] = (stamp, manifest)
+                if manifest.run_id in seen:
+                    raise ExperimentRegistryError(
+                        f"Duplicate experiment run_id in different directories: {manifest.run_id}"
+                    )
+                seen.add(manifest.run_id)
+                entries.append((child, manifest))
+        # Drop removed/renamed entries. Commit only a fully validated scan.
+        self._directory_cache = directory_cache
+        self._manifest_cache = manifest_cache
+        return entries
+
     def _resolve_existing_run_dir(self, run_id: str) -> Path:
-        run_dir = self._resolve_run_dir(run_id)
-        if not run_dir.is_dir():
-            raise ExperimentNotFoundError(f"Experiment not found: {run_id}")
-        return run_dir
+        self._validate_run_id(run_id)
+        for path, manifest in self._entries():
+            if manifest.run_id == run_id:
+                self._contained_path(path)
+                return path
+        raise ExperimentNotFoundError(f"Experiment not found: {run_id}")
 
     def _manifest_path(self, run_id: str) -> Path:
-        return self._resolve_run_dir(run_id) / MANIFEST_FILENAME
+        return self._resolve_existing_run_dir(run_id) / MANIFEST_FILENAME
 
     def _write_manifest(self, manifest: ExperimentManifest) -> None:
         manifest_path = self._manifest_path(manifest.run_id)
@@ -292,7 +387,7 @@ class ExperimentRegistry:
             json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False) + "\n",
         )
 
-    def _read_manifest(self, path: Path, *, expected_run_id: str) -> ExperimentManifest:
+    def _read_manifest(self, path: Path, *, expected_run_id: str | None) -> ExperimentManifest:
         read_error: OSError | json.JSONDecodeError | None = None
         data: Any = None
         for attempt in range(MANIFEST_READ_ATTEMPTS):
@@ -314,7 +409,7 @@ class ExperimentRegistry:
             manifest = ExperimentManifest.from_dict(data)
         except (TypeError, ValueError) as exc:
             raise ExperimentRegistryError(f"Invalid experiment manifest: {path}") from exc
-        if manifest.run_id != expected_run_id:
+        if expected_run_id is not None and manifest.run_id != expected_run_id:
             raise ExperimentRegistryError(
                 f"Experiment manifest run_id does not match directory: {path}"
             )
@@ -361,6 +456,21 @@ class ExperimentRegistry:
         )
 
 
+def _stat_stamp(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _is_link(value: os.stat_result) -> bool:
+    # Windows junctions are reparse points but need not have symlink mode.
+    return stat.S_ISLNK(value.st_mode) or bool(
+        getattr(value, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
 def _new_run_id(now: datetime | None) -> str:
     current = _utc_datetime(now)
     timestamp = current.strftime("%Y%m%dT%H%M%S_%f")[:19]
@@ -387,11 +497,18 @@ def _normalize_label(label: str | None) -> str | None:
         return None
     if len(normalized) > 120:
         raise InvalidExperimentIdentifierError("Experiment label must be 120 characters or fewer.")
-    if INVALID_LABEL_CHARACTERS.search(normalized):
-        raise InvalidExperimentIdentifierError(
-            "Experiment label contains unsupported filename characters."
-        )
     return normalized
+
+
+def _directory_name(current: datetime, label: str | None) -> str:
+    # Keep the original label in experiment.json; sanitize only its directory name.
+    safe_label = INVALID_LABEL_CHARACTERS.sub("_", label or "Unnamed")
+    safe_label = safe_label.strip(" .") or "Unnamed"
+    # Linux limits each path component to 255 bytes. Preserve complete Unicode
+    # characters and leave room for the timestamp and a collision suffix.
+    safe_label = safe_label.encode("utf-8")[:180].decode("utf-8", errors="ignore").rstrip(" .")
+    timestamp = current.strftime("%Y%m%dT%H%M%S_%f")[:19] + "Z"
+    return f"{timestamp}_{safe_label}"
 
 
 def _parameter_version(

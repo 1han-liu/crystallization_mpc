@@ -6,8 +6,13 @@ import os
 from datetime import datetime
 
 from crystallization_mpc.infra.influxdb.client import InfluxSettings
+from crystallization_mpc.infra.influxdb.durable import DurableInfluxWriter, telemetry_path
 
 RUNTIME_EVENT_MEASUREMENT = "controller_runtime_event"
+
+
+def create_runtime_writer(root=None):
+    return DurableInfluxWriter(load_runtime_influx_settings(), path=telemetry_path("central", root))
 
 
 def load_runtime_influx_settings() -> InfluxSettings:
@@ -46,9 +51,9 @@ def write_runtime_event(writer, entry):
               "revision": result["revision"], "effective_tick": result["effective_tick"],
               "requested_at": result["requested_at"], "applied_at": timestamp}
     # Same tags + exact time overwrite the same point on retry, including after a crash.
-    writer.write_tagged_fields(fields, tags={"run_id": result["run_id"], "event_id": result["event_id"]},
+    record_id = writer.write_tagged_fields(fields, tags={"run_id": result["run_id"], "event_id": result["event_id"]},
                               measurement=RUNTIME_EVENT_MEASUREMENT, timestamp=time)
-    return True
+    return writer.is_delivered(record_id) if isinstance(writer, DurableInfluxWriter) else True
 
 
 def export_pending(history, writer):
@@ -57,11 +62,12 @@ def export_pending(history, writer):
             history.save({**entry, "grafana_sync": "time_unavailable", "grafana_error": "Exact application time unavailable in legacy record"})
             continue
         try:
-            write_runtime_event(writer, entry)
+            delivered = write_runtime_event(writer, entry)
         except Exception as exc:
             history.mark_export(entry, error=("Application time unavailable" if not entry["result"].get("applied_at")
                                               else type(exc).__name__))
             # Retry next pass; do not leak tokens/URLs from client exceptions.
             break
         else:
-            history.mark_export(entry)
+            if delivered:
+                history.mark_export(entry)

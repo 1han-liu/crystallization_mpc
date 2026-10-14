@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping
 import pika
 
 from crystallization_mpc.messaging.schema import build_envelope
+from crystallization_mpc.infra.influxdb.process_events import write_process_event
 
 from .process import (
     CELSIUS_TO_KELVIN,
@@ -118,8 +119,13 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         connection_factory: Callable[[str], Any] | None = None,
         clock_ns: Callable[[], int] = time.time_ns,
         monotonic: Callable[[], float] = time.monotonic,
+        audit_writer=None,
     ) -> None:
         self.config = config
+        self.audit_writer = audit_writer
+        self.audit_required = False
+        self._audit_error: str | None = None
+        self._audit_failures: dict[str, int] = {}
         self._connection_factory = connection_factory or self._default_connection
         self._clock_ns = clock_ns
         self._monotonic = monotonic
@@ -402,6 +408,8 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                 "expires_at": _iso_ns(self._clock_ns() + int(self.config.command_ttl_s * 1_000_000_000)),
             }
             envelope = build_envelope("controller", "opcua_writer", "command", "process.setpoint.write", tick_seq, payload, command_id)
+            # The command must exist durably before it can reach the hardware.
+            self._audit(payload, "prepared")
             pending = _PendingWrite(
                 envelope=envelope, deadline=self._monotonic() + self.config.write_timeout_s,
                 read_generation=self._last_read_generation, read_timestamp_ns=self._last_read_ns,
@@ -450,6 +458,21 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         )
         if confirmed is False:
             raise ProcessConnectionError("Process command publication was not confirmed.")
+        self._audit(pending.envelope["payload"], "published")
+
+    def _audit(self, payload, stage):
+        if self.audit_writer is None and not self.audit_required:
+            return
+        try:
+            if self.audit_writer is None:
+                raise RuntimeError("Command archive is unavailable.")
+            write_process_event(self.audit_writer, payload, "controller", stage, timestamp=self._clock_ns())
+            self._audit_error = None
+        except Exception as exc:
+            self._audit_error = f"Command audit persistence failed ({type(exc).__name__})."
+            run_id = str(payload.get("run_id", ""))
+            self._audit_failures[run_id] = self._audit_failures.get(run_id, 0) + 1
+            raise ProcessConnectionError(self._audit_error) from exc
 
     def _fail_pending_locked(self, message: str) -> None:
         pending = self._pending
@@ -457,6 +480,12 @@ class RabbitMqProcessAdapter(ProcessAdapter):
             pending.error = ProcessConnectionError(message)
             self._last_error = message
             self._last_result = {**pending.envelope["payload"], "status": "unknown", "error": message, "write_result": None}
+            try:
+                self._audit(self._last_result, "unknown")
+            except ProcessConnectionError:
+                # The device outcome is still unknown. Never repeat a write due
+                # to a local audit failure; surface the archive error separately.
+                pass
             pending.event.set()
 
     def _on_result(self, channel: Any, method: Any, properties: Any, body: bytes) -> None:
@@ -465,8 +494,11 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         except (ValueError, TypeError, OverflowError):
             with self._condition:
                 self._last_error = "Invalid process write result JSON."
-        finally:
-            channel.basic_ack(delivery_tag=method.delivery_tag)
+        except ProcessConnectionError:
+            # Keep a valid result available for audit retry after disk recovery.
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            return
+        channel.basic_ack(delivery_tag=method.delivery_tag)
 
     def _accept_result(self, envelope: Any) -> None:
         if not isinstance(envelope, dict):
@@ -477,6 +509,13 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         payload = envelope.get("payload")
         if not isinstance(payload, dict):
             return
+        if (not isinstance(payload.get("command_id"), str) or not isinstance(payload.get("run_id"), str)
+                or type(payload.get("tick_seq")) is not int or payload.get("status") not in ("success", "failed", "unknown")
+                or envelope.get("correlation_id") != payload.get("command_id")):
+            return
+        # Retain late/replayed receipts for history, even if the live wait has
+        # expired. They do not retroactively turn a timed-out cycle into success.
+        self._audit(payload, "receipt")
         with self._condition:
             pending = self._pending
             if pending is None or pending.event.is_set():
@@ -554,6 +593,9 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                 "last_write_result": dict(self._last_result) if self._last_result else None,
                 "write_in_flight": self._pending is not None and not self._pending.event.is_set(),
                 "last_write_at": self._last_write_at, "last_error": self._last_error,
+                "audit_error": self._audit_error,
+                "audit_enabled": self.audit_writer is not None,
+                "audit_failure_count": self._audit_failures.get(self._context[0], 0) if self._context else 0,
                 "safe_jacket_range_K": [self.config.jacket_min_K, self.config.jacket_max_K],
             }
 

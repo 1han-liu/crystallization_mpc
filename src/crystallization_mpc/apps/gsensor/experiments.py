@@ -15,6 +15,7 @@ from crystallization_mpc.experiments import (
     ExperimentRegistry,
 )
 from crystallization_mpc.messaging.commands import EXPERIMENT_MODE_LIVE
+from crystallization_mpc.infra.storage_paths import system_path
 
 GSENSOR_STATE_FILENAME = ".gsensor_experiment_state.json"
 GSENSOR_PROCESSING_STATE_FILENAME = "gsensor_processing_state.json"
@@ -56,7 +57,7 @@ class ExperimentNotSelectedError(RuntimeError):
 class GsensorExperimentManager:
     def __init__(self, root: str | Path) -> None:
         self.registry = ExperimentRegistry(root)
-        self.state_path = self.registry.root / GSENSOR_STATE_FILENAME
+        self.state_path = system_path(self.registry.root, GSENSOR_STATE_FILENAME)
 
     def current(self) -> dict[str, Any] | None:
         if not self.state_path.exists():

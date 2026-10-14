@@ -9,6 +9,7 @@ const state = {
   runConfigurationInFlight: false,
   runConfigurationError: null,
   runConfigurationRefreshError: null,
+  lastPartialAdaptationMode: "E_A",
   drawerOpen: false,
   experiments: [],
   currentRunId: null,
@@ -44,6 +45,8 @@ const state = {
   historyLoading: false,
   systemStatusFresh: false,
   systemStatusInFlight: 0,
+  bootstrapInFlight: true,
+  pollInFlight: false,
   experimentRequestId: 0,
   operationRequestId: 0,
   parameterRequestId: 0,
@@ -124,6 +127,7 @@ const adaptationModeSelect = document.querySelector("#adaptation-mode");
 const growthRateSourceSelect = document.querySelector("#growth-rate-source");
 const adaptationEnableLabel = document.querySelector("#adaptation-enable-label");
 const adaptiveCheckboxes = [...document.querySelectorAll("[data-adaptive-parameter]")];
+const adaptiveAllCheckbox = document.querySelector("#adaptation-all");
 const sigmaSetInput = document.querySelector("#runtime-sigma-set");
 const growthSetInput = document.querySelector("#runtime-g-set");
 const retryRuntimeButton = document.querySelector("#retry-runtime-update");
@@ -304,7 +308,30 @@ function renderAdaptiveSelection(mode, disabled) {
     box.checked = selected.includes(box.dataset.adaptiveParameter);
     box.disabled = disabled;
   });
+  adaptiveAllCheckbox.checked = mode === "all";
+  adaptiveAllCheckbox.indeterminate = selected.length > 0 && mode !== "all";
+  adaptiveAllCheckbox.disabled = disabled;
+  if (selected.length > 0 && mode !== "all") state.lastPartialAdaptationMode = mode;
   adaptationModeSelect.value = mode;
+}
+
+function selectAdaptiveMode(mode) {
+  if (!adaptiveCombinations[mode] || adaptationModeSelect.disabled || mutationInFlight()) {
+    renderRunConfiguration();
+    return;
+  }
+  if (adaptationModeSelect.value === mode) {
+    renderAdaptiveSelection(mode, false);
+    return;
+  }
+  // One combined selection is one save/runtime command, never three writes.
+  adaptationModeSelect.value = mode;
+  if (runtimeRunActive()) return submitRuntimeUpdate({ adaptation_mode: mode });
+  return saveRunConfiguration();
+}
+
+function selectAllAdaptiveParameters() {
+  return selectAdaptiveMode(adaptiveAllCheckbox.checked ? "all" : state.lastPartialAdaptationMode);
 }
 
 function renderSetpoints(configuration, disabled) {
@@ -635,23 +662,18 @@ async function saveRunConfiguration() {
   state.runConfigurationError = null;
   state.runConfigurationRefreshError = null;
   renderMutationState();
-  let saved = false;
   try {
     const payload = await fetchJson("/api/run-configuration", {
       method: "PUT",
       body: JSON.stringify({ ...draft, expected_run_id: expectedRunId }),
     });
     applyRunConfigurationPayload(payload);
-    saved = true;
-    await loadOperationState({ updateRunConfiguration: false });
+    // The PUT confirms the complete saved configuration. The normal status
+    // poll refreshes the derived preview without holding the edit lock.
     return payload;
   } catch (error) {
-    if (!saved) state.runConfiguration = previous;
-    if (saved) {
-      state.runConfigurationRefreshError = `Configuration saved, but preview refresh failed: ${error.message}`;
-    } else {
-      state.runConfigurationError = error.message;
-    }
+    state.runConfiguration = previous;
+    state.runConfigurationError = error.message;
     return null;
   } finally {
     state.runConfigurationInFlight = false;
@@ -1596,6 +1618,7 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
     state.gsensorActivation = null;
   }
   state.experiments = experiments.experiments || [];
+  window.updateExperimentArchive?.(payload.archive, payload.archive_error);
   state.currentRunId = experiments.current_run_id || null;
   state.gsensorStatusRunId = payload.gsensor?.last_status?.run_id || null;
   state.systemStatusFresh = true;
@@ -2014,6 +2037,37 @@ async function loadOperationState({ updateRunConfiguration = true } = {}) {
   renderParameterStatus(state.parameterUnsavedCount);
 }
 
+async function pollStatus({ refreshParameters = false } = {}) {
+  if (state.bootstrapInFlight || state.pollInFlight || mutationInFlight()
+    || state.systemStatusInFlight || document.hidden) return;
+  state.pollInFlight = true;
+  try {
+    const reads = [];
+    if (refreshParameters && state.parameterUnsavedCount === 0) {
+      reads.push(loadParams().catch(error => {
+        state.parameterError = error.message;
+        updateParameterDraftState();
+        throw error;
+      }));
+    }
+    reads.push(loadOperationState(), loadSystemStatus());
+    // Wait for both endpoints even when one fails. Clearing the guard on an
+    // early rejection would let the next timer overlap the slower request.
+    const outcomes = await Promise.allSettled(reads);
+    const errors = outcomes.filter(result => result.status === "rejected")
+      .map(result => result.reason.message || String(result.reason));
+    if (errors.length) throw new Error([...new Set(errors)].join("\n"));
+  } finally {
+    state.pollInFlight = false;
+  }
+}
+
+function reportPollingError(error) {
+  commandResult.textContent = error.message;
+  commandStatus.textContent = "error";
+  commandStatus.className = "status error";
+}
+
 async function saveParams() {
   if (saveParamsButton.disabled || !state.systemStatusFresh || mutationInFlight()) return null;
   const draft = parameterPayloadFromDraft();
@@ -2237,6 +2291,7 @@ runConfigurationControls.forEach((control) => {
   });
 });
 
+adaptiveAllCheckbox.addEventListener("change", selectAllAdaptiveParameters);
 adaptiveCheckboxes.forEach((box) => {
   box.addEventListener("change", () => {
     const selected = adaptiveCheckboxes.filter((item) => item.checked).map((item) => item.dataset.adaptiveParameter);
@@ -2250,8 +2305,7 @@ adaptiveCheckboxes.forEach((box) => {
       renderRunConfiguration();
       return;
     }
-    adaptationModeSelect.value = mode;
-    adaptationModeSelect.dispatchEvent(new Event("change"));
+    selectAdaptiveMode(mode);
   });
 });
 
@@ -2284,50 +2338,29 @@ document.querySelector("#runtime-history-refresh").addEventListener("click", () 
 document.querySelector("#runtime-history-older").addEventListener("click", () => loadRuntimeHistory(true));
 
 async function bootstrap() {
-  await loadUiConfig();
-  await loadRunConfiguration();
-  await loadParams();
-  await loadOperationState();
+  state.bootstrapInFlight = true;
   try {
-    await loadSystemStatus();
-  } catch (error) {
-    setExperimentMessage(error.message, { error: true });
+    await loadUiConfig();
+    await loadRunConfiguration();
+    await loadParams();
+    await loadOperationState();
+    try {
+      await loadSystemStatus();
+    } catch (error) {
+      setExperimentMessage(error.message, { error: true });
+    }
+  } finally {
+    // A failed initial read must not disable later status recovery.
+    state.bootstrapInFlight = false;
   }
 }
 
-bootstrap().catch((error) => {
-  commandResult.textContent = error.message;
-  commandStatus.textContent = "error";
-  commandStatus.className = "status error";
-});
+bootstrap().catch(reportPollingError);
 
 setInterval(() => {
-  if (!mutationInFlight() && !state.systemStatusInFlight && !document.hidden) {
-    Promise.all([loadOperationState(), loadSystemStatus()]).catch((error) => {
-      commandResult.textContent = error.message;
-      commandStatus.textContent = "error";
-      commandStatus.className = "status error";
-    });
-  }
+  pollStatus().catch(reportPollingError);
 }, 2000);
 
 window.addEventListener("focus", () => {
-  if (!mutationInFlight() && state.parameterUnsavedCount === 0) {
-    loadParams().catch((error) => {
-      state.parameterError = error.message;
-      updateParameterDraftState();
-    });
-  }
-  if (!mutationInFlight()) {
-    loadOperationState().catch((error) => {
-      commandResult.textContent = error.message;
-      commandStatus.textContent = "error";
-      commandStatus.className = "status error";
-    });
-  }
-  if (!mutationInFlight() && !state.systemStatusInFlight) {
-    loadSystemStatus().catch((error) => {
-      setExperimentMessage(error.message, { error: true });
-    });
-  }
+  pollStatus({ refreshParameters: true }).catch(reportPollingError);
 });

@@ -12,14 +12,15 @@ from typing import Any
 
 from crystallization_mpc.messaging.controller_runtime import ControllerRuntimeUpdatePayload
 from crystallization_mpc.infra.runtime_history import RuntimeHistory
+from crystallization_mpc.infra.storage_paths import system_path
 
 
 class RuntimeRequestStore:
     """Used under CentralService's lock (single Central process)."""
 
     def __init__(self, root: Path):
-        self.path = root / ".central_runtime_requests.json"
-        self.history = RuntimeHistory(root / ".central_runtime_history.json")
+        self.path = system_path(root, ".central_runtime_requests.json")
+        self.history = RuntimeHistory(system_path(root, ".central_runtime_history.json"))
         self.observation_error: str | None = None
 
     def load(self) -> dict[str, Any]:

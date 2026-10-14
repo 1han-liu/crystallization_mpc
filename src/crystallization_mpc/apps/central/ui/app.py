@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import json
+import stat
 import threading
 import time
 import urllib.error
@@ -22,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
+from crystallization_mpc.apps.central.archive import ExperimentArchive
+from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.apps.central.runtime_controls import RuntimeRequestStore
 from crystallization_mpc.apps.central.params import (
     ParameterValidationError,
@@ -44,6 +47,7 @@ from crystallization_mpc.apps.central.run_configuration import (
     RunConfigurationStore,
 )
 from crystallization_mpc.experiments import (
+    ExperimentManifest,
     ExperimentNotFoundError,
     ExperimentRegistryError,
     ExperimentStatus,
@@ -558,11 +562,13 @@ class CentralService:
     def __init__(self, publisher: CentralApp | None = None) -> None:
         self.ui_mode = resolve_ui_mode()
         self.default_params_path = Path(os.getenv("PARAMS_DEFAULT_FILE", str(DEFAULT_PARAMS_PATH)))
-        self.params_path = Path(os.getenv("PARAMS_FILE", str(DEFAULT_RUNTIME_PARAMS_PATH)))
         self.param_meta_path = Path(os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH)))
         self.operation_meta_path = Path(os.getenv("OPERATION_META_FILE", str(DEFAULT_OPERATION_META_PATH)))
         self.experiment_root = Path(
             os.getenv("EXPERIMENT_ROOT", str(DEFAULT_EXPERIMENT_ROOT))
+        )
+        self.params_path = system_path(
+            self.experiment_root, "params_runtime.yaml", explicit_path=os.getenv("PARAMS_FILE")
         )
         self.experiments = CentralExperimentManager(
             self.experiment_root,
@@ -574,11 +580,9 @@ class CentralService:
         self.default_run_configuration = RunConfiguration(
             control_target=configured_target
         )
-        run_configuration_path = Path(
-            os.getenv(
-                "RUN_CONFIGURATION_FILE",
-                str(self.experiment_root / RUN_CONFIGURATION_FILENAME),
-            )
+        run_configuration_path = system_path(
+            self.experiment_root, RUN_CONFIGURATION_FILENAME,
+            explicit_path=os.getenv("RUN_CONFIGURATION_FILE"),
         )
         self.run_configuration_store = RunConfigurationStore(run_configuration_path)
         self.run_configuration = self.run_configuration_store.load(
@@ -600,43 +604,55 @@ class CentralService:
         self._consumer_thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self.runtime_request_store = RuntimeRequestStore(self.experiment_root)
+        # History requests can take seconds. Never acquire this lock while
+        # holding the UI/command lock, or a slow historical run blocks live UI.
+        self._runtime_history_sync_lock = threading.RLock()
         self._runtime_history_cursors: dict[str, int] = {}
         self.runtime_history_error: str | None = None
         self._runtime_monitor_stop = threading.Event()
         self._runtime_monitor_thread: threading.Thread | None = None
         self.runtime_export_error: str | None = None
         self.runtime_export_enabled = os.getenv("CENTRAL_RUNTIME_INFLUX_ENABLED", os.getenv("CONTROLLER_INFLUX_ENABLED", "false")).lower() == "true"
+        self.archive = ExperimentArchive(self.experiments, controller_status=self.controller_status)
 
     def _sync_runtime_history(self, run_id: str, controller: dict[str, Any], *, all_pages=False):
-        self.runtime_history_error = None
-        if not (controller.get("available") and (controller.get("runtime_controls") or {}).get("history_supported")):
-            return
-        try:
-            if all_pages:
-                self._runtime_history_cursors[run_id] = 0
-            while True:
-                cursor = self._runtime_history_cursors.get(run_id, 0)
-                query = urllib.parse.urlencode({"run_id": run_id, "after": cursor, "limit": 100})
-                url = self.controller_status_url.rsplit("/", 1)[0] + "/runtime-history?" + query
-                with urllib.request.urlopen(url, timeout=2) as response:
-                    page = json.load(response)
-                if page.get("error"):
-                    raise ValueError(page["error"])
-                for entry in page["entries"]:
-                    if entry["command"]["run_id"] != run_id:
-                        raise ValueError("History run mismatch.")
-                    sequence = entry["sequence"]
-                    # Central assigns its own ordering, since it also has pending requests.
-                    self.runtime_request_store.history.save({k: v for k, v in entry.items()
-                                                            if k not in {"sequence", "grafana_sync", "grafana_error"}})
-                    self._runtime_history_cursors[run_id] = sequence
-                self.runtime_history_error = None
-                if not all_pages or page.get("next_cursor") is None:
-                    break
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            self.runtime_history_error = f"History synchronization incomplete: {type(exc).__name__}"
+        # Serialize cursor advancement with explicit history refreshes without
+        # taking the service lock. RuntimeHistory protects its own atomic saves.
+        with self._runtime_history_sync_lock:
+            self.runtime_history_error = None
+            if not (controller.get("available") and (controller.get("runtime_controls") or {}).get("history_supported")):
+                return
+            try:
+                cursor = 0 if all_pages else self._runtime_history_cursors.get(run_id, 0)
+                while True:
+                    query = urllib.parse.urlencode({"run_id": run_id, "after": cursor, "limit": 100})
+                    url = self.controller_status_url.rsplit("/", 1)[0] + "/runtime-history?" + query
+                    with urllib.request.urlopen(url, timeout=2) as response:
+                        page = json.load(response)
+                    if page.get("error"):
+                        raise ValueError(page["error"])
+                    previous_cursor = cursor
+                    for entry in page["entries"]:
+                        if entry["command"]["run_id"] != run_id:
+                            raise ValueError("History run mismatch.")
+                        sequence = entry["sequence"]
+                        if type(sequence) is not int or sequence <= cursor:
+                            raise ValueError("History sequence must advance.")
+                        # Central assigns its own ordering, since it also has pending requests.
+                        self.runtime_request_store.history.save({k: v for k, v in entry.items()
+                                                                if k not in {"sequence", "grafana_sync", "grafana_error"}})
+                        cursor = sequence
+                        self._runtime_history_cursors[run_id] = max(
+                            sequence, self._runtime_history_cursors.get(run_id, 0)
+                        )
+                    self.runtime_history_error = None
+                    if not all_pages or page.get("next_cursor") is None:
+                        break
+                    if cursor == previous_cursor:
+                        raise ValueError("History pagination did not advance.")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self.runtime_history_error = f"History synchronization incomplete: {type(exc).__name__}"
 
-    @_locked_service_state
     def runtime_history_page(self, run_id: str, before: int | None = None, limit: int = 50):
         self.experiments.registry.get(run_id)
         self._sync_runtime_history(run_id, self.controller_status(), all_pages=True)
@@ -650,21 +666,22 @@ class CentralService:
                 "grafana_error": self.runtime_export_error}
 
     def _runtime_monitor(self):
-        from crystallization_mpc.apps.central.runtime_telemetry import export_pending, load_runtime_influx_settings
-        from crystallization_mpc.infra.influxdb.write import InfluxWriter
+        from crystallization_mpc.apps.central.runtime_telemetry import export_pending, create_runtime_writer
         writer = None
         try:
             while not self._runtime_monitor_stop.is_set():
                 try:
-                    with self._lock:
-                        runs = self.experiments.list().get("experiments", [])
-                        controller = self.controller_status()
-                        for run in runs:
-                            self._sync_runtime_history(run["run_id"], controller)
+                    runs = self.experiments.list().get("experiments", [])
+                    controller = self.controller_status()
+                    for run in runs:
+                        if self._runtime_monitor_stop.is_set():
+                            break
+                        self._sync_runtime_history(run["run_id"], controller)
+                        with self._lock:
                             self.runtime_request_store.observe(run["run_id"], controller)
                     if self.runtime_export_enabled:
                         if writer is None:
-                            writer = InfluxWriter(load_runtime_influx_settings())
+                            writer = create_runtime_writer(self.experiment_root)
                         export_pending(self.runtime_request_store.history, writer)
                     self.runtime_export_error = None
                 except Exception as exc:
@@ -693,12 +710,29 @@ class CentralService:
                     )
             yield
 
-    def _gsensor_activation_path(self, run_id: str) -> Path:
-        manifest = self.experiments.registry.get(run_id)
-        run_directory = (self.experiment_root / manifest.run_id).resolve()
+    def _gsensor_activation_path(
+        self, run_id: str, *, run_directory: Path | None = None,
+    ) -> Path:
+        if run_directory is None:
+            manifest = self.experiments.registry.get(run_id)
+            run_directory = self.experiments.registry.run_dir(manifest.run_id)
+        else:
+            # Only internal callers pass a directory from a validated registry
+            # listing. Recheck containment without repeating that whole listing.
+            run_directory = Path(run_directory)
+            directory_info = run_directory.lstat()
+            if (stat.S_ISLNK(directory_info.st_mode)
+                    or getattr(directory_info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
+                raise InvalidExperimentIdentifierError(
+                    "Gsensor activation state directory cannot be a link."
+                )
+            run_directory = run_directory.resolve()
         root = self.experiment_root.resolve()
         try:
             run_directory.relative_to(root)
+            if run_directory == root:
+                raise ValueError("Experiment directory cannot be the root.")
         except ValueError as exc:
             raise InvalidExperimentIdentifierError(
                 "Gsensor activation state path escapes the experiment root."
@@ -735,8 +769,9 @@ class CentralService:
         manifest,
         *,
         create: bool,
+        run_directory: Path | None = None,
     ) -> Dict[str, Any]:
-        path = self._gsensor_activation_path(manifest.run_id)
+        path = self._gsensor_activation_path(manifest.run_id, run_directory=run_directory)
         if not path.exists():
             state = self._new_gsensor_activation_state(manifest)
             if create:
@@ -932,12 +967,23 @@ class CentralService:
             "blocked_reason": blocked_reason,
         }
 
-    def gsensor_activation_status(self) -> Dict[str, Any]:
+    def gsensor_activation_status(self, *, experiment: Dict[str, Any] | None = None) -> Dict[str, Any]:
         with self._lock:
             try:
+                if experiment is not None:
+                    # system_status already resolved the current manifest and
+                    # directory. Keep activation state fresh, reusing only that
+                    # registry result rather than scanning for the run again.
+                    manifest = ExperimentManifest.from_dict(experiment)
+                    state = (self._load_gsensor_activation_state(
+                        manifest, create=False,
+                        run_directory=Path(experiment["experiment_directory"]),
+                    ) if manifest.started_at is not None else None)
+                    return self._gsensor_activation_public_state(manifest, state)
                 return self._gsensor_activation_public_state()
             except (OSError, RuntimeError, ValueError) as exc:
-                run_id = self.experiments.current_run_id()
+                run_id = (experiment["run_id"] if experiment is not None
+                          else self.experiments.current_run_id())
                 return {
                     "run_id": run_id,
                     "experiment_started_at": None,
@@ -1202,7 +1248,7 @@ class CentralService:
             return True
         return False
 
-    def run_configuration_payload(self) -> Dict[str, Any]:
+    def run_configuration_payload(self, *, locked: bool | None = None) -> Dict[str, Any]:
         return {
             "configuration": self.run_configuration.to_dict(),
             "defaults": self.default_run_configuration.to_dict(),
@@ -1215,10 +1261,11 @@ class CentralService:
             },
             "saved": self.run_configuration_store.updated_at is not None,
             "updated_at": self.run_configuration_store.updated_at,
-            "locked": self._run_configuration_locked(),
+            "locked": self._run_configuration_locked() if locked is None else locked,
             "source_file": str(self.run_configuration_store.path),
         }
 
+    @_locked_service_state
     def update_run_configuration(
         self,
         payload: RunConfigurationUpdate | Dict[str, Any],
@@ -1242,16 +1289,17 @@ class CentralService:
             self.run_configuration = configuration
             self.target = configuration.control_target  # type: ignore[assignment]
             self._sync_operation_state_from_run_configuration()
-        result = self.run_configuration_payload()
+        # The same command already verified editability under ui_action's lock.
+        # Reuse that result for its response; independent reads still revalidate.
+        result = self.run_configuration_payload(locked=False)
         result["saved"] = True
         result["changed"] = changed
         return result
 
     def _run_configuration_locked(self) -> bool:
-        run_id = self.experiments.current_run_id()
-        if run_id is None:
+        manifest = self.experiments.current_manifest()
+        if manifest is None:
             return False
-        manifest = self.experiments.registry.get(run_id)
         return manifest.status not in {
             ExperimentStatus.CREATED,
             ExperimentStatus.COMPLETED,
@@ -1286,6 +1334,7 @@ class CentralService:
 
     def start(self) -> None:
         self.publisher.connect()
+        self.archive.start()
         if not self._runtime_monitor_thread or not self._runtime_monitor_thread.is_alive():
             self._runtime_monitor_stop.clear()
             self._runtime_monitor_thread = threading.Thread(target=self._runtime_monitor, name="central-runtime-events", daemon=True)
@@ -1300,6 +1349,7 @@ class CentralService:
         self._consumer_thread.start()
 
     def stop(self) -> None:
+        self.archive.stop()
         self._runtime_monitor_stop.set()
         if self._runtime_monitor_thread:
             self._runtime_monitor_thread.join(timeout=3)
@@ -1400,6 +1450,8 @@ class CentralService:
                 pass
         if not self._observe_gsensor_activation(payload, manifest):
             return False
+        if payload.enabled:
+            self.archive.note_gsensor_enabled(run_id)
         status = payload.status
         if status == GrowthRateStatus.ERROR:
             self.experiments.registry.mark_error(
@@ -1520,11 +1572,11 @@ class CentralService:
                 "last_rejection_error": self.last_rejected_status_error,
                 "message_count": self.status_message_count,
                 "rejection_count": self.status_rejection_count,
-                "activation": self.gsensor_activation_status(),
+                "activation": self.gsensor_activation_status(experiment=current),
             }
         controller = self.controller_status()
-        if current_run_id:
-            self._sync_runtime_history(current_run_id, controller)
+        # The background monitor reconciles full history. A status poll only
+        # observes the latest Controller snapshot and already persisted results.
         request = self.runtime_request_store.observe(current_run_id, controller)
         errors = [self.runtime_history_error, self.runtime_request_store.observation_error]
         try:
@@ -1532,6 +1584,7 @@ class CentralService:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             history = []
             errors.append(f"History unavailable: {type(exc).__name__}")
+        archive = self.archive.status_summary(current) if current else None
         return {
             "current_experiment": current,
             "experiments": experiments,
@@ -1540,12 +1593,14 @@ class CentralService:
             "runtime_request": request,
             "runtime_history": history,
             "runtime_history_error": "; ".join(dict.fromkeys(filter(None, errors))) or None,
+            "archive": archive["archive"] if archive else None,
+            "archive_error": (archive.get("archive_error") if archive else None) or self.archive.error,
         }
     def overlay_path(self, run_id: str, kind: str) -> Path:
         if kind not in {"latest", "final"}:
             raise ValueError("Overlay kind must be 'latest' or 'final'.")
         manifest = self.experiments.registry.get(run_id)
-        run_directory = (self.experiment_root / manifest.run_id).resolve()
+        run_directory = self.experiments.registry.run_dir(manifest.run_id)
         filename = LATEST_OVERLAY_FILENAME if kind == "latest" else FINAL_OVERLAY_FILENAME
         processing_state_path = run_directory / GSENSOR_PROCESSING_STATE_FILENAME
         if processing_state_path.is_file():
@@ -1714,19 +1769,14 @@ class CentralService:
 
         applied_run_id = None
         applied_at = None
-        current_run_id = self.experiments.current_run_id()
-        if current_run_id is not None:
-            try:
-                manifest = self.experiments.registry.get(current_run_id)
-            except ExperimentRegistryError:
-                manifest = None
-            if (
-                manifest is not None
-                and manifest.params_snapshot_file
-                and manifest.parameter_version == version
-            ):
-                applied_run_id = current_run_id
-                applied_at = manifest.started_at
+        manifest = self.experiments.current_manifest()
+        if (
+            manifest is not None
+            and manifest.params_snapshot_file
+            and manifest.parameter_version == version
+        ):
+            applied_run_id = manifest.run_id
+            applied_at = manifest.started_at
 
         if applied_run_id is not None:
             kind = "applied"
@@ -1809,10 +1859,9 @@ class CentralService:
         return result
 
     def _require_parameter_draft_editable(self) -> None:
-        run_id = self.experiments.current_run_id()
-        if run_id is None:
+        manifest = self.experiments.current_manifest()
+        if manifest is None:
             return
-        manifest = self.experiments.registry.get(run_id)
         if manifest.status not in {
             ExperimentStatus.CREATED,
             ExperimentStatus.COMPLETED,
@@ -1894,7 +1943,7 @@ class CentralService:
             "End the current experiment before creating or switching experiments."
         )
 
-    def _require_controller_start_ready(self, run_id: str) -> None:
+    def _require_controller_start_ready(self, run_id: str) -> dict[str, Any]:
         """Reject known startup blockers before locking or publishing a run."""
 
         controller = self.controller_status()
@@ -1924,6 +1973,7 @@ class CentralService:
                 "Controller is running another experiment. End that experiment "
                 "before starting the selected Central experiment."
             )
+        return controller
 
     def start_experiment(self, params: ParamsUpdate | None = None) -> Dict[str, Any]:
         run_id = self.experiments.current_run_id()
@@ -1936,7 +1986,7 @@ class CentralService:
             raise InvalidExperimentStateError(
                 f"Cannot start experiment {run_id} from state {manifest.status.value}."
             )
-        self._require_controller_start_ready(run_id)
+        controller = self._require_controller_start_ready(run_id)
         if params is not None:
             self.save_params(
                 params,
@@ -1958,6 +2008,7 @@ class CentralService:
             parameter_version=int(params_snapshot["version"]),
         )
         started_manifest = self.experiments.registry.get(run_id)
+        self.archive.capture_start(run_id, self.run_configuration.to_dict(), controller)
         self._load_gsensor_activation_state(started_manifest, create=True)
         # STARTING is intentionally persisted before RabbitMQ delivery. If a
         # publish is interrupted, the immutable snapshot can be retried while
@@ -2300,6 +2351,45 @@ def create_experiment(payload: ExperimentCreateRequest) -> Dict[str, Any]:
 def list_experiments() -> Dict[str, Any]:
     try:
         return service.experiments.list()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.get("/api/experiment-history")
+def experiment_history(
+    q: str = Query(default="", max_length=200),
+    date_from: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> Dict[str, Any]:
+    try:
+        return service.archive.history(q, date_from, date_to)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.get("/api/experiments/{run_id}/archive")
+def experiment_archive(run_id: str) -> Dict[str, Any]:
+    try:
+        return service.archive.describe(run_id)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/experiments/{run_id}/export", status_code=202)
+def export_experiment(run_id: str) -> Dict[str, Any]:
+    try:
+        return service.archive.request(run_id)
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.get("/api/experiments/{run_id}/exports/{filename}")
+def download_experiment_csv(run_id: str, filename: str) -> FileResponse:
+    try:
+        path = service.archive.download_path(run_id, filename)
+        return FileResponse(path, media_type="text/csv; charset=utf-8", filename=path.name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 

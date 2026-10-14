@@ -44,11 +44,18 @@ services:
       - CENTRAL_RUNTIME_INFLUX_ENABLED=${CENTRAL_RUNTIME_INFLUX_ENABLED:-${CONTROLLER_INFLUX_ENABLED:-true}}
       - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
       - PARAMS_DEFAULT_FILE=/app/params_default.yaml
-      - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
+      - PARAMS_FILE=/data/experiments/_system/params_runtime.yaml
       - PARAM_META_FILE=/app/param_meta.yaml
       - EXPERIMENT_ROOT=/data/experiments
       - EXPERIMENT_HOST_ROOT_DISPLAY=${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+      - EXPERIMENT_EXPORT_ENABLED=${EXPERIMENT_EXPORT_ENABLED:-true}
+      - PROCESS_DEVICE_ID=${PROCESS_DEVICE_ID:-crystallizer}
+      - CONTROLLER_PROCESS_ENABLED=${CONTROLLER_PROCESS_ENABLED:-false}
+      - TELEGRAF_INTERVAL=${TELEGRAF_INTERVAL:-1s}
+      - OPCUA_WRITER_AUDIT_DB=/data/opcua_writer/commands.sqlite3
+      - GRAFANA_EXPERIMENT_URL=${GRAFANA_EXPERIMENT_URL:-http://localhost:3000/d/crystallization-mpc-analysis/crystallization-mpc-analysis}
     volumes:
+      - opcua_writer_data:/data/opcua_writer:ro
       - type: bind
         source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
         target: /data/experiments
@@ -75,7 +82,7 @@ services:
       - RABBIT_URL=amqp://guest:guest@rabbitmq:5672/%2F
       - RABBIT_EXCHANGE=idp.bus
       - PARAMS_DEFAULT_FILE=/app/params_default.yaml
-      - PARAMS_FILE=/data/experiments/.central/params_runtime.yaml
+      - PARAMS_FILE=/data/experiments/_system/params_runtime.yaml
       - PARAM_META_FILE=/app/param_meta.yaml
       - EXPERIMENT_ROOT=/data/experiments
       - GSENSOR_IMAGE_POLL_INTERVAL_S=${GSENSOR_IMAGE_POLL_INTERVAL_S:-1.0}
@@ -149,6 +156,8 @@ services:
     image: telegraf:1.40.1
     profiles: [process-io]
     command: ["telegraf", "--config", "/etc/telegraf/telegraf.conf", "--config", "/etc/telegraf/opcua.conf"]
+    env_file:
+      - config/influxdb.env
     environment:
       <<: *opcua-environment
       PROCESS_DEVICE_ID: ${PROCESS_DEVICE_ID:-crystallizer}
@@ -156,12 +165,16 @@ services:
       RABBIT_EXCHANGE: idp.bus
       TELEGRAF_INTERVAL: ${TELEGRAF_INTERVAL:-1s}
       TELEGRAF_FLUSH_INTERVAL: ${TELEGRAF_FLUSH_INTERVAL:-1s}
+      INFLUX_URL: http://influxdb:8086
     volumes:
       - ./config/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - ./config/telegraf/opcua.conf:/etc/telegraf/opcua.conf:ro
       - ${OPCUA_CERT_HOST_ROOT:-./config/telegraf/certs}:/run/opcua-certs:ro
+      - telegraf_data:/var/lib/telegraf
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      influxdb:
         condition: service_healthy
     restart: unless-stopped
 
@@ -169,14 +182,23 @@ services:
     image: *mpc-image
     profiles: [process-io]
     command: ["python", "-m", "crystallization_mpc.apps.opcua_writer"]
+    env_file:
+      - config/influxdb.env
     environment:
       <<: *opcua-environment
       RABBIT_URL: amqp://guest:guest@rabbitmq:5672/%2F
       RABBIT_EXCHANGE: idp.bus
       OPCUA_WRITER_QUEUE: ${OPCUA_WRITER_QUEUE:-opcua_writer.in}
       OPCUA_WRITER_JOURNAL: /data/commands.sqlite3
+      EXPERIMENT_ROOT: /data/experiments
+      INFLUX_URL: http://influxdb:8086
     volumes:
       - opcua_writer_data:/data
+      - type: bind
+        source: ${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
+        target: /data/experiments
+        bind:
+          create_host_path: true
       - ${OPCUA_CERT_HOST_ROOT:-./config/telegraf/certs}:/run/opcua-certs:ro
     depends_on:
       rabbitmq:
@@ -185,6 +207,9 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    hostname: ${RABBITMQ_HOSTNAME:-rabbitmq}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     ports:
       - "5673:5672"
       - "15673:15672"
@@ -232,3 +257,8 @@ volumes:
   influxdb_data:
   grafana_data:
   opcua_writer_data:
+  telegraf_data:
+  rabbitmq_data:
+    # To preserve an existing installation, set this to its current data volume
+    # and RABBITMQ_HOSTNAME to its current hostname before recreating RabbitMQ.
+    name: ${RABBITMQ_DATA_VOLUME:-${COMPOSE_PROJECT_NAME}_rabbitmq_data}

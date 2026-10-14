@@ -77,7 +77,8 @@ python -m pip install -e .
   `CONTROLLER_PROCESS_WRITE_ENABLED=false` remains the default write gate; this
   combination is read-only shadow mode. Never enable the write gate without a
   completed numerical and on-site safety review.
-- Central, Gsensor, and Controller share the configured `EXPERIMENT_HOST_ROOT` bind mount. Gsensor writes `gsensor_processing_state.json` inside the active experiment, while Controller writes `.controller_runtime_state.json` at the shared root so container restarts preserve the active run.
+- Central, Gsensor, and Controller share `EXPERIMENT_HOST_ROOT`. New experiment folders use UTC creation time and the experiment label; the unique `run_id` remains unchanged. System state and durable telemetry queues live under `_system`; per-run processing state remains inside its experiment folder. Existing installations require the stopped-service migration described in [experiment storage and CSV exports](docs/process-io.md#experiment-storage-and-csv-exports).
+- Central's **Experiment History & Exports** panel searches by label, `run_id`, and UTC creation date. Ended experiments automatically export parameters, raw process data, controller data, GSensor data, and events to five CSV files in their own folder. Browsing history does not change the active experiment. All archive UI labels are English.
 - Image revisions are identified by filename, nanosecond modification time, and file size. A camera may therefore overwrite a fixed filename and still produce a new measurement frame.
 - `GSENSOR_HOUGH_DEBUG_ENABLED` defaults to `false`; normal experiments keep only the latest/final detection overlays and restart state. Enable it only for local Hough diagnosis.
 - GSensor frame-alignment architecture, failure behavior, recovery, and offline evaluation are documented in `docs/gsensor-alignment.md`. `alignment_method: none` remains the default.

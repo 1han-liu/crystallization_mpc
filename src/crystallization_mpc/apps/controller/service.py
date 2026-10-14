@@ -41,6 +41,8 @@ from crystallization_mpc.apps.controller.telemetry import (
 )
 from crystallization_mpc.infra.influxdb.client import InfluxSettings
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
+from crystallization_mpc.infra.influxdb.durable import DurableInfluxWriter, telemetry_path, mark_finalized
+from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
     CONTROLLER_ADD_SEED_COMMAND,
@@ -175,20 +177,21 @@ class ControllerService:
         self._measurement_writer_closed = False
         if self.measurement_writer is None and self.settings.influx_enabled:
             try:
-                if not self.settings.influx_token:
-                    raise RuntimeError("INFLUX_TOKEN is required for Controller persistence.")
-                self.measurement_writer = InfluxWriter(
+                self.measurement_writer = DurableInfluxWriter(
                     InfluxSettings(
                         url=self.settings.influx_url,
                         token=self.settings.influx_token,
                         org=self.settings.influx_org,
                         bucket=self.settings.influx_bucket,
-                    )
+                    ), path=telemetry_path("controller", self.settings.experiment_root)
                 )
             except Exception as exc:
                 self.influx_initialization_error = str(exc)
                 self.last_influx_error = str(exc)
                 logger.warning("Could not initialize Controller InfluxDB writer: %s", exc)
+        if isinstance(self.process_adapter, RabbitProcessAdapter):
+            self.process_adapter.audit_writer = self.measurement_writer
+            self.process_adapter.audit_required = self.settings.influx_enabled
         self.seed_event_count = 0
         self.duplicate_seed_event_count = 0
         self.last_seed_event: dict[str, Any] | None = None
@@ -212,14 +215,13 @@ class ControllerService:
         self.recovery_status = "disabled"
         self.recovery_error: str | None = None
         self.state_path = (
-            Path(self.settings.experiment_root).expanduser().resolve(strict=False)
-            / CONTROLLER_STATE_FILENAME
+            system_path(self.settings.experiment_root, CONTROLLER_STATE_FILENAME)
             if self.settings.experiment_root
             else None
         )
         if self.state_path is not None:
             self._restore_persisted_state()
-        self.runtime_history = RuntimeHistory(self.state_path.parent / ".controller_runtime_history.json") if self.state_path else None
+        self.runtime_history = RuntimeHistory(system_path(self.settings.experiment_root, ".controller_runtime_history.json")) if self.state_path else None
         for entry in self.runtime_events.values():
             self._archive_runtime_event(entry["command"], entry["result"])
 
@@ -423,9 +425,18 @@ class ControllerService:
             document = json.loads(self.state_path.read_text(encoding="utf-8"))
             if not isinstance(document, dict):
                 raise ValueError("Controller runtime state must be an object.")
-            if int(document.get("schema_version", 0)) != 2:
+            schema_version = document.get("schema_version")
+            if type(schema_version) is not int or schema_version not in {1, 2}:
                 raise ValueError("Unsupported Controller runtime-state schema.")
             state = ControllerState(str(document.get("state") or ""))
+            legacy_inactive_state = schema_version == 1
+            if legacy_inactive_state and state not in {
+                ControllerState.IDLE, ControllerState.CONFIGURED, ControllerState.STOPPED,
+            }:
+                raise ValueError(
+                    "Legacy Controller checkpoints may only be recovered while idle, "
+                    "configured, or stopped; automatic experiment resume is not supported."
+                )
             parameters = document.get("parameters")
             if not isinstance(parameters, dict):
                 raise ValueError("Controller recovery parameters must be an object.")
@@ -515,12 +526,12 @@ class ControllerService:
                 raise ValueError("Controller recovery GSensor desired state is invalid.")
             # Permission can survive a Controller-only restart while the GSensor
             # process keeps running. Availability and sample freshness cannot.
-            self.gsensor_desired_enabled = desired_enabled
+            self.gsensor_desired_enabled = desired_enabled and not legacy_inactive_state
             self.gsensor_enabled = False
             self.gsensor_measurement_ready = False
             self.gsensor_gate_reason = (
                 "restart_waiting_for_fresh_status"
-                if desired_enabled
+                if self.gsensor_desired_enabled
                 else "disabled"
             )
             restart_barrier = _utc_timestamp(self._wall_clock())
@@ -694,6 +705,23 @@ class ControllerService:
             if runtime is not None:
                 if not isinstance(runtime, dict):
                     raise ValueError("Invalid runtime controls recovery document.")
+                if legacy_inactive_state:
+                    # v1 persisted the applied revision and event journal, but
+                    # predates deferred refresh/pending state. Only an inactive
+                    # checkpoint may adopt the empty v2 refresh state. Preserve
+                    # its history, validate all existing values below, and never
+                    # configure the algorithm or connect the process on this path.
+                    runtime = copy.deepcopy(runtime)
+                    runtime.setdefault("pending", None)
+                    runtime.setdefault("refresh", {
+                        "state": "completed", "event_id": None,
+                        "count": 0, "segment_id": 0,
+                    })
+                    if runtime["pending"] is not None or (
+                        isinstance(runtime["refresh"], dict)
+                        and runtime["refresh"].get("state") == "pending"
+                    ):
+                        raise ValueError("An inactive legacy checkpoint cannot contain a pending refresh.")
                 revision = runtime.get("revision")
                 if type(revision) is not int or revision < 0:
                     raise ValueError("Invalid runtime controls revision.")
@@ -1171,6 +1199,7 @@ class ControllerService:
             if command.run_id != self.current_run_id:
                 raise ValueError("experiment.stop run_id does not match current experiment.")
             if self.state == ControllerState.STOPPED:
+                self._mark_archive_finalized(command.run_id)
                 return {"accepted": True, "duplicate": True, "kind": "stop"}
             self._reject_pending_runtime_locked("Experiment stopped before refresh.")
             try:
@@ -1193,7 +1222,14 @@ class ControllerService:
             self._next_tick_monotonic = None
             self._control_wakeup.set()
 
+            self._mark_archive_finalized(command.run_id)
+
         return {"accepted": True, "kind": "stop", "run_id": command.run_id}
+
+    def _mark_archive_finalized(self, run_id: str) -> None:
+        mark_finalized(self.settings.experiment_root, run_id, "controller", self.control_tick_count,
+                       enqueue_failures=self.influx_write_failure_count + int(self.process_adapter.status().get("audit_failure_count", 0)),
+                       persistence_enabled=self.measurement_writer is not None)
 
     def _add_seed(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         event = ControllerAddSeedPayload.from_mapping(payload)
@@ -1996,9 +2032,10 @@ class ControllerService:
                     exc,
                 )
             else:
-                written = True
-                self.influx_write_success_count += 1
-                self.last_influx_write_at = computed_at
+                written = not getattr(self.measurement_writer, "asynchronous", False)
+                self.influx_write_success_count += int(written)
+                if written:
+                    self.last_influx_write_at = computed_at
                 self.last_influx_error = None
         elif self.settings.influx_enabled:
             written = False
@@ -2036,11 +2073,13 @@ class ControllerService:
             ),
             "process_write_error": process_write_error,
             "influxdb_written": written,
+            "influxdb_queued": bool(self.measurement_writer is not None and getattr(self.measurement_writer, "asynchronous", False) and self.last_influx_error is None),
         }
         return {
             "output_generated": True,
             "output_valid": output.valid,
             "influxdb_written": written,
+            "influxdb_queued": bool(self.measurement_writer is not None and getattr(self.measurement_writer, "asynchronous", False) and self.last_influx_error is None),
             "process_write_attempted": process_write_attempted,
             "process_write_succeeded": (
                 process_write is not None if process_write_attempted else None
@@ -2079,6 +2118,11 @@ class ControllerService:
                 "initialization_error": self.influx_initialization_error,
             }
         )
+        if isinstance(self.measurement_writer, DurableInfluxWriter):
+            archive = self.measurement_writer.status(self.current_run_id)
+            influx.update(archive=archive, write_success_count=archive["delivered_count"],
+                          connected=bool(archive["delivered_count"] and not archive["last_error"]),
+                          last_error=archive["last_error"] or self.last_influx_error)
         return integrations
 
     def status(self) -> dict[str, Any]:

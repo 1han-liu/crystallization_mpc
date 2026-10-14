@@ -16,6 +16,7 @@ from crystallization_mpc.experiments import (
     ExperimentRegistry,
     ExperimentStatus,
 )
+from crystallization_mpc.infra.storage_paths import system_path
 
 CENTRAL_STATE_FILENAME = ".central_experiment_state.json"
 WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
@@ -35,7 +36,7 @@ class CentralExperimentManager:
         if not display_root:
             raise ValueError("Experiment host display root cannot be empty.")
         self.host_root_display = display_root
-        self.state_path = self.registry.root / CENTRAL_STATE_FILENAME
+        self.state_path = system_path(self.registry.root, CENTRAL_STATE_FILENAME)
 
     def create(self, *, label: str | None = None) -> dict[str, Any]:
         manifest = self.registry.create(label=label)
@@ -43,12 +44,20 @@ class CentralExperimentManager:
         return self.describe(manifest, current_run_id=manifest.run_id)
 
     def list(self) -> dict[str, Any]:
-        current_run_id = self.current_run_id()
+        current_run_id = self._read_current_run_id()
+        entries = self.registry.list_with_directories()
+        if current_run_id is not None and not any(
+            manifest.run_id == current_run_id for _directory, manifest in entries
+        ):
+            # Preserve validation/error behavior for stale or invalid selections.
+            self.registry.get(current_run_id)
         return {
             "current_run_id": current_run_id,
             "experiments": [
-                self.describe(manifest, current_run_id=current_run_id)
-                for manifest in self.registry.list()
+                self.describe(
+                    manifest, current_run_id=current_run_id, run_directory=directory
+                )
+                for directory, manifest in entries
             ],
         }
 
@@ -95,6 +104,18 @@ class CentralExperimentManager:
         return self.describe(manifest, current_run_id=self.current_run_id())
 
     def current_run_id(self) -> str | None:
+        manifest = self.current_manifest()
+        return manifest.run_id if manifest is not None else None
+
+    def current_manifest(self) -> ExperimentManifest | None:
+        """Validate the current selection and read its manifest once per call."""
+        run_id = self._read_current_run_id()
+        if run_id is None:
+            return None
+        return self.registry.get(run_id)
+
+    def _read_current_run_id(self) -> str | None:
+        """Read selection identity; callers must validate it against the registry."""
         if not self.state_path.exists():
             return None
         try:
@@ -110,28 +131,32 @@ class CentralExperimentManager:
         run_id = document.get("current_run_id")
         if run_id is None:
             return None
-        manifest = self.registry.get(str(run_id))
-        return manifest.run_id
+        return str(run_id)
 
     def describe(
         self,
         manifest: ExperimentManifest,
         *,
         current_run_id: str | None,
+        run_directory: Path | None = None,
     ) -> dict[str, Any]:
         result = manifest.to_dict()
+        run_directory = run_directory or self.registry.run_dir(manifest.run_id)
         result.update(
             {
                 "selected": manifest.run_id == current_run_id,
+                "directory_name": run_directory.name,
+                "experiment_directory": str(run_directory),
+                "host_directory": _display_image_path(
+                    self.host_root_display, run_directory.name, ""
+                ),
                 "camera_save_path": _display_image_path(
                     self.host_root_display,
-                    manifest.run_id,
+                    run_directory.name,
                     manifest.image_directory,
                 ),
                 "container_image_path": str(
-                    self.registry.root
-                    / manifest.run_id
-                    / manifest.image_directory
+                    run_directory / manifest.image_directory
                 ),
             }
         )

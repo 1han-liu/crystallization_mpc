@@ -1162,3 +1162,16 @@ textarea:disabled {
 #runtime-history { margin-top: 1rem; }
 #runtime-history summary { cursor: pointer; font-weight: 600; }
 #runtime-history-older[hidden] { display: none !important; }
+#experiment-history summary { cursor: pointer; font-weight: 600; }
+.archive-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
+.archive-filters label { display: grid; gap: 6px; font-size: 13px; }
+.archive-filters input { padding: 9px; border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+.archive-layout { display: grid; grid-template-columns: minmax(210px, 1fr) minmax(0, 2fr); gap: 24px; }
+.archive-list { display: grid; align-content: start; gap: 8px; max-height: 440px; overflow-y: auto; }
+.archive-run { text-align: left; overflow-wrap: anywhere; }
+.archive-facts dt { color: #64748b; font-size: 12px; margin-top: 12px; }
+.archive-facts dd { margin: 4px 0; overflow-wrap: anywhere; }
+#archive-errors { color: #9a5b12; overflow-wrap: anywhere; }
+#archive-configuration { white-space: pre-wrap; overflow-wrap: anywhere; }
+#archive-downloads { line-height: 1.9; }
+@media (max-width: 780px) { .archive-layout { grid-template-columns: 1fr; } }

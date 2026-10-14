@@ -65,6 +65,8 @@ from crystallization_mpc.apps.gsensor.telemetry import (
     write_gsensor_measurement,
 )
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
+from crystallization_mpc.infra.influxdb.durable import DurableInfluxWriter, telemetry_path, mark_finalized
+from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.experiments import ExperimentStatus, TERMINAL_EXPERIMENT_STATUSES
 from crystallization_mpc.experiments.registry import GSENSOR_INITIALIZATION_FILENAME
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
@@ -96,7 +98,6 @@ UI_DIR = Path(__file__).resolve().parent / "ui"
 GSENSOR_IMGS_DIR = Path(__file__).resolve().parent / "imgs"
 PROJECT_ROOT = UI_DIR.parents[4]
 DEFAULT_PARAMS_PATH = PROJECT_ROOT / "params_default.yaml"
-DEFAULT_RUNTIME_PARAMS_PATH = PROJECT_ROOT / "params_runtime.yaml"
 DEFAULT_PARAM_META_PATH = PROJECT_ROOT / "param_meta.yaml"
 DEFAULT_DSCGR_OUTPUT_ROOT = PROJECT_ROOT / ".runtime" / "dscgr_runs"
 DEFAULT_EXPERIMENT_ROOT = PROJECT_ROOT / ".runtime" / "experiments"
@@ -201,13 +202,17 @@ class GsensorService:
         self.url = url or os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")
         self.exchange = exchange or os.getenv("RABBIT_EXCHANGE", EXCHANGE)
         self.queue_name = queue_name or os.getenv("RABBIT_QUEUE", QUEUES[ROLE])
+        self.experiment_root_path = Path(
+            experiment_root_path
+            or os.getenv("EXPERIMENT_ROOT", str(DEFAULT_EXPERIMENT_ROOT))
+        )
         self.default_params_path = Path(
             default_params_path
             or os.getenv("PARAMS_DEFAULT_FILE", str(DEFAULT_PARAMS_PATH))
         )
-        self.params_path = Path(
-            runtime_params_path
-            or os.getenv("PARAMS_FILE", str(DEFAULT_RUNTIME_PARAMS_PATH))
+        self.params_path = system_path(
+            self.experiment_root_path, "params_runtime.yaml",
+            explicit_path=runtime_params_path or os.getenv("PARAMS_FILE") or None,
         )
         self.param_meta_path = Path(
             param_meta_path
@@ -216,10 +221,6 @@ class GsensorService:
         self.dscgr_output_root_path = Path(
             dscgr_output_root_path
             or os.getenv("GSENSOR_DSCGR_OUTPUT_ROOT", str(DEFAULT_DSCGR_OUTPUT_ROOT))
-        )
-        self.experiment_root_path = Path(
-            experiment_root_path
-            or os.getenv("EXPERIMENT_ROOT", str(DEFAULT_EXPERIMENT_ROOT))
         )
         configured_poll_interval = (
             image_poll_interval_s
@@ -273,7 +274,7 @@ class GsensorService:
         self.influx_initialization_error: str | None = None
         if self.measurement_writer is None and persistence_enabled:
             try:
-                self.measurement_writer = InfluxWriter()
+                self.measurement_writer = DurableInfluxWriter(path=telemetry_path("gsensor", self.experiment_root_path))
             except Exception as exc:
                 self.influx_initialization_error = str(exc)
                 logger.warning("Could not initialize Gsensor InfluxDB writer: %s", exc)
@@ -626,6 +627,7 @@ class GsensorService:
                 "valid": self.measurement_valid_frame_count,
                 "invalid": self.measurement_invalid_frame_count,
             },
+            "telemetry_enqueue_failures": self.influx_write_failure_count,
             "reinitialization": {
                 "generation": self.initialization_generation,
                 "initializations": self.initialization_history,
@@ -812,6 +814,7 @@ class GsensorService:
         self.latest_overlay_path = state.get("latest_overlay_path")
         self.final_overlay_path = state.get("final_overlay_path")
         counters = state.get("measurement_counters") or {}
+        self.influx_write_failure_count = int(state.get("telemetry_enqueue_failures", 0))
         old_processor = state.get("processor") or {}
         self.measurement_step_count = int(counters.get("frame_seq", (
             (self.last_growth_rate_result or {}).get("frame_seq")
@@ -1184,6 +1187,7 @@ class GsensorService:
                 self.last_lifecycle_message = message
                 self._persist_activation_state_locked()
         if duplicate_status == GrowthRateStatus.COMPLETED:
+            self._mark_archive_finalized(payload.run_id)
             self._publish_growth_rate_status(
                 GrowthRateStatus.COMPLETED,
                 message_name=GROWTH_RATE_COMPLETED_MESSAGE,
@@ -1193,6 +1197,7 @@ class GsensorService:
             with self._lock:
                 self.experiment_lifecycle_status = GrowthRateStatus.COMPLETED.value
                 self._persist_processing_state_locked()
+                self._mark_archive_finalized(payload.run_id)
             self._publish_growth_rate_status(
                 GrowthRateStatus.COMPLETED,
                 message_name=GROWTH_RATE_COMPLETED_MESSAGE,
@@ -1214,10 +1219,16 @@ class GsensorService:
         with self._lock:
             self.experiment_lifecycle_status = GrowthRateStatus.COMPLETED.value
             self._persist_processing_state_locked()
+            self._mark_archive_finalized(payload.run_id)
         self._publish_growth_rate_status(
             GrowthRateStatus.COMPLETED,
             message_name=GROWTH_RATE_COMPLETED_MESSAGE,
         )
+
+    def _mark_archive_finalized(self, run_id: str) -> None:
+        mark_finalized(self.experiment_root_path, run_id, "gsensor", self.measurement_step_count,
+                       enqueue_failures=self.influx_write_failure_count,
+                       persistence_enabled=self.measurement_writer is not None)
 
     def _experiment_in_progress_locked(self) -> bool:
         return self.experiment_lifecycle_status in {
@@ -1481,9 +1492,10 @@ class GsensorService:
             logger.warning("Could not persist growth-rate measurement: %s", exc)
         else:
             with self._lock:
-                self.last_influx_write_at = utc_ts()
+                if not getattr(self.measurement_writer, "asynchronous", False):
+                    self.last_influx_write_at = utc_ts()
                 self.last_influx_error = None
-                self.influx_write_success_count += 1
+                self.influx_write_success_count += int(not getattr(self.measurement_writer, "asynchronous", False))
 
     @staticmethod
     def _validate_central_lifecycle_message(message: Dict[str, Any]) -> None:
@@ -1966,11 +1978,6 @@ class GsensorService:
             remaining -= 1
             self._record_processed_frame(detection, frame_result)
             self._publish_growth_rate_sample(frame_result)
-            with self._publication_lock:
-                with self._lock:
-                    should_persist = self.gsensor_enabled and not self._measurement_stop.is_set() and not self._processing_transition_pending
-                if should_persist:
-                    self._persist_growth_rate_result(frame_result)
             self._publish_growth_rate_status(
                 GrowthRateStatus.MEASURING,
                 frame_seq=frame_result.frame_seq,
@@ -2023,6 +2030,10 @@ class GsensorService:
             self.processed_image_records[detection.identity_key]["alignment_revision"] = self.alignment_revision
             self.last_processing_error = result.error
             self.latest_overlay_path = result.overlay_path
+            # Archive every completed frame before checkpointing it as consumed.
+            # A concurrent Stop still withholds the sample from Controller, but
+            # must not remove an already completed observation from the archive.
+            self._persist_growth_rate_result(result)
             self._persist_processing_state_locked()
         logger.warning(
             "Gsensor online frame done: run_id=%s frame_seq=%s image=%s valid=%s error=%s",
@@ -2682,6 +2693,8 @@ class GsensorService:
                     "last_error": self.last_influx_error,
                     "success_count": self.influx_write_success_count,
                     "failure_count": self.influx_write_failure_count,
+                    "archive": (self.measurement_writer.status(self.current_experiment.get("run_id") if self.current_experiment else None)
+                                if isinstance(self.measurement_writer, DurableInfluxWriter) else None),
                 },
                 "experiment": self.current_experiment,
                 "current_run_id": (

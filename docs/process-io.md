@@ -152,6 +152,117 @@ $controllerStatus.last_control_output | ConvertTo-Json -Depth 8
 
 **1.40.1 配置兼容问题：** 实际容器验证发现，这个版本的 `buildInput` 支持 `time_source`，但未使用字段检查的白名单漏掉了它，直接放在 `[[inputs.opcua]]` 中会启动失败。本项目保持官方 `telegraf:1.40.1` 镜像，采用该版本支持的旧式 `[opcua]` 输入表，仍创建同一个 `inputs.opcua` 插件并使用相同运行逻辑。通过两个显式 `--config` 参数，先加载 `telegraf.conf`（agent/output），最后加载 `opcua.conf`（单个输入）。**顺序不能颠倒，不能再追加配置文件或 `--config-directory`**，否则后续加载会再次触发该版本错误的未使用字段检查。升级 Telegraf 时应重新验收并考虑恢复现代配置形式；不要删掉 `time_source` 或改为按到达时间拼接五个节点。
 
+## Experiment storage and CSV exports
+
+### 归档规则与数据范围
+
+新实验目录采用 `UTC创建时间_实验名称`，例如 `20261014T190821_051Z_Cooling test`。Windows 不允许的字符会替换，空名称使用 `Unnamed`，重复目录追加序号。内部唯一标识仍为原来的 `exp_<UTC时间>_<随机标识>`，记录在 `experiment.json` 的 `run_id` 中；同名实验也有不同 ID。已有以 ID 命名的目录保持原样，查找时读取 manifest，不依赖目录等于 ID。
+
+```text
+EXPERIMENT_HOST_ROOT/
+  _system/
+    .central_experiment_state.json
+    .central_run_configuration.json
+    .central_runtime_history.json
+    .central_runtime_requests.json
+    .controller_runtime_state.json
+    .controller_runtime_history.json
+    .gsensor_experiment_state.json
+    params_runtime.yaml
+    *_telemetry.sqlite3          # 持久待发送队列及本地审计记录
+    migration_backup/           # 迁移旧状态时的备份
+  20261014T190821_051Z_Cooling test/
+    experiment.json
+    params_snapshot.yaml
+    capture.json                # 本次设备、节点、单位边界及运行配置
+    images/                     # 相机输入及原有图像处理产物按既有规则保存
+    gsensor_processing_state.json
+    controller_finalized.json
+    gsensor_finalized.json
+    archive.json                # 导出状态、数据覆盖检查、行数和错误
+    parameters.csv
+    process_data.csv
+    controller_data.csv
+    gsensor_data.csv
+    events.csv
+```
+
+SQLite 可能同时出现 `-wal`、`-shm` 文件，这是数据库运行文件，不是额外实验。启动生成 `_system` 中的检查点、锁和队列属于正常行为。不要在服务运行时手动删除这些文件。writer 的命令执行数据库仍单独保存在 `opcua_writer_data` 卷，Telegraf 的磁盘缓冲保存在 `telegraf_data` 卷。
+
+Telegraf 在服务运行时持续采集，不依赖实验是否开始：同一轮数据分别发送 AMQP 和直接写入 InfluxDB 的 `crystallizer_raw`。原始数据按 `device + NodeId + 纳秒采集时间` 保存，保留设备单位（温度 ℃）。Controller 数据保存实际使用的测量和控制结果，温度为 K。单次实验导出按固定设备及 `[开始时间, 最后生产者结束时间)` 筛选；后台数据不强行写入某个实验 ID，CSV 中再附本次 `run_id`。
+
+OPC UA 输入是定时读取当前节点值。如果设备每五秒更新一次，Telegraf 每秒读取会产生多条数值相同、采集时间不同的记录；不会强迫设备产生新测量，也不会丢弃这些有效重复值。`collection_start` 只代表读取轮次，不证明设备每秒更新、设备端原子快照或测量未冻结。设备更新快于采集时，采集间隔内的变化可能读不到。该版本配置不提供完整的设备源更新时间历史，不能用采集时间检测所有设备冻结问题。
+
+AMQP 与 InfluxDB 是独立输出：数据入库不表示 Controller 已使用它，控制算法使用记录以 `controller_measurement` 为准。断网后积压原始数据可补入数据库，但 Controller 仍拒绝超过有效期的积压测量。未实际采集的停机时间、Telegraf 已过滤的坏质量值无法补造；CSV 和 `archive.json` 会显示可检测的缺字段、间隔和质量问题。
+
+### 五类 CSV 与结束行为
+
+| 文件 | 内容 |
+|---|---|
+| `parameters.csv` | 启动参数快照、运行模式、运行期间参数变更及生效状态；未生效请求不会伪装成已生效参数 |
+| `process_data.csv` | 实验时间范围内每轮五节点原始读值、NodeId、质量、完整性；温度 ℃ |
+| `controller_data.csv` | 各控制周期实际测量、算法输出、设定值、写回结果和周期序号；算法温度 K |
+| `gsensor_data.csv` | 实际已处理图像的测量、帧序号及有效性；未启用时只有表头 |
+| `events.csv` | 实验生命周期、运行配置事件、写命令准备/发布/执行/回执/未知结果 |
+
+结束实验后，Central 等待 Controller 和 GSensor 的结束标记、本地待发送队列清空以及原始数据流越过结束边界，再导出。数据库断线时先显示 `Waiting for data`；恢复后继续。停止通知丢失但两端有效结束标记均已落盘时，可从记录恢复结束状态。Telegraf 停止后没有越过边界的新数据时，保持等待；恢复采集后再检查，不会将旧数据冒充完整结果。
+
+导出通过临时文件替换写入，五个文件完成后才开放下载。`Completed` 表示本次检查覆盖完整；`Incomplete` 表示文件可用但发现缺测、缺审计或旧实验信息不足；`Failed` 表示导出失败。`Exporting` 表示正在生成文件。UI 全部采用英文，用户输入的实验名称保持原文。结果未知的设备写入仍按未知保存，不会为了完成报表而重发控制命令。
+
+`EXPERIMENT_EXPORT_ENABLED=true` 默认开启结束后自动导出；关闭后仍可手动导出。旧实验不会自动批量重导，历史缺失记录无法追溯生成。数据库、持久队列和 CSV 均未设置自动删除策略；InfluxDB 实际保留时长取决于 bucket retention。容量规划应同时包括这些记录、设备采集和图像。Telegraf 1.40.1 的磁盘缓冲为实验性功能；当前关闭逐点 fsync 以满足一秒周期，已验证进程崩溃后的补传，**不保证宿主机断电时最近缓冲零丢失**。若在实验室启用 fsync，应重新验收采集延迟，不能直接放宽控制数据有效期。
+
+CSV 的 `time_ns` 为完整纳秒整数，`time_utc` 保留九位小数。Excel 自动识别数字可能舍入 `time_ns`，导入该列时选择文本。当前部署运行一个 Central 进程；不要为同一实验存储启动多个 Central workers，归档锁目前为进程内锁。
+
+### 从哪里查询和下载
+
+Central `http://localhost:8000` 展开 **Experiment History & Exports**，按实验名称、完整/部分 ID、UTC 创建日期搜索。选择历史行仅查看该次实验，不会切换活动实验。可查看运行配置、目录、导出状态和缺失原因，下载五个 CSV，或点击 **Re-export CSV**。所有 CSV 也直接保存在对应实验目录中。
+
+接口示例（替换为真实 ID）：
+
+```powershell
+$runId = 'exp_20261014T190821_051Z_2a986e'
+Invoke-RestMethod "http://localhost:8000/api/experiment-history?q=$runId"
+Invoke-RestMethod "http://localhost:8000/api/experiments/$runId/archive"
+Invoke-RestMethod -Method Post "http://localhost:8000/api/experiments/$runId/export"
+Invoke-WebRequest "http://localhost:8000/api/experiments/$runId/exports/process_data.csv" -OutFile process_data.csv
+```
+
+**Grafana** 链接使用现有分析看板和 `var-run_id`、实验时间范围；地址通过 `GRAFANA_EXPERIMENT_URL` 配置。Controller/GSensor/事件数据可按 `run_id` 查询；连续原始数据没有实验 ID tag，在 InfluxDB 中使用 `device` 和时间范围查询，Central 导出会自动处理这种关联。本次没有新增 Grafana 原始数据面板。
+
+### 已有机器首次升级
+
+先在 Central 结束活动实验并确认结束。已有 `.env` 和数据库不会自动覆盖；保留 `EXPERIMENT_HOST_ROOT` 指向原实验根目录。迁移程序只整理已知系统文件，不重命名历史实验目录，不重放控制命令。
+
+若旧 RabbitMQ 使用自动生成的数据卷，**在重建服务之前**记录旧 volume 和 hostname：
+
+```powershell
+$rabbitContainer = docker compose ps -q rabbitmq
+docker inspect $rabbitContainer --format '{{.Config.Hostname}}'
+docker inspect $rabbitContainer --format '{{range .Mounts}}{{if eq .Destination "/var/lib/rabbitmq"}}{{.Name}}{{end}}{{end}}'
+```
+
+将这两个结果分别填入 `.env` 的 `RABBITMQ_HOSTNAME` 和 `RABBITMQ_DATA_VOLUME`。新安装无需填写，默认数据卷按 Compose 项目隔离。保留旧 RabbitMQ 身份和旧数据卷，避免重建后得到空 broker。
+
+在 PowerShell 从仓库根目录执行，`$experimentRoot` 必须替换为 `.env` 中实际的 `EXPERIMENT_HOST_ROOT`：
+
+```powershell
+$experimentRoot = 'D:\lab\experiments'
+docker compose --profile process-io stop
+.venv\Scripts\python -m crystallization_mpc.infra.storage_paths --root $experimentRoot
+.venv\Scripts\python -m crystallization_mpc.infra.storage_paths --root $experimentRoot --apply
+docker compose --profile process-io up -d --build
+docker compose --profile process-io ps
+docker compose logs --tail 100 central controller gsensor telegraf opcua-writer
+```
+
+前一条 Python 命令只预览；后一条执行并备份。先确保该虚拟环境已按 README 安装当前项目（`pip install -e .`）。如果目标文件与旧文件冲突，迁移拒绝覆盖，应查看报告中的具体文件；运行中的实验也会阻止迁移。发现旧默认系统文件时，服务会明确要求迁移，不会悄悄创建空状态绕过历史。
+
+Controller 可读取旧版 schema 1 中 `idle`、`configured`、`stopped` 的检查点，保留参数、实验 ID 和运行配置历史，并按当前规则校验；首次读取不改写原检查点。旧版运行中或错误状态不能自动恢复，兼容读取也不会重新连接设备或继续旧控制周期。
+
+确认 `config/influxdb.env` 中 token/org/bucket 与原数据库一致且有读写权限；Telegraf 与各服务通过 Compose 使用同一份配置。新默认参数文件为容器内 `/data/experiments/_system/params_runtime.yaml`。显式自定义参数/状态路径仍按用户配置使用。禁止使用 `docker compose down -v` 作为升级步骤。
+
+升级后启动短实验，检查 Controller `integrations.process` 的有效读值、成功写回，以及 `integrations.influxdb.archive.pending_count` 最终归零。结束后在历史页面确认 `Completed`，核对 CSV 的 run_id、温度单位、最后周期和 `archive.json` 的覆盖检查。组员模拟器与真实硬件仍分别验收。
+
 ## 实现依据
 
 - [固定版本 OPC UA 输入配置](https://github.com/influxdata/telegraf/blob/v1.40.1/plugins/inputs/opcua/sample.conf)：节点、认证与时间来源选项。

@@ -34,14 +34,14 @@ def build_tagged_point(
     *,
     tags: dict[str, Any] | None = None,
     measurement: str = SIGMA_MEASUREMENT,
-    timestamp: datetime | None = None,
+    timestamp: datetime | int | None = None,
 ) -> Any:
     if Point is None or WritePrecision is None:
         raise RuntimeError("influxdb-client is not installed.") from _IMPORT_ERROR
     if not fields:
         raise RuntimeError("At least one field is required.")
 
-    point_time = timestamp or datetime.now(timezone.utc)
+    point_time = timestamp if timestamp is not None else datetime.now(timezone.utc)
     point = Point(measurement).time(point_time, WritePrecision.NS)
     for key, value in (tags or {}).items():
         if value is not None:
@@ -64,7 +64,7 @@ class InfluxWriter:
         *,
         tags: dict[str, Any] | None = None,
         measurement: str = SIGMA_MEASUREMENT,
-        timestamp: datetime | None = None,
+        timestamp: datetime | int | None = None,
     ) -> None:
         point = build_tagged_point(
             fields,

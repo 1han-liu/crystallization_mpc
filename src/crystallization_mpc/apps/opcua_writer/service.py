@@ -54,6 +54,7 @@ class CommandExecutor:
                 "error": f"Invalid command: {exc}",
                 "write_result": None,
             }
+            self.journal.audit_rejection(result)
             return self._record_log(result)
 
         current = self.now()
@@ -177,6 +178,9 @@ class WriterService:
         channel.basic_ack(delivery_tag=method.delivery_tag)
 
     def run(self) -> None:
+        from .telemetry import WriterAuditRelay
+        relay = WriterAuditRelay(self.executor.journal.path)
+        relay.start()
         try:
             while not self.stop_event.is_set():
                 connection = None
@@ -213,4 +217,5 @@ class WriterService:
                             pass
                 self.stop_event.wait(1.0)
         finally:
+            relay.close()
             self.executor.close()
