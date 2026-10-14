@@ -1,5 +1,28 @@
 x-mpc-image: &mpc-image crystallization-mpc-app:local
 
+# Shared device configuration is supplied only to the two device-facing services.
+x-opcua-environment: &opcua-environment
+  OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:62552}
+  OPCUA_NAMESPACE_INDEX: ${OPCUA_NAMESPACE_INDEX:-2}
+  OPCUA_T_NODE: ${OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
+  OPCUA_T_J_NODE: ${OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
+  OPCUA_C_NODE: ${OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
+  OPCUA_COUNT_MIDDLE_NODE: ${OPCUA_COUNT_MIDDLE_NODE:-Local.iControl.Experiment1.Trends.count.Value}
+  OPCUA_T_J_SET_NODE: ${OPCUA_T_J_SET_NODE:-iCache.Temperature1}
+  OPCUA_AUTH_METHOD: ${OPCUA_AUTH_METHOD:-Anonymous}
+  OPCUA_USERNAME: ${OPCUA_USERNAME:-}
+  OPCUA_PASSWORD: ${OPCUA_PASSWORD:-}
+  OPCUA_SECURITY_POLICY: ${OPCUA_SECURITY_POLICY:-None}
+  OPCUA_SECURITY_MODE: ${OPCUA_SECURITY_MODE:-None}
+  OPCUA_CERTIFICATE: ${OPCUA_CERTIFICATE:-}
+  OPCUA_PRIVATE_KEY: ${OPCUA_PRIVATE_KEY:-}
+  OPCUA_SERVER_CERTIFICATE: ${OPCUA_SERVER_CERTIFICATE:-}
+  OPCUA_TIMEOUT_S: ${OPCUA_TIMEOUT_S:-5.0}
+  OPCUA_JACKET_MIN_K: ${OPCUA_JACKET_MIN_K:-253.15}
+  OPCUA_JACKET_MAX_K: ${OPCUA_JACKET_MAX_K:-453.15}
+  OPCUA_VERIFY_WRITE: ${OPCUA_VERIFY_WRITE:-true}
+  OPCUA_VERIFY_TOLERANCE_K: ${OPCUA_VERIFY_TOLERANCE_K:-0.05}
+
 services:
   central:
     image: *mpc-image
@@ -85,20 +108,24 @@ services:
       - RABBIT_QUEUE=controller.in
       - EXPERIMENT_ROOT=/data/experiments
       - CONTROLLER_ADAPTER=${CONTROLLER_ADAPTER:-}
-      - CONTROLLER_OPCUA_ENABLED=${CONTROLLER_OPCUA_ENABLED:-false}
-      - CONTROLLER_OPCUA_WRITE_ENABLED=${CONTROLLER_OPCUA_WRITE_ENABLED:-false}
-      - CONTROLLER_OPCUA_ENDPOINT=${CONTROLLER_OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:62552}
-      - CONTROLLER_OPCUA_NAMESPACE_INDEX=${CONTROLLER_OPCUA_NAMESPACE_INDEX:-2}
-      - CONTROLLER_OPCUA_T_J_SET_NODE=${CONTROLLER_OPCUA_T_J_SET_NODE:-iCache.Temperature1}
-      - CONTROLLER_OPCUA_T_NODE=${CONTROLLER_OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
-      - CONTROLLER_OPCUA_T_J_NODE=${CONTROLLER_OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
-      - CONTROLLER_OPCUA_C_NODE=${CONTROLLER_OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
-      - CONTROLLER_OPCUA_COUNT_MIDDLE_NODE=${CONTROLLER_OPCUA_COUNT_MIDDLE_NODE:-Local.iControl.Experiment1.Trends.count.Value}
-      - CONTROLLER_OPCUA_TIMEOUT_S=${CONTROLLER_OPCUA_TIMEOUT_S:-5.0}
-      - CONTROLLER_OPCUA_JACKET_MIN_K=${CONTROLLER_OPCUA_JACKET_MIN_K:-253.15}
-      - CONTROLLER_OPCUA_JACKET_MAX_K=${CONTROLLER_OPCUA_JACKET_MAX_K:-453.15}
-      - CONTROLLER_OPCUA_VERIFY_WRITE=${CONTROLLER_OPCUA_VERIFY_WRITE:-true}
-      - CONTROLLER_OPCUA_VERIFY_TOLERANCE_K=${CONTROLLER_OPCUA_VERIFY_TOLERANCE_K:-0.05}
+      - CONTROLLER_PROCESS_ENABLED=${CONTROLLER_PROCESS_ENABLED:-false}
+      - CONTROLLER_PROCESS_WRITE_ENABLED=${CONTROLLER_PROCESS_WRITE_ENABLED:-false}
+      - PROCESS_DEVICE_ID=${PROCESS_DEVICE_ID:-crystallizer}
+      - PROCESS_SAMPLE_MAX_AGE_S=${PROCESS_SAMPLE_MAX_AGE_S:-5.0}
+      - PROCESS_STARTUP_TIMEOUT_S=${PROCESS_STARTUP_TIMEOUT_S:-10.0}
+      - PROCESS_COMMAND_TTL_S=${PROCESS_COMMAND_TTL_S:-5.0}
+      - PROCESS_WRITE_TIMEOUT_S=${PROCESS_WRITE_TIMEOUT_S:-5.0}
+      - PROCESS_TELEMETRY_QUEUE=${PROCESS_TELEMETRY_QUEUE:-process.telemetry}
+      - PROCESS_RESULT_QUEUE=${PROCESS_RESULT_QUEUE:-process.results}
+      - PROCESS_NAMESPACE_INDEX=${OPCUA_NAMESPACE_INDEX:-2}
+      - PROCESS_T_J_SET_NODE=${OPCUA_T_J_SET_NODE:-iCache.Temperature1}
+      - PROCESS_T_NODE=${OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
+      - PROCESS_T_J_NODE=${OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
+      - PROCESS_C_NODE=${OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
+      - PROCESS_COUNT_MIDDLE_NODE=${OPCUA_COUNT_MIDDLE_NODE:-Local.iControl.Experiment1.Trends.count.Value}
+      - PROCESS_JACKET_MIN_K=${OPCUA_JACKET_MIN_K:-253.15}
+      - PROCESS_JACKET_MAX_K=${OPCUA_JACKET_MAX_K:-453.15}
+      - PROCESS_VERIFY_TOLERANCE_K=${OPCUA_VERIFY_TOLERANCE_K:-0.05}
       - CONTROLLER_INFLUX_ENABLED=${CONTROLLER_INFLUX_ENABLED:-true}
       - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
     volumes:
@@ -118,6 +145,44 @@ services:
       retries: 3
       start_period: 10s
 
+  telegraf:
+    image: telegraf:1.40.1
+    profiles: [process-io]
+    command: ["telegraf", "--config", "/etc/telegraf/telegraf.conf", "--config", "/etc/telegraf/opcua.conf"]
+    environment:
+      <<: *opcua-environment
+      PROCESS_DEVICE_ID: ${PROCESS_DEVICE_ID:-crystallizer}
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      RABBIT_EXCHANGE: idp.bus
+      TELEGRAF_INTERVAL: ${TELEGRAF_INTERVAL:-1s}
+      TELEGRAF_FLUSH_INTERVAL: ${TELEGRAF_FLUSH_INTERVAL:-1s}
+    volumes:
+      - ./config/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - ./config/telegraf/opcua.conf:/etc/telegraf/opcua.conf:ro
+      - ${OPCUA_CERT_HOST_ROOT:-./config/telegraf/certs}:/run/opcua-certs:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  opcua-writer:
+    image: *mpc-image
+    profiles: [process-io]
+    command: ["python", "-m", "crystallization_mpc.apps.opcua_writer"]
+    environment:
+      <<: *opcua-environment
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      RABBIT_EXCHANGE: idp.bus
+      OPCUA_WRITER_QUEUE: ${OPCUA_WRITER_QUEUE:-opcua_writer.in}
+      OPCUA_WRITER_JOURNAL: /data/commands.sqlite3
+    volumes:
+      - opcua_writer_data:/data
+      - ${OPCUA_CERT_HOST_ROOT:-./config/telegraf/certs}:/run/opcua-certs:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:3-management
     ports:
@@ -125,7 +190,7 @@ services:
       - "15673:15672"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -166,3 +231,4 @@ services:
 volumes:
   influxdb_data:
   grafana_data:
+  opcua_writer_data:

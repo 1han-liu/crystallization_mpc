@@ -20,6 +20,7 @@ dist/
 .env
 config/influxdb.env
 config/rabbitmq.env
+config/telegraf/certs/
 !.env.example
 !config/influxdb.env.example
 
@@ -42,6 +43,8 @@ references_local/
 
 # Tests, reference fixtures, and diagnostic/demo tools are local-only.
 /tests/
+/scripts/process_io/
+/docs/process-io-acceptance.md
 /scripts/capture_adaptation_reference_inputs.py
 /scripts/report_adaptation_reference.py
 /scripts/run_controller_simulation.py

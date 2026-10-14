@@ -224,7 +224,7 @@ class FourPhaseAcceptance:
     def __init__(self, settings: ControllerSettings, directory: Path, *,
                  run_id: str | None = None, writer: Any | None = None,
                  max_minutes: float = 120.0, progress_every: int = 20) -> None:
-        if settings.opcua_enabled or settings.opcua_write_enabled:
+        if settings.process_enabled or settings.process_write_enabled:
             raise ValueError("Acceptance must never enable physical OPC UA access.")
         if directory.exists():
             raise ValueError("Acceptance output directory must be new; no overwrite or cleanup.")

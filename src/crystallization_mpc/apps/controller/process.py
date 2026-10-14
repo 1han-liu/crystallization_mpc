@@ -20,7 +20,7 @@ class ProcessAdapterError(RuntimeError):
 
 
 class ProcessConnectionError(ProcessAdapterError):
-    """The process OPC UA endpoint could not be used after one reconnect."""
+    """The process communication channel could not supply a valid result."""
 
 
 class ProcessSafetyError(ProcessAdapterError):
@@ -96,11 +96,18 @@ class ProcessAdapter(ABC):
 
     @abstractmethod
     def connect(self) -> None:
-        """Connect and resolve all required equipment nodes."""
+        """Connect the process communication channel."""
 
     @abstractmethod
     def disconnect(self) -> None:
-        """Release the equipment connection."""
+        """Release the process communication channel."""
+
+    def set_command_context(self, run_id: str, run_started_at: str, tick_seq: int) -> None:
+        """Bind a subsequent write to its experiment and control cycle.
+
+        Local adapters do not need transport identifiers. The RabbitMQ adapter
+        requires this context and echoes it through the writer confirmation.
+        """
 
     @abstractmethod
     def read_state(self) -> ProcessState:
@@ -125,10 +132,10 @@ class NoOpProcessAdapter(ProcessAdapter):
         return None
 
     def read_state(self) -> ProcessState:
-        raise ProcessConnectionError("The real-equipment OPC UA adapter is disabled.")
+        raise ProcessConnectionError("The process communication adapter is disabled.")
 
     def write_jacket_setpoint(self, setpoint_K: float) -> ProcessWriteResult:
-        raise ProcessConnectionError("The real-equipment OPC UA adapter is disabled.")
+        raise ProcessConnectionError("The process communication adapter is disabled.")
 
     def status(self) -> Mapping[str, Any]:
         return {
@@ -415,7 +422,7 @@ def _default_client_factory(endpoint: str, timeout_s: float) -> Any:
         from asyncua.sync import Client
     except ImportError as exc:  # pragma: no cover - exercised in runtime image
         raise RuntimeError(
-            "asyncua is required when CONTROLLER_OPCUA_ENABLED=true."
+            "asyncua is required by the OPC UA writer."
         ) from exc
     return Client(endpoint, timeout=timeout_s)
 

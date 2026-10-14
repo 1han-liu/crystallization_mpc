@@ -27,12 +27,11 @@ from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnostic
 from crystallization_mpc.apps.controller.process import (
     NoOpProcessAdapter,
     OpcUaNodeConfig,
-    OpcUaProcessAdapter,
-    OpcUaProcessConfig,
     ProcessAdapter,
     ProcessState,
     ProcessWriteResult,
 )
+from crystallization_mpc.apps.controller.rabbit_process import RabbitProcessAdapter, RabbitProcessConfig
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.apps.controller.telemetry import (
@@ -245,28 +244,31 @@ class ControllerService:
                     "persistence_enabled": self.runtime_history is not None}
 
     def _build_process_adapter(self) -> ProcessAdapter:
-        if not self.settings.opcua_enabled:
+        if not self.settings.process_enabled:
             return NoOpProcessAdapter()
-        if not self.settings.opcua_endpoint:
-            raise ValueError(
-                "CONTROLLER_OPCUA_ENDPOINT is required when OPC UA is enabled."
-            )
-        return OpcUaProcessAdapter(
-            OpcUaProcessConfig(
-                endpoint=self.settings.opcua_endpoint,
-                nodes=OpcUaNodeConfig(
-                    namespace_index=self.settings.opcua_namespace_index,
-                    T_j_set=self.settings.opcua_t_j_set_node,
-                    T=self.settings.opcua_t_node,
-                    T_j=self.settings.opcua_t_j_node,
-                    c=self.settings.opcua_c_node,
-                    count_middle=self.settings.opcua_count_middle_node,
-                ),
-                timeout_s=self.settings.opcua_timeout_s,
-                jacket_min_K=self.settings.opcua_jacket_min_K,
-                jacket_max_K=self.settings.opcua_jacket_max_K,
-                verify_write=self.settings.opcua_verify_write,
-                verify_tolerance_K=self.settings.opcua_verify_tolerance_K,
+        return RabbitProcessAdapter(
+            RabbitProcessConfig(
+                rabbit_url=self.settings.rabbit_url,
+                exchange=self.settings.rabbit_exchange,
+                device_id=self.settings.process_device_id,
+                measurement_name=self.settings.process_measurement_name,
+                process_queue=self.settings.process_telemetry_queue,
+                result_queue=self.settings.process_result_queue,
+                sample_max_age_s=self.settings.process_sample_max_age_s,
+                startup_timeout_s=self.settings.process_startup_timeout_s,
+                command_ttl_s=self.settings.process_command_ttl_s,
+                write_timeout_s=self.settings.process_write_timeout_s,
+                node_ids=OpcUaNodeConfig(
+                    namespace_index=self.settings.process_namespace_index,
+                    T_j_set=self.settings.process_t_j_set_node,
+                    T=self.settings.process_t_node,
+                    T_j=self.settings.process_t_j_node,
+                    c=self.settings.process_c_node,
+                    count_middle=self.settings.process_count_middle_node,
+                ).node_ids(),
+                jacket_min_K=self.settings.process_jacket_min_K,
+                jacket_max_K=self.settings.process_jacket_max_K,
+                verify_tolerance_K=self.settings.process_verify_tolerance_K,
             )
         )
 
@@ -678,7 +680,7 @@ class ControllerService:
                         restored_configuration.get("adaptation_enabled") != self.adaptation_enabled
                         or restored_configuration.get("adaptation_mode") != self.adaptation_mode):
                     raise ValueError("Adaptation state disagrees with recovered algorithm.")
-                if self.settings.opcua_enabled:
+                if self.settings.process_enabled:
                     self.process_adapter.connect()
                 now = self._monotonic_clock()
                 self._run_started_monotonic = now - self.control_tick_count * float(
@@ -1045,9 +1047,9 @@ class ControllerService:
             run_type = str(
                 self.parameters.get("run_type", self.parameters.get("exp_sim", "experiment"))
             )
-            if run_type == "experiment" and not self.settings.opcua_enabled:
+            if run_type == "experiment" and not self.settings.process_enabled:
                 raise ValueError(
-                    "Experiment mode requires CONTROLLER_OPCUA_ENABLED=true for process reads."
+                    "Experiment mode requires CONTROLLER_PROCESS_ENABLED=true for process reads."
                 )
 
             self.current_run_id = command.run_id
@@ -1120,7 +1122,7 @@ class ControllerService:
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter configure failed: {exc}") from exc
             activation_state = None
-            if self.settings.opcua_enabled:
+            if self.settings.process_enabled:
                 try:
                     self.process_adapter.connect()
                     if run_type == "experiment":
@@ -1802,7 +1804,7 @@ class ControllerService:
                 age = None
 
             process_state: ProcessState | None = None
-            if self.settings.opcua_enabled:
+            if self.settings.process_enabled:
                 try:
                     process_state = self.process_adapter.read_state()
                 except Exception as exc:
@@ -1861,14 +1863,17 @@ class ControllerService:
             if output is not None:
                 process_write: ProcessWriteResult | None = None
                 process_write_attempted = bool(
-                    self.settings.opcua_enabled
-                    and self.settings.opcua_write_enabled
+                    self.settings.process_enabled
+                    and self.settings.process_write_enabled
                     and output.valid
                     and output.T_j_set is not None
                 )
                 process_write_error: str | None = None
                 if process_write_attempted:
                     try:
+                        self.process_adapter.set_command_context(
+                            self.current_run_id, self.started_at, tick_seq
+                        )
                         process_write = self.process_adapter.write_jacket_setpoint(
                             output.T_j_set
                         )
@@ -2044,17 +2049,17 @@ class ControllerService:
 
     def _integration_status_locked(self) -> dict[str, dict[str, object]]:
         integrations = self.settings.integration_status()
-        opcua = integrations["opcua"]
-        opcua.update(copy.deepcopy(dict(self.process_adapter.status())))
-        opcua.update(
+        process = integrations["process"]
+        process.update(copy.deepcopy(dict(self.process_adapter.status())))
+        process.update(
             {
-                "enabled": self.settings.opcua_enabled,
-                "write_enabled": self.settings.opcua_write_enabled,
+                "enabled": self.settings.process_enabled,
+                "write_enabled": self.settings.process_write_enabled,
                 "shadow_mode": (
-                    self.settings.opcua_enabled
-                    and not self.settings.opcua_write_enabled
+                    self.settings.process_enabled
+                    and not self.settings.process_write_enabled
                 ),
-                "configured": bool(self.settings.opcua_endpoint),
+                "configured": bool(self.settings.rabbit_url and self.settings.rabbit_exchange),
                 "service_error_count": self.process_error_count,
                 "service_last_error": self.last_process_error,
             }

@@ -1,7 +1,7 @@
 """Read-only evidence capture for an already running Controller shadow window.
 
 This module deliberately observes only the Controller status HTTP endpoint.  It
-does not publish lifecycle commands, connect to OPC UA, or expose any method
+does not publish lifecycle commands, connect to RabbitMQ process, or expose any method
 that can write an equipment setpoint.
 """
 
@@ -74,23 +74,23 @@ def _shadow_state(status: Mapping[str, Any]) -> tuple[Mapping[str, Any], int, in
     tick_count = _nonnegative_int(scheduler.get("tick_count"), "scheduler.tick_count")
 
     integrations = _mapping(status.get("integrations"), "integrations")
-    opcua = _mapping(integrations.get("opcua"), "integrations.opcua")
-    if opcua.get("enabled") is not True:
-        raise ShadowAuditError("CONTROLLER_OPCUA_ENABLED must be true.")
-    if opcua.get("write_enabled") is not False:
-        raise ShadowAuditError("CONTROLLER_OPCUA_WRITE_ENABLED must be false.")
-    if opcua.get("shadow_mode") is not True:
+    process = _mapping(integrations.get("process"), "integrations.process")
+    if process.get("enabled") is not True:
+        raise ShadowAuditError("CONTROLLER_PROCESS_ENABLED must be true.")
+    if process.get("write_enabled") is not False:
+        raise ShadowAuditError("CONTROLLER_PROCESS_WRITE_ENABLED must be false.")
+    if process.get("shadow_mode") is not True:
         raise ShadowAuditError("Controller does not report read-only shadow mode.")
-    if opcua.get("safe_noop") is True:
-        raise ShadowAuditError("Real OPC UA process reads are not enabled.")
-    if opcua.get("connected") is not True:
-        raise ShadowAuditError("Real OPC UA process adapter must be connected.")
+    if process.get("safe_noop") is True:
+        raise ShadowAuditError("Real RabbitMQ process process reads are not enabled.")
+    if process.get("connected") is not True:
+        raise ShadowAuditError("Real RabbitMQ process process adapter must be connected.")
 
-    read_count = _nonnegative_int(opcua.get("read_count"), "opcua.read_count")
-    write_count = _nonnegative_int(opcua.get("write_count"), "opcua.write_count")
+    read_count = _nonnegative_int(process.get("read_count"), "process.read_count")
+    write_count = _nonnegative_int(process.get("write_count"), "process.write_count")
     if write_count != 0:
-        raise ShadowAuditError("OPC UA write_count is non-zero; aborting shadow audit.")
-    return opcua, tick_count, read_count, write_count
+        raise ShadowAuditError("RabbitMQ process write_count is non-zero; aborting shadow audit.")
+    return process, tick_count, read_count, write_count
 
 
 def _run_id(status: Mapping[str, Any]) -> str:
@@ -100,20 +100,20 @@ def _run_id(status: Mapping[str, Any]) -> str:
     return value.strip()
 
 
-def _bounds(opcua: Mapping[str, Any]) -> tuple[float, float]:
-    values = opcua.get("safe_jacket_range_K")
+def _bounds(process: Mapping[str, Any]) -> tuple[float, float]:
+    values = process.get("safe_jacket_range_K")
     if not isinstance(values, (list, tuple)) or len(values) != 2:
-        raise ShadowAuditError("OPC UA safe_jacket_range_K must contain two bounds.")
-    lower = _finite_optional(values[0], "opcua.safe_jacket_range_K[0]")
-    upper = _finite_optional(values[1], "opcua.safe_jacket_range_K[1]")
+        raise ShadowAuditError("RabbitMQ process safe_jacket_range_K must contain two bounds.")
+    lower = _finite_optional(values[0], "process.safe_jacket_range_K[0]")
+    upper = _finite_optional(values[1], "process.safe_jacket_range_K[1]")
     assert lower is not None and upper is not None
     if lower >= upper:
-        raise ShadowAuditError("OPC UA jacket bounds are invalid.")
+        raise ShadowAuditError("RabbitMQ process jacket bounds are invalid.")
     return lower, upper
 
 
 def _evidence_record(
-    status: Mapping[str, Any], opcua: Mapping[str, Any], expected_tick: int
+    status: Mapping[str, Any], process: Mapping[str, Any], expected_tick: int
 ) -> dict[str, Any] | None:
     output_value = status.get("last_control_output")
     if output_value is None:
@@ -128,9 +128,9 @@ def _evidence_record(
             f"{tick_seq}. Reduce --poll-interval and repeat the audit."
         )
     if output.get("process_write_attempted") is not False:
-        raise ShadowAuditError(f"Controller tick {tick_seq} attempted an OPC UA write.")
+        raise ShadowAuditError(f"Controller tick {tick_seq} attempted an RabbitMQ process write.")
     if output.get("process_write") is not None:
-        raise ShadowAuditError(f"Controller tick {tick_seq} reports an OPC UA write result.")
+        raise ShadowAuditError(f"Controller tick {tick_seq} reports an RabbitMQ process write result.")
 
     process_state = _mapping(output.get("process_state"), "last_control_output.process_state")
     result = _mapping(output.get("result"), "last_control_output.result")
@@ -145,7 +145,7 @@ def _evidence_record(
     if valid and candidate is None:
         raise ShadowAuditError(f"Valid Controller tick {tick_seq} has no T_j_set candidate.")
 
-    lower, upper = _bounds(opcua)
+    lower, upper = _bounds(process)
     within_bounds = candidate is None or lower <= candidate <= upper
     if not within_bounds:
         raise ShadowAuditError(
@@ -204,11 +204,11 @@ def capture_shadow_window(
 
     started_at = _utc_now()
     initial_status = status_reader()
-    initial_opcua, baseline_tick, baseline_reads, baseline_writes = _shadow_state(
+    initial_process, baseline_tick, baseline_reads, baseline_writes = _shadow_state(
         initial_status
     )
     run_id = _run_id(initial_status)
-    _bounds(initial_opcua)
+    _bounds(initial_process)
     expected_tick = baseline_tick + 1
     deadline = clock() + timeout_s
     records: list[dict[str, Any]] = []
@@ -223,12 +223,12 @@ def capture_shadow_window(
             )
         sleep(poll_interval_s)
         final_status = status_reader()
-        opcua, scheduler_tick, final_reads, final_writes = _shadow_state(final_status)
+        process, scheduler_tick, final_reads, final_writes = _shadow_state(final_status)
         if _run_id(final_status) != run_id:
             raise ShadowAuditError("Controller run_id changed during shadow capture.")
         if scheduler_tick < expected_tick:
             continue
-        record = _evidence_record(final_status, opcua, expected_tick)
+        record = _evidence_record(final_status, process, expected_tick)
         if record is None:
             raise ShadowAuditError(
                 f"Controller tick {expected_tick} produced no auditable control output."
@@ -237,10 +237,10 @@ def capture_shadow_window(
         expected_tick += 1
 
     if final_writes != 0:
-        raise ShadowAuditError("OPC UA write_count changed during shadow capture.")
+        raise ShadowAuditError("RabbitMQ process write_count changed during shadow capture.")
     if final_reads - baseline_reads < tick_count:
         raise ShadowAuditError(
-            "OPC UA read_count did not increase once per captured Controller tick."
+            "RabbitMQ process read_count did not increase once per captured Controller tick."
         )
 
     return {
@@ -254,23 +254,23 @@ def capture_shadow_window(
         "captured_tick_count": len(records),
         "baseline": {
             "tick_count": baseline_tick,
-            "opcua_read_count": baseline_reads,
-            "opcua_write_count": baseline_writes,
-            "opcua_endpoint": initial_opcua.get("endpoint"),
-            "opcua_node_ids": initial_opcua.get("node_ids"),
+            "process_read_count": baseline_reads,
+            "process_write_count": baseline_writes,
+            "process_device_id": initial_process.get("device_id"),
+            "process_node_ids": initial_process.get("node_ids"),
         },
         "final": {
             "tick_count": _nonnegative_int(
                 _mapping(final_status.get("scheduler"), "scheduler").get("tick_count"),
                 "scheduler.tick_count",
             ),
-            "opcua_read_count": final_reads,
-            "opcua_write_count": final_writes,
+            "process_read_count": final_reads,
+            "process_write_count": final_writes,
         },
         "assertions": {
-            "real_opcua_reads_enabled": True,
+            "real_process_reads_enabled": True,
             "same_run_id_for_entire_window": True,
-            "opcua_write_gate_disabled": True,
+            "process_write_gate_disabled": True,
             "shadow_mode": True,
             "consecutive_ticks": True,
             "one_or_more_reads_per_tick": True,
@@ -296,7 +296,7 @@ def write_evidence(document: Mapping[str, Any], output_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Capture a strictly read-only Controller OPC UA shadow window."
+        description="Capture a strictly read-only Controller RabbitMQ process shadow window."
     )
     parser.add_argument(
         "--status-url",
@@ -328,8 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.exit(2, f"shadow audit failed: {exc}\n")
     print(
         f"shadow audit passed: {evidence['captured_tick_count']} consecutive ticks, "
-        f"{evidence['final']['opcua_read_count'] - evidence['baseline']['opcua_read_count']} "
-        f"OPC UA reads, 0 writes; evidence={args.output}"
+        f"{evidence['final']['process_read_count'] - evidence['baseline']['process_read_count']} "
+        f"RabbitMQ process reads, 0 writes; evidence={args.output}"
     )
     return 0
 

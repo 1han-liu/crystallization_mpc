@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = ControllerSettings(
             rabbit_url=read_rabbit_url(args.rabbit_env), rabbit_exchange="mpcrystal.acceptance." + uuid4().hex,
             rabbit_queue="mpcrystal.acceptance." + uuid4().hex, adapter_spec=None,
-            opcua_enabled=False, opcua_endpoint=None, opcua_write_enabled=False,
+            process_enabled=False, process_write_enabled=False,
             influx_enabled=not args.no_influx, influx_url=telemetry.get("CONTROLLER_INFLUX_URL", ""),
             influx_org=telemetry.get("CONTROLLER_INFLUX_ORG", ""), influx_bucket=telemetry.get("CONTROLLER_INFLUX_BUCKET", ""),
             influx_token=telemetry.get("CONTROLLER_INFLUX_TOKEN"), experiment_root=str(directory / "controller"),

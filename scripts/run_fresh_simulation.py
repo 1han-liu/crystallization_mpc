@@ -163,7 +163,7 @@ def launch_session(args, url, parent, deleted, telemetry_env):
         'RUN_CONFIGURATION_FILE': str(config_path),
         'CONTROLLER_STATUS_URL': f'http://127.0.0.1:{args.controller_port}/api/status',
         'CONTROLLER_ADAPTER': 'crystallization_mpc.apps.controller.algorithm.integration:CrystallizationControllerAdapter',
-        'CONTROLLER_OPCUA_ENABLED': 'false', 'CONTROLLER_OPCUA_WRITE_ENABLED': 'false',
+        'CONTROLLER_PROCESS_ENABLED': 'false', 'CONTROLLER_PROCESS_WRITE_ENABLED': 'false',
         'CONTROLLER_INFLUX_ENABLED': 'false',
     })
     # A configured local dashboard receives every future tick natively.
