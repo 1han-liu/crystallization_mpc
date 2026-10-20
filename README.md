@@ -89,18 +89,12 @@ python -m pip install -e .
 
 ## Controller verification
 
-For the separately opt-in Ubuntu/Podman test profile using a real Prosys server,
-see [Prosys integration acceptance](docs/prosys-acceptance.md). The repository
-includes its process/Synthetic-G support and reviewed host acceptance tools,
-not Prosys itself, machine-local credentials, project fixtures or past results.
-This profile is not a real-camera or physical-equipment acceptance test.
-
 The frozen reference, traceability matrix, known MATLAB anomalies, units, and
 acceptance thresholds are documented in
-`docs/controller-reference-validation.md`. The MATLAB-reference tests, fixtures,
-and unreviewed diagnostic/demo scripts remain local-only; the curated Prosys
-tools above are a separate exception. The following command is available only
-in a development checkout with those local files present:
+`docs/controller-reference-validation.md`. Tests, MATLAB reference fixtures,
+and diagnostic/demo scripts are local-only and are not included in a fresh
+clone. The following command is available only in a development checkout with
+those local files present:
 
 ```bash
 python -m pytest tests/controller
