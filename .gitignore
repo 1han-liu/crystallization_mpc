@@ -42,6 +42,7 @@ references_local/
 /dscgr_runs*/
 
 # Tests, reference fixtures, and diagnostic/demo tools are local-only.
+# The reviewed Prosys support package and host entrypoints below are exceptions.
 /tests/
 /scripts/process_io/
 /docs/process-io-acceptance.md
@@ -52,6 +53,25 @@ references_local/
 /scripts/run_runtime_control_demo.py
 /scripts/verify_runtime_observability.py
 /scripts/run_*_influx_test.py
+
+# Publish only the reviewed Prosys host-tool dependency closure.
+# Other research tools, regression cases, fixtures, and generated files stay local.
+/integration_tests/*
+!/integration_tests/prosys/
+/integration_tests/prosys/*
+!/integration_tests/prosys/collect_deployment.py
+!/integration_tests/prosys/integration_qualification.py
+!/integration_tests/prosys/interactive_short.py
+!/integration_tests/prosys/managed_paper_run.py
+!/integration_tests/prosys/managed_signal_probe.py
+!/integration_tests/prosys/managed_unit.py
+!/integration_tests/prosys/managed_unit_exit.py
+!/integration_tests/prosys/model_stop_check.py
+!/integration_tests/prosys/native_disconnect_check.py
+!/integration_tests/prosys/native_fault_check.py
+!/integration_tests/prosys/native_fixture_tools.py
+!/integration_tests/prosys/online_parameter_check.py
+!/integration_tests/prosys/paper_qualified_run.py
 
 # Local development notes and experiment plans
 /agent.md
