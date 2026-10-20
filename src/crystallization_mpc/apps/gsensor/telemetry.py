@@ -30,6 +30,7 @@ class GsensorMeasurementRecord:
     u_distance_m: float | None = None
     v_distance_px: float | None = None
     v_distance_m: float | None = None
+    parameter_revision: int | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -40,6 +41,10 @@ class GsensorMeasurementRecord:
             raise ValueError("image_name is required.")
         if self.unit != "m/s":
             raise ValueError("unit must be 'm/s'.")
+        if self.parameter_revision is not None and (
+            type(self.parameter_revision) is not int or self.parameter_revision < 0
+        ):
+            raise ValueError("parameter_revision must be a nonnegative integer.")
 
     def tags(self) -> dict[str, str]:
         return {
@@ -69,6 +74,7 @@ class GsensorMeasurementRecord:
             "v_distance_px": self.v_distance_px,
             "v_distance_m": self.v_distance_m,
             "error": self.error,
+            "parameter_revision": self.parameter_revision,
         }
         fields.update(
             {key: value for key, value in optional_fields.items() if value is not None}

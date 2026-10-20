@@ -42,14 +42,33 @@ def write_runtime_event(writer, entry):
     time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     if time.tzinfo is None:
         raise ValueError("Application time must include a timezone")
-    before, after = result["before"], result["configuration"]
-    summary = "; ".join(f"{key}: {before.get(key)} → {after.get(key)}"
-                        for key in entry["command"]["changes"] if before.get(key) != after.get(key))
-    fields = {"title": "Runtime configuration applied",
+    parameter_changes = result.get("parameter_changes") or (
+        entry["command"].get("changes") if entry["command"].get("experiment_started_at") else None)
+    if parameter_changes is not None:
+        before = result.get("parameter_before")
+        after = result.get("parameter_values")
+        summary = "; ".join(f"{section}.{key} = {value}"
+                            for section, changes in parameter_changes.items()
+                            for key, value in changes.items())
+    else:
+        before, after = result["before"], result["configuration"]
+        summary = "; ".join(f"{key}: {before.get(key)} → {after.get(key)}"
+                            for key in entry["command"]["changes"] if before.get(key) != after.get(key))
+    fields = {"title": "Run parameters applied" if parameter_changes is not None else "Runtime configuration applied",
               "text": f"{summary}; revision {result['revision']}; effective tick {result['effective_tick']}",
               "before": json.dumps(before, sort_keys=True), "after": json.dumps(after, sort_keys=True),
               "revision": result["revision"], "effective_tick": result["effective_tick"],
               "requested_at": result["requested_at"], "applied_at": timestamp}
+    if parameter_changes is not None:
+        fields["parameter_changes"] = json.dumps(parameter_changes, sort_keys=True)
+        fields.update(event_type="experiment.parameters.update", status="applied", is_effective=True)
+        frame = result.get("effective_after_frame_seq", result.get("gsensor_effective_after_frame_seq"))
+        if frame is not None:
+            fields["gsensor_effective_after_frame_seq"] = frame
+            fields["effective_after_frame_seq"] = frame
+        for key in ("measurement_revision", "controller_applied"):
+            if key in result:
+                fields[key] = result[key]
     # Same tags + exact time overwrite the same point on retry, including after a crash.
     record_id = writer.write_tagged_fields(fields, tags={"run_id": result["run_id"], "event_id": result["event_id"]},
                               measurement=RUNTIME_EVENT_MEASUREMENT, timestamp=time)

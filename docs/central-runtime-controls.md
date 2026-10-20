@@ -347,3 +347,282 @@ The UI must show numerical progress using controller.adaptation.fitting:
 enabled, mode, sample_count, minimum_samples, last_status, last_mode, last_tick,
 fit_count, failure_count and pause_reason. These are diagnostics only; they do
 not alter the MATLAB adaptation strategy.
+
+## Run-local parameter drawer updates
+
+The existing **Save Parameters** button has two deliberately different uses:
+
+- Before a run, it saves the next-experiment draft using the existing complete
+  `/api/params` request. Starting an experiment still freezes its startup snapshot.
+- During a supported running experiment, it submits only manually edited fields
+  for that experiment. It never overwrites the next-experiment draft or startup
+  snapshot. **Reset to Defaults** and per-field default-reset controls are disabled.
+
+New startup snapshots additionally record all 91 fields in
+`raw_parameter_sections`, because the older target-specific derived preview
+omits some standby-target settings. A STARTING retry compares the complete
+prepared raw sections as well as the existing snapshot fields; a same-version
+external draft change is rejected before any message is published. Valid retries
+publish the exact recorded raw sections. Old snapshots are not modified or
+given invented raw history; their startup retry retains the legacy flat protocol.
+For such legacy flat-only runs, the complete parameter drawer stays locked with
+Controller's `unavailable_reason`; ending the old run and creating a new run
+provides the required complete startup sections. The original five runtime
+controls remain available and preserve their existing behavior.
+
+The closed parameter-policy registry covers all 91 raw fields in Shared,
+Gsensor, and Controller. Initialization-only fields stay locked. Calculated
+values remain read-only; unused and reserved settings explain their actual
+effect rather than claiming that a new calculation has been enabled. For
+`dt_G`, the operator must separately match the external camera interval: a
+parameter update does not change an external camera's capture rate.
+
+The runtime branch of `POST /api/params` accepts:
+
+```json
+{
+  "expected_run_id": "the-current-experiment-id",
+  "experiment_started_at": "2026-10-20T09:00:00Z",
+  "event_id": "one-unique-id-per-batch",
+  "expected_revision": 0,
+  "requested_at": "2026-10-20T09:01:00Z",
+  "changes": {
+    "controller": {"params.E_A": 130000, "params.n": 1.6}
+  }
+}
+```
+
+Central publishes `experiment.parameters.update` through the existing broker.
+The request shares the original five runtime controls' revision, pending slot,
+durable journal, and retry identity. A network error or delayed confirmation is
+not an Applied result and is not proof of rollback. Retries preserve the exact
+event, including its original timestamp. Only a matching final acknowledgment
+from Controller can mark the aggregate operation Applied, after other affected
+participants have confirmed their work.
+
+`GET /api/params` keeps the existing sections and metadata. During a running
+experiment it overlays confirmed current values from Controller's
+`run_parameters` status and adds policies, startup values, and transaction
+status. Automatically fitted E_A/n values update unedited inputs; polling never
+overwrites a local unsaved edit. If another runtime operation changes the
+revision, **Review Current Revision** retains the proposed edits, displays the
+current active values, and requires a conscious review before Save Parameters
+can submit again. It does not submit or apply a transaction itself.
+
+When a run ends or the selection returns to a non-running experiment, Central
+reloads the persisted startup draft before enabling Save/Start. A failed reload
+keeps these actions locked and is retried on subsequent status reads. Run-only
+values and retained local edits must not silently become the next run's inputs.
+
+UI states distinguish **Unsaved changes**, **Pending**, **Waiting for fresh
+measurement**, **Applied at tick …**, and **Failed**. The main-page Adaptive
+Mode checkboxes continue to select which parameters may be fitted; they are
+not numerical E_A/k_0/n input fields. Manually editing numeric E_A/n does not
+disable their existing adaptation selection.
+
+The Development panel **Startup & Runtime Derived Values** separates
+`startup_preview` from `current_runtime_derived`. The latter is copied from the
+confirmed algorithm status, including its actual fitted k_0, time constants,
+and active target aliases. It is read-only; the UI does not recompute k_0 from a
+new E_A. `/api/params` exposes these actual `derived_values` and read-only
+`derived_policies`. `preview_publish_payload()` retains its startup semantics.
+
+Parameter applications use the existing `controller_runtime_event` Grafana
+annotation measurement. The event text preserves section-qualified raw keys,
+effective tick, revision, and nested parameter changes. A pending transaction
+does not create a successful-application annotation; missing previous values
+are not reconstructed from startup defaults.
+
+CSV export keeps startup snapshot rows and adds one row per changed
+`section.raw_key`, with the actual revision, Controller effective tick, GSensor
+effective frame, and measurement revision where recorded. Aggregate pending or
+rejected operations are not marked `is_effective`; partial Controller commits
+retain their separate `controller_applied` evidence. Missing historical
+revision/frame fields are left blank, not reconstructed as revision zero.
+Controller/GSensor CSVs keep any recorded revision fields as ordinary extra
+columns. No historical run is rewritten merely to add this metadata.
+
+Isolated Central acceptance is covered by
+`tests/test_central_online_parameters.py`, including real HTTP handlers,
+durable journals, retries, conflicts, draft immutability, startup/derived-field
+rejection, nested annotations, and unsaved-edit/fitted-value UI behavior. These
+tests do not start RabbitMQ, Prosys, cameras, or a hardware experiment. The
+earlier long-experiment results in this document are historical evidence and
+are not an acceptance claim for the new online-parameter functionality.
+
+### Controller and image-processing transaction details (2026-10-20)
+
+The sidebar's numerical E_A/n inputs are distinct from the main page's Adaptive
+Mode checkboxes. The former submit explicit values with **Save Parameters**;
+the latter still automatically select which parameters may subsequently be
+fitted. Neither operation silently changes the other selection.
+
+- Controller keeps the immutable flat `parameters` and original three raw
+  `parameter_sections` separately from the run-only overlay and its journal.
+  Current read-only values include the latest fitted kinetics. A patch applies
+  only its submitted fields; it never rebuilds k_0 from a startup formula.
+- `experiment.parameters.prepare`, `.commit`, `.abort`, and `.result` coordinate
+  GSensor over the existing RabbitMQ routes. Receipts match the exact run/start
+  identity, event, revision, nested values, measurement revision, and frame
+  boundary. Preparation is durable but does not activate the candidate.
+- A computational update reconstructs all five Controller filters once from
+  the current measurement, clears the three integrals, starts a fitting segment,
+  and holds the existing jacket command for that tick. An unused-only or
+  next-seed-only update records its actual effect without pretending to reset
+  filters. The three reserved parameter filters remain unused by the estimator.
+- A measurement update cuts the old G cache without erasing the independent
+  stream watchdog. GSensor retains marks, processed-image history and global
+  counts. Its first new distance baseline is not an effective G measurement.
+  No missing G is replaced with zero. Ordinary Controller-only edits do not
+  reconstruct image filters.
+- The existing GSensor alignment UI remains usable. Its validated status
+  reports the actually confirmed method, which the drawer observes separately
+  from the immutable parameter journal. Switching there and then selecting the
+  original method in the drawer is an actual change, not a false no-op.
+- Controller revision and numerical refresh count are deliberately different:
+  metadata-only applications use a revision without a refresh. Cross-module
+  transactions remain Pending after Controller's durable decision until the
+  matching GSensor receipt. While awaiting a computational/measurement update's
+  receipt, optimization, integration and fitting are held; fresh main-state
+  estimation may continue. A metadata-only receipt does not pause control or
+  claim a filter refresh.
+- A lost request or receipt is retried with the original event ID. A failure
+  before Controller commit leaves its old configuration. An explicit participant
+  rejection after commit is reported as a **partial update, not a rollback**;
+  control stops and the operator must end that run. Uncertain receipts are not
+  converted to Applied just because a revision increased.
+- On a `dt` change, the application tick uses the old interval and continuous
+  accumulated elapsed time; only subsequent deadlines use the new interval.
+  `dt_G` controls measurement calculations and freshness, not an external
+  camera's capture rate. The established-G timeout remains twice the active
+  `dt_G`; expiry retains the manual-End/new-run requirement.
+- New jacket bounds must fit the existing Writer envelope and include the
+  command held during refresh. Candidates are rechecked at the fresh control
+  boundary; a newly incompatible candidate is rejected without applying it or
+  running the numerical cycle twice.
+- Internal Simulation rejects candidates above **1,000,000 simulated crystals**
+  or **100,000 jacket integration substeps per control cycle** before allocating
+  or stepping them. These are computational resource limits, not new physical
+  danger thresholds. Requests are rejected, never silently clipped. Such
+  internal parameters do not rewrite a Prosys or physical plant.
+
+Checkpoints validate startup plus the accepted patch journal, applied algorithm
+receipts, filter refresh counts and continuous time. The accepted patch can be
+a proper subset of the request when another requested value already matches the
+latest fit. A pending patch must also match its original operator request; two
+mutually consistent but altered copies are insufficient. Restart never arms a
+control deadline or automatically commits a prepared image update.
+New startup snapshots also retain all 91 raw fields, including standby-target
+fields omitted by the historical flat message. A STARTING retry cannot replace
+these with a changed same-version draft. Older snapshots without those full raw
+sections remain on the original startup/five-controls protocol; the parameter
+drawer stays unavailable for that legacy run instead of inventing GSensor's
+startup settings. End it and create a new run to use the expanded drawer.
+
+Controller telemetry retains `runtime_revision`,
+`measurement_parameter_revision`, and, when supplied by a sample,
+`input_parameter_revision`. GSensor records carry `parameter_revision`.
+Parameters CSV retains section-qualified keys, actual revision, effective tick
+and frame, measurement revision and `controller_applied`; a partial outcome is
+not presented as a fully applied transaction. Older missing revision values are
+left missing rather than backfilled. No new Grafana panels are introduced.
+
+### Isolated verification and screenshots
+
+Current offline transaction regressions are in:
+
+- `tests/test_online_parameter_policy_algorithm.py`: the closed 91-field policy,
+  typed values, dependencies, exact initialization matrices, manual kinetics,
+  unchanged-run numerical/call-count comparison, variable periods, seed
+  populations, resource limits and checkpoint replay.
+- `tests/test_online_parameter_service.py` and
+  `tests/test_online_parameter_review.py`: actual Controller application ticks,
+  competing queues, deferred requests, rejected/partial/uncertain results,
+  persistence failures and independent corruption probes.
+- `tests/test_gsensor_online_parameters.py` and
+  `tests/test_online_parameter_cross_module.py`: actual Controller/GSensor
+  services with an explicit in-memory message pump, all four transport-loss
+  boundaries, frame-boundary serialization, real EKF warmup fixtures, stale
+  versions, restarts and the unchanged established-stream timeout latch.
+- `tests/test_central_online_parameters.py`,
+  `tests/central_online_parameters_browser.cjs` and
+  `tests/test_online_parameter_export.py`: HTTP, durable requests, actual
+  Chromium rendering/clicks, retained drafts, next-run isolation and CSV events.
+- `tests/test_online_parameter_http_flow.py`: full HTTP creation/configuration/
+  startup through real Central, Controller and GSensor application classes with
+  an in-memory bus; actual receipts drive Applied, standby values survive the
+  old flat wire, and interrupted startup retries cannot alter the full frozen
+  snapshot. No external network connections are allowed in these scenarios.
+
+As specified by this repository's existing distribution policy, local tests and
+fixtures remain excluded from Git; no tests were silently added to a push.
+Verification records and real rendered screenshots are retained locally in
+`.runtime/online-parameters-validation-20261020-pWzPT4CL/`. The screenshots are
+explicitly labeled **Isolated UI fixture**; HTTP responses are intercepted in
+the browser test, and they are not Prosys or hardware evidence. The Controller
+and GSensor cross-module tests use their real application classes with an
+in-memory bus and deterministic image/optimizer fixtures. They do not claim
+real RabbitMQ/network, real-camera or full crystallization-process acceptance.
+No stopped long experiment was resumed, no historical data was cleaned, and
+no push was performed for this implementation.
+
+Deployment is deliberately separate from these isolated checks: Central,
+Controller and GSensor must all load the updated source. No already-stopped
+test, long Prosys run or hardware experiment is automatically started or
+resumed. A legacy run lacking full startup sections must be ended before a
+new run can use the expanded parameter drawer.
+
+### Final isolated verification record (2026-10-20)
+
+The final combined run completed with **356 passed, 120 subtests passed,
+30 skipped, 2 warnings**, and no failures or errors (32.97 seconds).
+The 30 skipped cases are the pre-existing explicitly opt-in local InfluxDB
+Flux round-trip checks, not skipped online-parameter assertions. They were not
+enabled as a substitute for hardware acceptance. Python compilation, JavaScript
+syntax and `git diff --check` also passed.
+
+Authoritative local artifacts:
+`.runtime/online-parameters-audit-20261020-jk6aPcXe/verified-regressions.xml`,
+`verified-browser-report.json`, and eight `verified-parameters-fixture*.png`
+screenshots in that directory. The browser report records no page errors and
+identifies the screenshots as isolated fixtures. `verification.json` in the
+same directory maps acceptance gates, exact command and tested-source hashes.
+
+The focused regression fixtures were brought forward to the existing process
+configuration names, manual-restart contract, nullable diagnostic observations
+and retained invalid-cycle audit rows. No optimizer tolerance or control
+performance requirement was relaxed to make the suite pass.
+
+| Acceptance gate | Isolated result |
+| --- | --- |
+| Closed 91-field policies, startup locks, read-only derived values | PASS |
+| Next prepared tick, continuous periods, no duplicate numerical calls | PASS |
+| Latest kinetics, five-filter refresh, preserved process/history/seeds | PASS |
+| Common queue/revision, retries, conflicts, no-op and metadata-only handling | PASS |
+| Frame boundary, image warmup, version/interval isolation, marks and counts | PASS |
+| Lost messages, checkpoint faults, partial commits and manual restart | PASS |
+| Real component HTTP flow and immutable 91-field startup retry | PASS |
+| Browser save/dirty/pending/applied states and next-run draft isolation | PASS |
+| Parameter/measurement/event CSV and existing annotation serialization | PASS |
+| Real RabbitMQ/network outage, InfluxDB Flux round trip | NOT RUN |
+| Long Prosys process acceptance, actual camera/GPU and hardware | NOT RUN |
+
+These results establish the implemented online-update protocol and its isolated
+regressions; they are not a claim of improved process tracking or a completed
+new physical experiment. No running services were redeployed by this change.
+
+The optional Chromium fixture `tests/central_online_parameters_browser.cjs`
+renders the actual Central HTML/CSS/JS while intercepting every HTTP request;
+it opens no listening server. Its screenshots are **isolated UI fixtures**, not
+Prosys experiment results. Set `CENTRAL_PARAMETER_FIXTURE_SCREENSHOT` and
+`CENTRAL_PARAMETER_FIXTURE_REPORT` to new output paths when running the browser
+test to retain screenshots and the structured execution report.
+
+`tests/test_online_parameter_http_flow.py` additionally drives the actual HTTP
+handlers, Central publisher/journal, Controller service and algorithm, and
+GSensor service over the explicitly pumped memory bus. No Applied status is
+injected: Central observes real application receipts and GSensor acknowledgments.
+It also covers an ordinary runtime-control request after a panel update, immutable
+startup/draft data, and HTTP End followed by next-experiment draft recovery.
+Only optimizer outputs are deterministic fixtures; no listening server,
+background service, simulator, camera, or hardware is started.

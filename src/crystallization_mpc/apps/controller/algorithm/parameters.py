@@ -8,6 +8,10 @@ import math
 from typing import Any, Mapping
 
 
+MAX_SIMULATION_CRYSTALS = 1_000_000
+MAX_SIMULATION_JACKET_SUBSTEPS = 100_000
+
+
 BASELINE_DEFAULTS: dict[str, Any] = {
     "mode": "MPC",
     "run_type": "simulation",
@@ -204,6 +208,68 @@ def calc_K_I_target(params: Mapping[str, Any]) -> float:
     return 0.0
 
 
+def _merge_runtime_parameters(current: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge canonical deltas while retaining fitted kinetics and startup aliases.
+
+    ``build_parameters`` intentionally accepts archived derived values at
+    startup.  Hot updates must invalidate only the derived values whose
+    dependencies changed, not rebuild everything from startup defaults.
+    """
+    result = dict(current)
+    result.update(changes)
+    keys = set(changes)
+    if keys & {"m_solvent", "rho_solvent", "r_reactor"}:
+        result["area_1"] = 2 * float(result["m_solvent"]) / (float(result["rho_solvent"]) * float(result["r_reactor"]))
+    if "r_reactor" in keys:
+        result["area_2"] = math.pi * float(result["r_reactor"]) ** 2
+    if keys & {"m_solvent", "rho_solvent", "r_reactor", "c_p", "k"}:
+        result["tau_1"] = float(result["c_p"]) * float(result["m_solvent"]) / (float(result["k"]) * float(result["area_1"]))
+    if keys & {"m_solvent", "r_reactor", "c_p", "k_loss"}:
+        result["tau_2"] = float(result["c_p"]) * float(result["m_solvent"]) / (float(result["k_loss"]) * float(result["area_2"]))
+    if keys & {"K_u", "PI_mode"}:
+        result["K_P_target"] = calc_K_P_target(result)
+        result["K_I_target"] = calc_K_I_target(result)
+    if "R" in keys:
+        denominator = .035 ** 1.5 * math.exp(-120000 / float(result["R"]) / 306.15)
+        result["k_0_proc"] = 3e-8 / denominator
+    suffix = result["target"]
+    for alias in ("K_P_T", "K_I_T", "dT_dt_min", "dT_dt_max", "t_lag_threshold_perc"):
+        if f"{alias}_{suffix}" in keys:
+            result[alias] = result[f"{alias}_{suffix}"]
+    if f"{suffix}_set" in keys:
+        result["target_set"] = result[f"{suffix}_set"]
+    return build_parameters(result)
+
+
+def merge_runtime_parameters(current: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        result = _merge_runtime_parameters(current, changes)
+        validate_simulation_resources(result)
+        return result
+    except ArithmeticError as exc:
+        raise ValueError("Parameter changes produce undefined derived coefficients.") from exc
+
+
+def simulation_seed_count(params: Mapping[str, Any]) -> int:
+    mean, std = float(params["d_mean_seed"]), float(params["d_std_seed"])
+    volume = math.pi / 6 * (mean ** 3 + 3 * mean * std ** 2)
+    ratio = float(params["m_seed"]) / (float(params["rho_solute"]) * volume)
+    if not math.isfinite(ratio):
+        raise ValueError("Simulation seed population count must be finite.")
+    return max(1, int(round(ratio)))
+
+
+def validate_simulation_resources(params: Mapping[str, Any]) -> None:
+    """Reject (never clip) computationally infeasible internal simulation work."""
+    if params["run_type"] != "simulation":
+        return
+    if simulation_seed_count(params) > MAX_SIMULATION_CRYSTALS:
+        raise ValueError(f"Internal simulation supports at most {MAX_SIMULATION_CRYSTALS:,} crystals.")
+    substeps = float(params["dt"]) / float(params["dt_update"])
+    if not math.isfinite(substeps) or math.trunc(substeps) > MAX_SIMULATION_JACKET_SUBSTEPS:
+        raise ValueError(f"Internal simulation supports at most {MAX_SIMULATION_JACKET_SUBSTEPS:,} jacket substeps per cycle.")
+
+
 def parameter_digest(params: Mapping[str, Any]) -> str:
     payload = json.dumps(params, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -215,4 +281,9 @@ __all__ = [
     "calc_K_I_target",
     "calc_K_P_target",
     "parameter_digest",
+    "merge_runtime_parameters",
+    "simulation_seed_count",
+    "validate_simulation_resources",
+    "MAX_SIMULATION_CRYSTALS",
+    "MAX_SIMULATION_JACKET_SUBSTEPS",
 ]

@@ -99,6 +99,15 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def validate_runtime_update(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
         return self.controller.validate_runtime_update(changes)
 
+    def validate_parameter_update(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.controller.validate_parameter_update(changes)
+
+    def runtime_parameter_values(self) -> Mapping[str, Any]:
+        return self.controller.runtime_parameter_values()
+
+    def runtime_parameter_status(self) -> Mapping[str, Any] | None:
+        return self.controller.runtime_parameter_status()
+
     def refresh_status(self) -> Mapping[str, Any]:
         return self.controller.refresh_status()
 
@@ -125,10 +134,18 @@ class CrystallizationControllerAdapter(ControllerAdapter):
         run_id: str,
         state: Mapping[str, Any],
     ) -> bool:
-        # The service calls this hook only to resume a RUNNING experiment.
-        # Loading a valid stopped archive is allowed by the numerical class,
-        # but must not report a running service recovery as successful.
+        # Validate a checkpoint that claimed RUNNING before interruption.
+        # A stopped numerical archive cannot satisfy that stricter claim.
+        # Successful restoration itself never authorizes service scheduling.
         return self.controller.restore_state(params, run_id, state) and self.controller.running
+
+    def restore_held_state(
+        self, params: Mapping[str, Any], run_id: str, state: Mapping[str, Any]
+    ) -> bool:
+        # End may have stopped the algorithm before disconnect/persistence
+        # failed. Its complete stopped numerical state is still valid for a
+        # service-level hold, never for an automatically running scheduler.
+        return self.controller.restore_state(params, run_id, state)
 
 
 __all__ = ["CrystallizationControllerAdapter"]

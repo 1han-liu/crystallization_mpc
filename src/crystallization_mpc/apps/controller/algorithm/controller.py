@@ -14,6 +14,9 @@ from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnostic
 from crystallization_mpc.apps.controller.process import ProcessState
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
+from crystallization_mpc.messaging.parameter_policy import (
+    parameter_defaults, parameter_policies, derived_parameter_policies, validate_parameter_changes,
+)
 
 from .adaptation import AdaptationError, adapt_growth_parameters
 from ._checkpoint import validate_checkpoint
@@ -27,7 +30,7 @@ from .control import (
     objective_function,
     update_T_j,
 )
-from .dynamics import state_transition_function, state_transition_function_T
+from .dynamics import state_transition_function, state_transition_function_T, state_transition_matrices
 from .ekf import (
     ExtendedKalmanFilter,
     construct_EKF,
@@ -37,7 +40,8 @@ from .ekf import (
     smooth_EKF_general,
 )
 from .mass_balance import calc_next_crystallization_mass_balance, create_size_list
-from .parameters import build_parameters, parameter_digest
+from .parameters import (build_parameters, merge_runtime_parameters, parameter_digest,
+                         simulation_seed_count, MAX_SIMULATION_CRYSTALS)
 from .thermodynamics import calc_G, calc_relative_sigma, calc_sigma
 
 
@@ -101,6 +105,10 @@ class CrystallizationController:
     def _reset_runtime_state(self) -> None:
         self.frame_index = 0
         self.elapsed_s = 0.0
+        self._history_tick_seq: list[int] = []
+        self._runtime_parameter_ledger: list[dict[str, Any]] = []
+        self._last_parameter_event: dict[str, Any] | None = None
+        self._seed_population: dict[str, Any] = {"initial_count": 0, "base_seeded": False, "additions": []}
         self.history: dict[str, list[Any]] = {key: [] for key in HISTORY_KEYS}
         for key, values in self.history.items():
             setattr(self, f"{key}_list", values)
@@ -367,6 +375,7 @@ class CrystallizationController:
                 rng=np.random.default_rng(123),
             )
         self.size_list = np.zeros_like(self.size_list_seed)
+        self._seed_population["initial_count"] = len(self.size_list_seed)
         if self.params["run_type"] == "simulation":
             self._initialize_filters(initial_T, initial_c)
             self.control_T_j_reference_K = float(self.params["T_j_init"])
@@ -426,7 +435,11 @@ class CrystallizationController:
         if self.simulation_state is None:
             raise RuntimeError("Simulation state is not initialized.")
         if self.pending_seed:
-            self.size_list = self.size_list_seed.copy()
+            added_count = len(self.size_list_seed)
+            self.size_list = (np.concatenate((self.size_list, self.size_list_seed))
+                              if self.mark_seed else self.size_list_seed.copy())
+            self._seed_population["additions"].append({"tick_seq": self.frame_index,
+                "added_count": added_count, "total_count": len(self.size_list)})
             self.pending_seed = False
             self.mark_seed = True
         if tick_index == 0:
@@ -493,6 +506,10 @@ class CrystallizationController:
             )
         return {
             "history_lengths": {key: len(values) for key, values in self.history.items()},
+            "history_ticks": list(self._history_tick_seq),
+            "parameter_ledger": copy.deepcopy(self._runtime_parameter_ledger),
+            "parameter_event": copy.deepcopy(self._last_parameter_event),
+            "next_seed_sizes": self.size_list_seed.copy(),
             "integrals": (
                 self.int_e_target_dt,
                 self.int_e_dT_dt_dt,
@@ -525,6 +542,10 @@ class CrystallizationController:
             self.int_e_T_dt,
         ) = snapshot["integrals"]
         self.params = copy.deepcopy(snapshot["params"])
+        self._history_tick_seq = list(snapshot["history_ticks"])
+        self._runtime_parameter_ledger = copy.deepcopy(snapshot["parameter_ledger"])
+        self._last_parameter_event = copy.deepcopy(snapshot["parameter_event"])
+        self.size_list_seed = snapshot["next_seed_sizes"].copy()
         self.num_adapt = int(snapshot["num_adapt"])
         self.fitting_G_measure_history = list(snapshot["fitting_G_measure_history"])
         self.fitting_segment = copy.deepcopy(snapshot["fitting_segment"])
@@ -552,16 +573,48 @@ class CrystallizationController:
     ) -> bool:
         """Apply one validated request, using this tick's fresh measured state."""
         event_id = str(update["event_id"])
-        if self.last_refresh_event and self.last_refresh_event["event_id"] == event_id:
+        if ((self.last_refresh_event and self.last_refresh_event["event_id"] == event_id)
+                or any(item["event_id"] == event_id for item in self._runtime_parameter_ledger)):
             return False
-        candidate, configuration = self._runtime_candidate(update["changes"])
+        legacy = update.get("changes") or {}
+        candidate, configuration = self._runtime_candidate(legacy) if legacy else (copy.deepcopy(self.params), self.runtime_configuration())
+        raw_patch = validate_parameter_changes(update.get("parameter_changes") or {}, self.runtime_parameter_values())
+        current = self.runtime_parameter_values()
+        raw_changed = {section: {key: value for key, value in values.items()
+                                 if value != current.get(section, {}).get(key)}
+                       for section, values in raw_patch.items()}
+        raw_changed = {section: values for section, values in raw_changed.items() if values}
+        canonical = {key.removeprefix("params."): value
+                     for section, values in raw_patch.items() if section != "gsensor"
+                     for key, value in values.items()}
+        candidate = merge_runtime_parameters(candidate, canonical) if canonical else candidate
         old = self.runtime_configuration()
         changed = {key: configuration[key] for key in configuration if configuration[key] != old[key]}
-        if not changed:
+        if not changed and not raw_patch and not update.get("measurement_changed", False):
             return False
         self.params = candidate
         self.adaptation_enabled = configuration["adaptation_enabled"]
         self.adaptation_mode = configuration["adaptation_mode"]
+        # A configured population describes future additions only.  Never
+        # replace the currently growing crystal array during parameter apply.
+        actually_changed_keys = {key.removeprefix("params.") for key in raw_changed.get("controller", {})}
+        if self.params["run_type"] == "simulation" and actually_changed_keys & {"m_seed", "d_mean_seed", "d_std_seed", "rho_solute"}:
+            self.size_list_seed = create_size_list(self.params, float(self.params["m_seed"]),
+                float(self.params["d_mean_seed"]), float(self.params["d_std_seed"]),
+                rng=np.random.default_rng(123))
+        policies = parameter_policies()
+        effects = {policies[section][key]["effect"] for section, values in raw_changed.items() for key in values}
+        computational = bool(changed or update.get("measurement_changed", False)
+                             or effects & {"controller_refresh", "measurement_segment", "reserved_filter"}
+                             or ("simulation_only" in effects and self.params["run_type"] == "simulation"))
+        self._last_parameter_event = {"event_id": event_id, "effective_tick": self.frame_index,
+            "elapsed_s": self.elapsed_s, "refreshed": computational,
+            "parameter_changes": copy.deepcopy(raw_patch),
+            "actual_parameter_changes": copy.deepcopy(raw_changed), "changes": copy.deepcopy(changed),
+            "measurement_changed": bool(update.get("measurement_changed", False))}
+        self._runtime_parameter_ledger.append(copy.deepcopy(self._last_parameter_event))
+        if not computational:
+            return False
         self._initialize_filters(T, c)
         self.int_e_target_dt = self.int_e_dT_dt_dt = self.int_e_T_dt = 0.0
         self.num_adapt = 0
@@ -574,8 +627,10 @@ class CrystallizationController:
         self.refresh_count += 1
         self.last_refresh_event = {
             "event_id": event_id, "effective_tick": self.frame_index,
-            "elapsed_s": self.elapsed_s, "reason": ",".join(sorted(changed)),
+            "elapsed_s": self.elapsed_s, "reason": ",".join(sorted(changed) +
+                [f"{section}.{key}" for section, values in raw_changed.items() for key in values]) or "measurement_changed",
             "changes": changed,
+            "parameter_changes": copy.deepcopy(raw_changed),
         }
         self.last_adaptation_pause_reason = "controller_refresh"
         self.last_control_hold_reason = "controller_refresh"
@@ -628,7 +683,13 @@ class CrystallizationController:
         if tick_input.tick_seq != self.frame_index + 1:
             raise ValueError("Controller tick sequence must be contiguous.")
         if tick_input.runtime_update is not None:
-            self.validate_runtime_update(tick_input.runtime_update["changes"])
+            if tick_input.runtime_update.get("changes"):
+                self.validate_runtime_update(tick_input.runtime_update["changes"])
+            self.validate_parameter_update(tick_input.runtime_update.get("parameter_changes") or {})
+            legacy = tick_input.runtime_update.get("changes") or {}
+            panel = (tick_input.runtime_update.get("parameter_changes") or {}).get("controller", {})
+            if any(key in legacy and key in panel and legacy[key] != panel[key] for key in ("sigma_set", "G_set")):
+                raise ValueError("Runtime controls and panel target values conflict.")
         if self.control_T_j_reference_K is None or self.ekf is None:
             return ControllerStepResult(
                 valid=False, error="Experiment activation ProcessState has not been initialized."
@@ -661,7 +722,7 @@ class CrystallizationController:
                 self._refresh_at_measurement(tick_input.runtime_update, T, c)
                 if tick_input.runtime_update is not None else False
             )
-            if refreshed:
+            if tick_input.runtime_update is not None and self._last_parameter_event is not None and self._last_parameter_event["event_id"] == tick_input.runtime_update["event_id"]:
                 self._runtime_refresh_transaction = {
                     "event_id": tick_input.runtime_update["event_id"],
                     "snapshot": rollback_state,
@@ -669,6 +730,7 @@ class CrystallizationController:
             for key, value in (("t", self.elapsed_s), ("T", T), ("T_j", T_j),
                                ("c", c), ("count_middle", count_middle)):
                 self.history[key].append(value)
+            self._history_tick_seq.append(self.frame_index)
             dT_dt = calc_dT_dt(self.history["T"][self.segment_history_start :], dt)
             dc_dt = calc_dc_dt(self.history["c"][self.segment_history_start :], dt)
             self.history["dT_dt"].append(dT_dt)
@@ -706,10 +768,10 @@ class CrystallizationController:
                 tick_input, c_KF, T_KF
             )
             hold_growth_control = target == "G" and not adaptation_allowed
+            parameter_hold = getattr(tick_input, "control_hold_reason", None)
             self.last_control_hold_reason = "controller_refresh" if refreshed else (
-                pause_reason or "growth_measurement_unavailable"
-                if hold_growth_control
-                else None
+                parameter_hold or ((pause_reason or "growth_measurement_unavailable")
+                                   if hold_growth_control else None)
             )
 
             lag_percentage = calc_t_lag_perc(
@@ -721,7 +783,7 @@ class CrystallizationController:
             self.history["t_lag"].append(lag)
             projected = filtered + np.array([filtered[1], 0.0, filtered[3], 0.0]) * lag
             dT_dt_request: float | None = None
-            if refreshed or hold_growth_control:
+            if refreshed or hold_growth_control or parameter_hold:
                 # A live G target is undefined without a fresh measurement.
                 # Re-assert the equipment's current jacket setpoint and leave
                 # every control integral untouched until a valid sample arrives.
@@ -779,10 +841,10 @@ class CrystallizationController:
                     self.history[key].append(None)
             self.history["G_measure"].append(G_measure)
             should_adapt = (
-                not refreshed and self.adaptation_enabled and adaptation_allowed
+                not refreshed and not parameter_hold and self.adaptation_enabled and adaptation_allowed
                 and G_measure is not None
             )
-            self.last_adaptation_pause_reason = "controller_refresh" if refreshed else None
+            self.last_adaptation_pause_reason = "controller_refresh" if refreshed else parameter_hold
             growth_reanchored = False
             if should_adapt:
                 if self.ekf_G_measure is None:
@@ -823,7 +885,7 @@ class CrystallizationController:
                 self.history["to_adapt"].append(False)
                 if self.adaptation_enabled:
                     self.last_adaptation_pause_reason = (
-                        "controller_refresh" if refreshed else pause_reason or "adaptation_not_allowed"
+                        "controller_refresh" if refreshed else parameter_hold or pause_reason or "adaptation_not_allowed"
                     )
                     self.adaptation_diagnostics.update(
                         last_status="waiting_for_samples", last_tick=self.frame_index,
@@ -839,11 +901,11 @@ class CrystallizationController:
             numerical = (T_j_set, sigma, G_model, objective, self.params["n"],
                          self.params["k_0"], self.params["E_A"])
             if not all(math.isfinite(float(value)) for value in numerical):
-                if refreshed:
+                if self._runtime_refresh_transaction is not None:
                     self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
                 return ControllerStepResult(valid=False, error="Controller calculation produced a non-finite value.")
             if not float(self.params["T_j_min"]) <= T_j_set <= float(self.params["T_j_max"]):
-                if refreshed:
+                if self._runtime_refresh_transaction is not None:
                     self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
                 return ControllerStepResult(valid=False, error="Controller setpoint violates jacket bounds.")
             try:
@@ -902,6 +964,8 @@ class CrystallizationController:
             raise RuntimeError("Cannot add seed while Controller is stopped.")
         if not isinstance(event, Mapping):
             raise TypeError("Seed event must be a mapping.")
+        if self.params["run_type"] == "simulation" and self.mark_seed and len(self.size_list) + len(self.size_list_seed) > MAX_SIMULATION_CRYSTALS:
+            raise ValueError(f"Internal simulation supports at most {MAX_SIMULATION_CRYSTALS:,} crystals.")
         self.pending_seed = True
 
     def runtime_configuration(self) -> dict[str, Any]:
@@ -968,6 +1032,43 @@ class CrystallizationController:
         """Validate without applying; the measured tick owns the commit."""
         return self._runtime_candidate(changes)[1]
 
+    def runtime_parameter_values(self) -> dict[str, dict[str, Any]]:
+        """Current raw panel names, including latest fitted E_A and n."""
+        defaults = parameter_defaults()
+        return {section: {key: copy.deepcopy(self.params.get(key.removeprefix("params."), default))
+                          for key, default in defaults[section].items()}
+                for section in ("shared", "controller")}
+
+    def validate_parameter_update(self, changes: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.running:
+            raise RuntimeError("Cannot update a Controller that is not running.")
+        patch = validate_parameter_changes(changes, self.runtime_parameter_values())
+        canonical = {key.removeprefix("params."): value for section, values in patch.items()
+                     if section != "gsensor" for key, value in values.items()}
+        candidate = merge_runtime_parameters(self.params, canonical)
+        if candidate["run_type"] == "simulation" and set(canonical) & {"m_seed", "d_mean_seed", "d_std_seed", "rho_solute"}:
+            total = simulation_seed_count(candidate) + (len(self.size_list) if self.mark_seed else 0)
+            if total > MAX_SIMULATION_CRYSTALS:
+                raise ValueError(f"The next addition would exceed {MAX_SIMULATION_CRYSTALS:,} simulated crystals.")
+        if canonical and self.ekf is not None:
+            try:
+                # Inspect coefficients only: validation must not run RK45 or
+                # perform an extra estimator/process advancement.
+                matrix, offset = state_transition_matrices(candidate, self.ekf.state.copy(), float(candidate["dt"]))
+                growth = calc_G(candidate, float(self.ekf.state[2]), float(self.ekf.state[0]))
+                if not np.isfinite(matrix).all() or not np.isfinite(offset).all() or not math.isfinite(float(growth)):
+                    raise ValueError("Parameter changes produce non-finite model values at the current state.")
+            except ArithmeticError as exc:
+                raise ValueError("Parameter changes produce undefined model values at the current state.") from exc
+        return candidate
+
+    def runtime_parameter_status(self) -> dict[str, Any]:
+        return {"last_event": copy.deepcopy(self._last_parameter_event),
+                "applied_event_ids": [item["event_id"] for item in self._runtime_parameter_ledger],
+                "derived_values": ({key: copy.deepcopy(self.params[key])
+                                    for key in derived_parameter_policies() if key in self.params}
+                                   if self.configured else None)}
+
     def update_runtime(self, changes: Mapping[str, Any]) -> dict[str, Any]:
         del changes
         raise RuntimeError("Runtime updates must be submitted at a fresh measured control tick.")
@@ -1000,13 +1101,16 @@ class CrystallizationController:
             "frame_index": self.frame_index, "elapsed_s": self.elapsed_s,
             "control_T_j_reference_K": self.control_T_j_reference_K,
             "params": self.params, "history": self.history,
+            "history_tick_seq": list(self._history_tick_seq),
+            "runtime_parameter_updates": copy.deepcopy(self._runtime_parameter_ledger),
             "integrals": {"int_e_target_dt": self.int_e_target_dt,
                           "int_e_dT_dt_dt": self.int_e_dT_dt_dt,
                           "int_e_T_dt": self.int_e_T_dt},
             "simulation": {"state": self.simulation_state,
                            "size_list_seed": self.size_list_seed,
                            "size_list": self.size_list, "pending_seed": self.pending_seed,
-                           "mark_seed": self.mark_seed},
+                           "mark_seed": self.mark_seed,
+                           "seed_population": copy.deepcopy(self._seed_population)},
             "filters": filters,
             "refresh": {"count": self.refresh_count, "segment_id": self.segment_id,
                         "segment_start_tick": self.segment_start_tick,
@@ -1046,6 +1150,8 @@ class CrystallizationController:
             if not isinstance(saved_params, Mapping):
                 raise ValueError("Recovery params are missing.")
             self.params = copy.deepcopy(dict(saved_params))
+            self._runtime_parameter_ledger = copy.deepcopy(state.get("runtime_parameter_updates", []))
+            self._last_parameter_event = copy.deepcopy(self._runtime_parameter_ledger[-1]) if self._runtime_parameter_ledger else None
             history = state.get("history")
             if not isinstance(history, Mapping) or set(history) != set(HISTORY_KEYS):
                 raise ValueError("Recovery history is incompatible.")
@@ -1058,6 +1164,9 @@ class CrystallizationController:
                     or next(iter(parameter_lengths)) > next(iter(history_lengths))):
                 raise ValueError("Recovery history lengths are incompatible.")
             self.history = restored
+            self._history_tick_seq = list(state.get("history_tick_seq", []))
+            if not self._history_tick_seq:
+                self._history_tick_seq = [int(round(value / float(configured["dt"]))) for value in restored["t"]]
             for key, values in self.history.items():
                 setattr(self, f"{key}_list", values)
             self.frame_index = frame_index
@@ -1073,6 +1182,8 @@ class CrystallizationController:
             self.size_list = np.asarray(simulation["size_list"], dtype=float)
             self.pending_seed = bool(simulation["pending_seed"])
             self.mark_seed = bool(simulation["mark_seed"])
+            self._seed_population = copy.deepcopy(simulation.get("seed_population", {
+                "initial_count": len(self.size_list_seed), "base_seeded": self.mark_seed, "additions": []}))
             adaptation = state["adaptation"]
             self.set_adaptation(bool(adaptation["enabled"]), str(adaptation["mode"]))
             self.num_adapt = int(adaptation["num_adapt"])

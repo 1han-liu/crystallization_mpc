@@ -32,6 +32,7 @@ from crystallization_mpc.apps.central.params import (
     load_operation_meta,
     load_param_meta,
     load_params,
+    load_params_document,
     load_runtime_params,
     save_params_document,
     validate_params_section,
@@ -85,6 +86,10 @@ from crystallization_mpc.messaging.contracts import (
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for, route
 from crystallization_mpc.messaging.schema import build_envelope, utc_ts
 from crystallization_mpc.messaging.controller_runtime import ControllerRuntimeUpdatePayload
+from crystallization_mpc.messaging.run_parameters import RunParametersUpdatePayload
+from crystallization_mpc.messaging.parameter_policy import (
+    derived_parameter_policies, parameter_policies, validate_parameter_changes,
+)
 
 ROLE = "central"
 TARGET_VALUES = ("sigma", "G")
@@ -115,6 +120,11 @@ class ParamsUpdate(ExperimentContext):
     shared: Dict[str, Any] = Field(default_factory=dict)
     gsensor: Dict[str, Any] = Field(default_factory=dict)
     controller: Dict[str, Any] = Field(default_factory=dict)
+    event_id: str | None = None
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
+    experiment_started_at: str | None = None
+    requested_at: str | None = None
+    changes: Dict[str, Dict[str, Any]] | None = None
 
 
 class RunConfigurationUpdate(ExperimentContext):
@@ -247,6 +257,9 @@ class CentralApp:
         gsensor: Dict[str, object],
         controller: Dict[str, object],
         version: int,
+        *,
+        parameter_sections: Dict[str, Dict[str, object]] | None = None,
+        include_parameter_sections: bool = True,
     ) -> Dict[str, Dict[str, Any]]:
         seq = next_seq()
         messages: Dict[str, Dict[str, Any]] = {}
@@ -265,7 +278,13 @@ class CentralApp:
             messages["gsensor"] = env
 
         if shared or controller:
+            sections = parameter_sections or {"shared": shared, "gsensor": gsensor, "controller": controller}
+            policies = parameter_policies()
             payload = {"version": version, "params": {**shared, **controller}}
+            if include_parameter_sections:
+                payload["parameter_sections"] = {
+                    section: {key: value for key, value in values.items() if key in policies[section]}
+                    for section, values in sections.items()}
             env = build_envelope(
                 src=ROLE,
                 dst="controller",
@@ -334,6 +353,7 @@ class CentralApp:
         dst: str,
         stopped_at: str,
         reason: str = "central_stop",
+        experiment_started_at: str | None = None,
         seq: Optional[int] = None,
     ) -> Dict[str, Any]:
         payload = ExperimentStopPayload(
@@ -341,13 +361,20 @@ class CentralApp:
             stopped_at=stopped_at,
             reason=reason,
         )
+        fields = payload.to_dict()
+        if experiment_started_at is not None:
+            if not isinstance(experiment_started_at, str) or not experiment_started_at.strip():
+                raise ValueError("experiment_started_at must be a nonempty registry timestamp.")
+            # Extra identity evidence is backward compatible with the ordinary
+            # stop contract. Recovery-held Controller runs require this field.
+            fields["experiment_started_at"] = experiment_started_at
         return build_envelope(
             src=ROLE,
             dst=dst,
             msg_type="command",
             name=EXPERIMENT_STOP_COMMAND,
             seq=next_seq() if seq is None else seq,
-            payload=payload.to_dict(),
+            payload=fields,
         )
 
     def publish_experiment_stop_command(
@@ -355,16 +382,23 @@ class CentralApp:
         run_id: str,
         *,
         reason: str = "central_stop",
+        experiment_started_at: str | None = None,
+        controller_only: bool = False,
+        gsensor_only: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
+        if controller_only and gsensor_only:
+            raise ValueError("Stop may target one participant or both, not conflicting exclusive targets.")
         seq = next_seq()
         stopped_at = utc_ts()
         messages: Dict[str, Dict[str, Any]] = {}
-        for dst in ("gsensor", "controller"):
+        destinations = ("controller",) if controller_only else (("gsensor",) if gsensor_only else ("gsensor", "controller"))
+        for dst in destinations:
             env = self.build_experiment_stop_command(
                 run_id,
                 dst=dst,
                 stopped_at=stopped_at,
                 reason=reason,
+                experiment_started_at=experiment_started_at,
                 seq=seq,
             )
             self._publish_with_reconnect(route(ROLE, dst), env, persistent=True)
@@ -468,6 +502,14 @@ class CentralApp:
             src=ROLE, dst="controller", msg_type="command",
             name=CONTROLLER_RUNTIME_UPDATE_COMMAND, seq=next_seq(),
             payload=payload.to_dict(),
+        )
+        self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
+        return env
+
+    def publish_run_parameters_command(self, payload: RunParametersUpdatePayload) -> Dict[str, Any]:
+        env = build_envelope(
+            src=ROLE, dst="controller", msg_type="command",
+            name="experiment.parameters.update", seq=next_seq(), payload=payload.to_dict(),
         )
         self._publish_with_reconnect(route(ROLE, "controller"), env, persistent=True)
         return env
@@ -594,6 +636,9 @@ class CentralService:
         self._sync_operation_state_from_run_configuration()
         self.controller_status_url = os.getenv(
             "CONTROLLER_STATUS_URL", "http://localhost:8002/api/status"
+        )
+        self.gsensor_status_url = os.getenv(
+            "GSENSOR_STATUS_URL", "http://localhost:8001/api/status"
         )
         self.last_gsensor_status: Dict[str, Any] | None = None
         self.last_gsensor_status_received_at: str | None = None
@@ -1548,6 +1593,24 @@ class CentralService:
                 "error": str(exc),
             }
 
+    def gsensor_status(self) -> Dict[str, Any]:
+        """Read this participant now; cached AMQP errors never authorize End."""
+        url = getattr(self, "gsensor_status_url", None)
+        if not url:
+            return {"available": False, "error": "Gsensor status URL is not configured."}
+        try:
+            request = urllib.request.Request(url, headers={"Cache-Control": "no-cache, no-store"})
+            with urllib.request.urlopen(request, timeout=1.0) as response:
+                raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("Gsensor status response exceeds the bounded read size.")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Gsensor status response must be an object.")
+            return {**payload, "available": True, "error": None}
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return {"available": False, "error": str(exc)}
+
     @_locked_service_state
     def system_status(self) -> Dict[str, Any]:
         experiments = self.experiments.list()
@@ -1715,7 +1778,7 @@ class CentralService:
         default_shared, default_gsensor, default_controller, default_version = (
             self.load_default_params()
         )
-        return {
+        result = {
             "version": version,
             "shared": shared,
             "gsensor": gsensor,
@@ -1729,6 +1792,8 @@ class CentralService:
             "meta": self.load_param_meta(),
             "source_file": str(self._active_params_path()),
             "runtime_file": str(self.params_path),
+            "policies": parameter_policies(),
+            "derived_policies": derived_parameter_policies(),
             "status": self.parameter_status(
                 shared=shared,
                 gsensor=gsensor,
@@ -1737,6 +1802,34 @@ class CentralService:
                 defaults=(default_shared, default_gsensor, default_controller),
             ),
         }
+        manifest = self.experiments.current_manifest()
+        if manifest is not None and manifest.status not in {
+            ExperimentStatus.CREATED, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR,
+        }:
+            controller_status = self.controller_status()
+            live = controller_status.get("run_parameters") or {}
+            identity_matches = (controller_status.get("available")
+                                and controller_status.get("current_run_id") == manifest.run_id
+                                and _same_recovery_timestamp(controller_status.get("started_at"), manifest.started_at))
+            matching = (identity_matches and live.get("supported")
+                        and all(isinstance((live.get("values") or {}).get(section), dict)
+                                for section in ("shared", "gsensor", "controller")))
+            result["run_parameters"] = {
+                **live, "supported": bool(matching), "run_id": manifest.run_id,
+                "experiment_started_at": manifest.started_at,
+            }
+            if identity_matches:
+                result["derived_values"] = live.get("derived_values")
+            if matching:
+                for section in ("shared", "gsensor", "controller"):
+                    result[section] = dict((live.get("values") or {}).get(section) or result[section])
+                result["policies"] = live.get("policies") or result["policies"]
+                result["status"] = {"kind": "run_parameters", "message":
+                    f"Current experiment parameters · revision {live.get('revision', 0)}"}
+            else:
+                result["status"] = {"kind": "unavailable", "message": live.get("unavailable_reason")
+                                    or "Current run parameters are not confirmed; editing is locked."}
+        return result
 
     def parameter_status(
         self,
@@ -1805,6 +1898,8 @@ class CentralService:
         allow_changes: bool = True,
         allow_locked: bool = False,
     ) -> Dict[str, Any]:
+        if payload.changes is not None:
+            return self.update_run_parameters(payload)
         if not allow_locked:
             self._require_parameter_draft_editable()
         current_shared, current_gsensor, current_controller, current_version = (
@@ -1857,6 +1952,61 @@ class CentralService:
         result["saved"] = True
         result["changed"] = changed
         return result
+
+    @_locked_service_state
+    def update_run_parameters(self, payload: ParamsUpdate) -> Dict[str, Any]:
+        """Persist a run-local delta before delivery; never write the startup draft."""
+        run_id, controller = self._require_running_controller("Save Parameters")
+        manifest = self.experiments.current_manifest()
+        if (payload.expected_run_id != run_id or not payload.event_id
+                or payload.expected_revision is None or manifest is None
+                or payload.experiment_started_at != manifest.started_at):
+            raise InvalidExperimentStateError("Parameter update experiment identity changed; refresh before saving.")
+        live = controller.get("run_parameters") or {}
+        runtime = controller.get("runtime_controls") or {}
+        if (not live.get("supported")
+                or not _same_recovery_timestamp(controller.get("started_at"), manifest.started_at)):
+            raise InvalidExperimentStateError(live.get("unavailable_reason")
+                                              or "Controller does not support online parameter updates.")
+        # Preserve the exact original request on retry, including requested_at.
+        prior = self.runtime_request_store.observe(run_id, controller)
+        original = (prior or {}).get("command") or {}
+        retry = original.get("event_id") == payload.event_id
+        event = RunParametersUpdatePayload.from_mapping({
+            "run_id": run_id, "event_id": payload.event_id,
+            "expected_revision": payload.expected_revision,
+            "changes": payload.changes,
+            "requested_at": payload.requested_at or (original.get("requested_at") if retry else utc_ts()),
+            "experiment_started_at": payload.experiment_started_at,
+        })
+        if retry:
+            if original != event.to_dict():
+                raise InvalidExperimentStateError("Runtime event_id was reused with different content.")
+            if prior["status"] in {"applied", "rejected"}:
+                return {**self.params_payload(), "requested": False, "runtime_request": prior}
+            entry = prior
+        else:
+            if prior and prior["status"] not in {"applied", "rejected"}:
+                self._record_runtime_rejection(event, runtime, "A runtime request is unconfirmed; retry that same event.")
+            if runtime.get("pending") or live.get("pending"):
+                self._record_runtime_rejection(event, runtime, "A runtime update is pending; wait for confirmation.")
+            if event.expected_revision != runtime.get("revision"):
+                self._record_runtime_rejection(event, runtime, "Runtime revision changed; refresh before editing.")
+            try:
+                validate_parameter_changes(event.changes, current=live.get("values"))
+            except ValueError as exc:
+                raise ParameterValidationError(str(exc)) from exc
+            entry = {"command": event.to_dict(), "status": "pending", "created_at": time.time(),
+                     "result": None, "transport_error": None}
+        self.runtime_request_store.save(run_id, entry)
+        try:
+            self.publisher.publish_run_parameters_command(event)
+        except Exception as exc:
+            entry["transport_error"] = f"Delivery not confirmed: {type(exc).__name__}"
+        else:
+            entry["transport_error"] = None
+        self.runtime_request_store.save(run_id, entry)
+        return {**self.params_payload(), "requested": True, "runtime_request": entry}
 
     def _require_parameter_draft_editable(self) -> None:
         manifest = self.experiments.current_manifest()
@@ -1953,6 +2103,18 @@ class CentralService:
                 "Restore the Controller service and retry Start."
             )
         recovery = controller.get("recovery") or {}
+        if (controller.get("status") == "recovery_required"
+                or (isinstance(recovery, dict) and (
+                    recovery.get("requires_confirmation") is True
+                    or recovery.get("status") == "confirmation_required"))):
+            held_run = controller.get("current_run_id") or "the held experiment"
+            hold_reason = recovery.get("hold_reason") if isinstance(recovery, dict) else None
+            raise InvalidExperimentStateError(
+                f"Controller safety hold ({hold_reason or 'confirmation required'}) requires confirmation for {held_run}. "
+                "Select that experiment and use End Experiment, then wait for Controller "
+                "to confirm stopped before creating or starting a new experiment. "
+                "The selected experiment was not started."
+            )
         if recovery.get("status") == "error":
             reason = recovery.get("error") or "The saved Controller state is incompatible."
             raise InvalidExperimentStateError(
@@ -1960,6 +2122,14 @@ class CentralService:
                 "The experiment was not started. Preserve the old session directory, "
                 "set EXPERIMENT_HOST_ROOT to a new directory, and recreate Central, "
                 "Controller and GSensor before starting a new experiment."
+            )
+        if (controller.get("status") != "running"
+                and controller.get("current_run_id") and controller.get("stopped_at") is None
+                and _same_recovery_timestamp(controller.get("started_at"), controller.get("started_at"))):
+            raise InvalidExperimentStateError(
+                f"Controller has an unended failed experiment {controller['current_run_id']}. "
+                "Select that experiment and use End Experiment, then wait for Controller "
+                "to confirm stopped before starting a new experiment. The selected experiment was not started."
             )
         if (controller.get("adapter") or {}).get("safe_noop"):
             raise InvalidExperimentStateError(
@@ -1993,7 +2163,11 @@ class CentralService:
                 allow_changes=manifest.status == ExperimentStatus.CREATED,
                 allow_locked=manifest.status == ExperimentStatus.STARTING,
             )
+        raw_shared, raw_gsensor, raw_controller, raw_version = self.load_params()
+        raw_sections = {"shared": raw_shared, "gsensor": raw_gsensor, "controller": raw_controller}
         params_snapshot = self.preview_publish_payload()
+        if raw_version != int(params_snapshot["version"]):
+            raise InvalidExperimentStateError("Parameter draft changed while preparing startup; reload before starting.")
         if (
             manifest.status == ExperimentStatus.STARTING
             and manifest.parameter_version != int(params_snapshot["version"])
@@ -2002,6 +2176,26 @@ class CentralService:
                 "The prepared experiment parameter version no longer matches the "
                 "saved parameter draft. End this experiment and create a new one."
             )
+        if manifest.status == ExperimentStatus.STARTING:
+            directory = self.experiments.registry.run_dir(run_id).resolve()
+            path = (directory / (manifest.params_snapshot_file or "params_snapshot.yaml")).resolve()
+            if path.parent != directory or not path.is_file():
+                raise InvalidExperimentStateError("The prepared parameter snapshot is unavailable; startup cannot be retried.")
+            prepared = load_params_document(str(path))
+            recorded_raw = prepared.get("raw_parameter_sections")
+            if recorded_raw is not None:
+                params_snapshot["raw_parameter_sections"] = raw_sections
+            if prepared != params_snapshot:
+                raise InvalidExperimentStateError(
+                    "The parameter draft differs from the immutable prepared snapshot, including standby values. "
+                    "Restore the prepared draft or end this experiment before creating another."
+                )
+            # Retry only the exact prepared values. Old snapshots have no full
+            # raw catalog: keep their old flat protocol, do not invent metadata.
+            params_snapshot = prepared
+            raw_sections = recorded_raw
+        else:
+            params_snapshot["raw_parameter_sections"] = raw_sections
         experiment = self.experiments.start(
             run_id,
             params_snapshot=params_snapshot,
@@ -2032,6 +2226,8 @@ class CentralService:
                 params_snapshot["gsensor"],
                 controller_runtime,
                 int(params_snapshot["version"]),
+                parameter_sections=raw_sections,
+                include_parameter_sections=raw_sections is not None,
             )
             commands = self.publisher.publish_experiment_start_command(
                 experiment,
@@ -2061,6 +2257,87 @@ class CentralService:
 
         if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
             experiment = self.experiments.get(run_id)
+            # A terminal registry entry normally makes End a no-op. A restarted
+            # Controller can nevertheless hold this exact prior identity. Only
+            # an explicit End plus live, matching hold evidence may release it;
+            # never resend a historical stop based on registry identity alone.
+            controller = self.controller_status()
+            controller_started_at = controller.get("started_at")
+            recovery = controller.get("recovery") or {}
+            interrupted = (
+                controller.get("status") == "recovery_required"
+                and isinstance(recovery, dict) and recovery.get("requires_confirmation") is True
+            ) or (
+                controller.get("status") in {"error", "configured"}
+                and controller.get("stopped_at") is None
+                and isinstance(recovery, dict) and recovery.get("status") != "error"
+            )
+            matching_hold = (
+                controller.get("available") is True
+                and interrupted
+                and controller.get("active") is False
+                and controller.get("current_run_id") == run_id
+                and isinstance(manifest.started_at, str) and bool(manifest.started_at)
+                and isinstance(controller_started_at, str) and bool(controller_started_at)
+                and _same_recovery_timestamp(controller_started_at, manifest.started_at)
+            )
+            if matching_hold:
+                try:
+                    self.publisher.publish_experiment_stop_command(
+                        run_id, experiment_started_at=manifest.started_at,
+                        reason=("central_end_recovery_hold" if controller.get("status") == "recovery_required"
+                                else "central_end_failed_controller"), controller_only=True,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Recovery stop delivery did not complete. The experiment remains terminal; "
+                        "retry End for this same run after checking Controller status."
+                    ) from exc
+                experiment["recovery_stop"] = {
+                    "requested": True, "status": "sent", "run_id": run_id,
+                    "experiment_started_at": manifest.started_at,
+                }
+            # An error notification can terminate the registry before Gsensor
+            # has received End and persisted its producer-finalization marker.
+            # Judge it independently: Controller may already be stopped. Never
+            # broadcast a stop for a historical ERROR or rely on an old AMQP
+            # status to infer that Gsensor still owns this experiment.
+            if manifest.status == ExperimentStatus.ERROR and run_id == current_run_id:
+                gsensor = self.gsensor_status()
+                gsensor_started_at = gsensor.get("experiment_started_at")
+                activation = gsensor.get("gsensor_activation")
+                matching_gsensor = (
+                    gsensor.get("available") is True
+                    and gsensor.get("role") == "gsensor"
+                    and gsensor.get("active") is False
+                    and gsensor.get("measurement_running") is False
+                    and isinstance(activation, dict) and activation.get("enabled") is False
+                    # Production Gsensor exposes the activation gate but has
+                    # no top-level readiness field. When present (Synthetic G),
+                    # readiness must explicitly be false, never true or null.
+                    and ("measurement_ready" not in gsensor or gsensor["measurement_ready"] is False)
+                    and gsensor.get("experiment_lifecycle_status") == "error"
+                    and gsensor.get("current_run_id") == run_id
+                    and isinstance(manifest.started_at, str) and bool(manifest.started_at)
+                    and isinstance(gsensor_started_at, str) and bool(gsensor_started_at)
+                    and _same_recovery_timestamp(gsensor_started_at, manifest.started_at)
+                    and self.experiments.current_run_id() == run_id
+                )
+                if matching_gsensor:
+                    try:
+                        self.publisher.publish_experiment_stop_command(
+                            run_id, experiment_started_at=manifest.started_at,
+                            reason="central_end_gsensor_finalization", gsensor_only=True,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "Gsensor finalization stop delivery did not complete. The experiment remains terminal; "
+                            "retry End for this same run after checking Gsensor status."
+                        ) from exc
+                    experiment["gsensor_finalization_stop"] = {
+                        "requested": True, "status": "sent", "run_id": run_id,
+                        "experiment_started_at": manifest.started_at,
+                    }
         elif manifest.status == ExperimentStatus.CREATED:
             experiment = self.experiments.finish(run_id)
         else:
@@ -2080,6 +2357,7 @@ class CentralService:
             try:
                 self.publisher.publish_experiment_stop_command(
                     run_id,
+                    experiment_started_at=manifest.started_at,
                     reason=(
                         "central_retry_end_experiment"
                         if retrying
@@ -2139,6 +2417,8 @@ class CentralService:
         else:
             if prior and prior["status"] not in {"applied", "rejected"}:
                 self._record_runtime_rejection(event, runtime, "A runtime request is unconfirmed; retry that same event.")
+            if runtime.get("pending") or (controller.get("run_parameters") or {}).get("pending"):
+                self._record_runtime_rejection(event, runtime, "A runtime update is pending; wait for confirmation.")
             if event.expected_revision != runtime.get("revision"):
                 self._record_runtime_rejection(event, runtime, "Runtime revision changed; refresh before editing.")
             entry = {
@@ -2219,6 +2499,18 @@ def _retain_last_gsensor_frame(
     if not merged.get("image_name"):
         merged["image_name"] = previous.get("image_name")
     return merged
+
+
+def _same_recovery_timestamp(left: str, right: str) -> bool:
+    """Hold-release identity must use two valid, timezone-aware instants."""
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    try:
+        left_time = datetime.fromisoformat(left.replace("Z", "+00:00"))
+        right_time = datetime.fromisoformat(right.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    return left_time.tzinfo is not None and right_time.tzinfo is not None and left_time == right_time
 
 
 def _same_timestamp(left: str, right: str) -> bool:

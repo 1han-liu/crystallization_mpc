@@ -196,6 +196,7 @@ class ControllerMeasurementRecord:
     process_write_error: str | None = None
     control_target: str | None = None
     runtime_revision: int = 0
+    measurement_parameter_revision: int = 0
     diagnostics: ControllerDiagnosticsSnapshot | None = None
     diagnostics_capture_error: str | None = None
 
@@ -210,6 +211,9 @@ class ControllerMeasurementRecord:
             raise ValueError("adaptation_enabled must be a boolean.")
         if not str(self.adaptation_mode).strip():
             raise ValueError("adaptation_mode is required.")
+        for name in ("runtime_revision", "measurement_parameter_revision"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be a nonnegative integer.")
         if not isinstance(self.process_write_attempted, bool):
             raise ValueError("process_write_attempted must be a boolean.")
         if self.process_write is not None and not self.process_write_attempted:
@@ -255,8 +259,11 @@ class ControllerMeasurementRecord:
                     "input_G_v_KF": float(sample.G_v_KF),
                 }
             )
+            if sample.parameter_revision is not None:
+                fields["input_parameter_revision"] = sample.parameter_revision
         fields.update(self.result.fields())
         fields["runtime_revision"] = self.runtime_revision
+        fields["measurement_parameter_revision"] = self.measurement_parameter_revision
         if self.process_state is not None:
             fields.update(
                 {

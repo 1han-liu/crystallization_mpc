@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 config/influxdb.env
+config/rabbitmq.env
 config/telegraf/certs/
 !config/influxdb.env.example
 .venv/

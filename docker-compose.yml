@@ -41,6 +41,7 @@ services:
       - RABBIT_QUEUE=central.in
       - RABBIT_HEARTBEAT_SEC=0
       - CONTROLLER_STATUS_URL=http://controller:8002/api/status
+      - GSENSOR_STATUS_URL=http://gsensor:8001/api/status
       - CENTRAL_RUNTIME_INFLUX_ENABLED=${CENTRAL_RUNTIME_INFLUX_ENABLED:-${CONTROLLER_INFLUX_ENABLED:-true}}
       - CONTROLLER_INFLUX_URL=${CONTROLLER_INFLUX_URL:-http://influxdb:8086}
       - PARAMS_DEFAULT_FILE=/app/params_default.yaml

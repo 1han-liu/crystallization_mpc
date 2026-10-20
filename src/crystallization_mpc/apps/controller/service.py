@@ -11,6 +11,7 @@ import math
 import os
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -23,6 +24,7 @@ from crystallization_mpc.apps.controller.adapter import (
     load_controller_adapter,
 )
 from crystallization_mpc.apps.controller.config import ControllerSettings
+from crystallization_mpc.apps.controller.parameter_updates import OnlineParametersMixin
 from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnosticsSnapshot
 from crystallization_mpc.apps.controller.process import (
     NoOpProcessAdapter,
@@ -69,6 +71,9 @@ from crystallization_mpc.messaging.routing import bindings_for
 from crystallization_mpc.messaging.controller_runtime import (
     ControllerRuntimeUpdatePayload, validate_runtime_changes,
 )
+from crystallization_mpc.messaging.run_parameters import (
+    PARAMETERS_UPDATE, PARAMETERS_RESULT, parse_runtime_command,
+)
 from crystallization_mpc.messaging.schema import utc_ts
 
 ROLE = "controller"
@@ -80,6 +85,7 @@ class ControllerState(str, Enum):
     IDLE = "idle"
     CONFIGURED = "configured"
     RUNNING = "running"
+    RECOVERY_REQUIRED = "recovery_required"
     STOPPED = "stopped"
     ERROR = "error"
 
@@ -87,7 +93,7 @@ class ControllerState(str, Enum):
 ConsumerRunner = Callable[..., None]
 
 
-class ControllerService:
+class ControllerService(OnlineParametersMixin):
     """Validate bus messages and forward only valid samples to an adapter."""
 
     def __init__(
@@ -99,6 +105,7 @@ class ControllerService:
         process_adapter: ProcessAdapter | None = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        parameter_publisher: Any = None,
     ) -> None:
         self.settings = settings or ControllerSettings.from_env()
         self.adapter = adapter or load_controller_adapter(self.settings.adapter_spec)
@@ -125,6 +132,12 @@ class ControllerService:
         self.last_valid_sample: GrowthRateSamplePayload | None = None
         self.last_valid_sample_received_monotonic: float | None = None
         self.last_valid_sample_arrival_age_s: float | None = None
+        # Independent watchdog memory survives invalid/not-ready messages that
+        # legitimately clear the usable sample cache. Only a new activation
+        # segment or explicit disable may restart initial warmup.
+        self.growth_stream_last_valid_at: str | None = None
+        self._growth_stream_last_valid_monotonic: float | None = None
+        self._growth_stream_arrival_age_s: float | None = None
         # A running live experiment starts with GSensor explicitly disabled.
         # The cache remains unusable until Central's ordered activation command,
         # a matching GSensor status acknowledgement, and a fresh valid sample.
@@ -137,6 +150,7 @@ class ControllerService:
         self.gsensor_last_command_requested_at: str | None = None
         self.gsensor_initialization_generation = 0
         self.gsensor_alignment_revision = 0
+        self.gsensor_alignment_method: str | None = None
         self.gsensor_sample_floor_frame_seq = 0
         self.gsensor_transition_occurred_at: str | None = None
         self.gsensor_last_status_at: str | None = None
@@ -214,6 +228,9 @@ class ControllerService:
         self.runtime_history_error: str | None = None
         self.recovery_status = "disabled"
         self.recovery_error: str | None = None
+        self.safety_hold: dict[str, Any] | None = None
+        self._configured_parameter_sections: dict[str, Any] | None = None
+        self._initialize_online_parameters(parameter_publisher)
         self.state_path = (
             system_path(self.settings.experiment_root, CONTROLLER_STATE_FILENAME)
             if self.settings.experiment_root
@@ -282,7 +299,10 @@ class ControllerService:
             "schema_version": 2,
             "updated_at": utc_ts(),
             "state": self.state.value,
+            "safety_hold": copy.deepcopy(self.safety_hold),
             "parameters": copy.deepcopy(self.parameters),
+            "parameter_sections": copy.deepcopy(self._configured_parameter_sections),
+            "run_parameters": self._online_parameter_document(),
             "parameter_version": self.parameter_version,
             "runtime_controls": {
                 "revision": self.runtime_revision,
@@ -312,10 +332,12 @@ class ControllerService:
                 "last_command_requested_at": self.gsensor_last_command_requested_at,
                 "initialization_generation": self.gsensor_initialization_generation,
                 "alignment_revision": self.gsensor_alignment_revision,
+                "alignment_method": self.gsensor_alignment_method,
                 "sample_floor_frame_seq": self.gsensor_sample_floor_frame_seq,
                 "transition_occurred_at": self.gsensor_transition_occurred_at,
                 "last_status_at": self.gsensor_last_status_at,
                 "gate_reason": self.gsensor_gate_reason,
+                "stream_last_valid_at": self.growth_stream_last_valid_at,
             },
             "last_message": copy.deepcopy(self.last_message),
             "last_message_result": copy.deepcopy(self.last_message_result),
@@ -429,6 +451,17 @@ class ControllerService:
             if type(schema_version) is not int or schema_version not in {1, 2}:
                 raise ValueError("Unsupported Controller runtime-state schema.")
             state = ControllerState(str(document.get("state") or ""))
+            restore_active_checkpoint = state in {
+                ControllerState.RUNNING, ControllerState.RECOVERY_REQUIRED,
+            }
+            hold = document.get("safety_hold")
+            if hold is not None:
+                if (not isinstance(hold, dict)
+                        or hold.get("reason") not in {"controller_restart", "growth_timeout", "gsensor_error"}
+                        or not isinstance(hold.get("detail"), str)):
+                    raise ValueError("Controller safety hold metadata is invalid.")
+                _timestamp_value(hold.get("occurred_at"), "safety_hold.occurred_at")
+            self.safety_hold = copy.deepcopy(hold)
             legacy_inactive_state = schema_version == 1
             if legacy_inactive_state and state not in {
                 ControllerState.IDLE, ControllerState.CONFIGURED, ControllerState.STOPPED,
@@ -456,6 +489,7 @@ class ControllerService:
 
             self.state = state
             self.parameters = copy.deepcopy(parameters)
+            self._configured_parameter_sections = copy.deepcopy(document.get("parameter_sections"))
             parameter_version = document.get("parameter_version")
             self.parameter_version = (
                 int(parameter_version) if parameter_version is not None else None
@@ -513,6 +547,11 @@ class ControllerService:
             )
             self.gsensor_initialization_generation = initialization_generation
             self.gsensor_alignment_revision = alignment_revision
+            method = gsensor.get("alignment_method")
+            if method is not None:
+                from crystallization_mpc.messaging.parameter_policy import validate_parameter_changes
+                validate_parameter_changes({"gsensor": {"alignment_method": method}})
+            self.gsensor_alignment_method = method
             self.gsensor_sample_floor_frame_seq = max(
                 sample_floor,
                 self.last_frame_seq or 0,
@@ -521,6 +560,11 @@ class ControllerService:
                 "transition_occurred_at"
             )
             self.gsensor_last_status_at = gsensor.get("last_status_at")
+            self.growth_stream_last_valid_at = gsensor.get("stream_last_valid_at")
+            if self.growth_stream_last_valid_at is not None:
+                _timestamp_value(self.growth_stream_last_valid_at, "gsensor.stream_last_valid_at")
+            self._growth_stream_last_valid_monotonic = None
+            self._growth_stream_arrival_age_s = None
             desired_enabled = gsensor.get("desired_enabled", False)
             if type(desired_enabled) is not bool:
                 raise ValueError("Controller recovery GSensor desired state is invalid.")
@@ -659,9 +703,10 @@ class ControllerService:
                 processed_adaptation_event_ids
             )
 
-            if state == ControllerState.RUNNING:
+            if restore_active_checkpoint:
                 if not self.current_run_id or self.parameter_version is None:
                     raise ValueError("Running Controller recovery state is incomplete.")
+                _timestamp_value(self.started_at, "recovered started_at")
                 adapter_document = document.get("adapter")
                 adapter_state = (
                     adapter_document.get("state")
@@ -672,7 +717,10 @@ class ControllerService:
                     raise ValueError(
                         "The configured Controller adapter does not provide restart state."
                     )
-                restored = self.adapter.restore_state(
+                restore_adapter = (self.adapter.restore_held_state
+                                   if state == ControllerState.RECOVERY_REQUIRED
+                                   else self.adapter.restore_state)
+                restored = restore_adapter(
                     copy.deepcopy(self.parameters),
                     str(self.current_run_id),
                     copy.deepcopy(adapter_state),
@@ -691,17 +739,15 @@ class ControllerService:
                         restored_configuration.get("adaptation_enabled") != self.adaptation_enabled
                         or restored_configuration.get("adaptation_mode") != self.adaptation_mode):
                     raise ValueError("Adaptation state disagrees with recovered algorithm.")
-                if self.settings.process_enabled:
-                    self.process_adapter.connect()
-                now = self._monotonic_clock()
-                self._run_started_monotonic = now - self.control_tick_count * float(
-                    self.parameters.get("dt", 5.0)
-                )
-                self._next_tick_monotonic = now + float(
-                    self.parameters.get("dt", 5.0)
-                )
+                # Restoring numerical state is not permission to control the
+                # process. Keep every filter/integral/fitting-segment value for
+                # inspection and archival, without connecting equipment or
+                # arming a deadline. An explicit identity-matched End Experiment
+                # must close this interrupted run before a new run can start.
+                self._run_started_monotonic = None
+                self._next_tick_monotonic = None
             runtime = document.get("runtime_controls")
-            actual_configuration = self.adapter.runtime_configuration() if state == ControllerState.RUNNING else None
+            actual_configuration = self.adapter.runtime_configuration() if restore_active_checkpoint else None
             if runtime is not None:
                 if not isinstance(runtime, dict):
                     raise ValueError("Invalid runtime controls recovery document.")
@@ -728,13 +774,13 @@ class ControllerService:
                 saved_configuration = runtime.get("configuration")
                 if saved_configuration is not None:
                     saved_configuration = validate_runtime_changes(saved_configuration)
-                    if state == ControllerState.RUNNING and saved_configuration != actual_configuration:
+                    if restore_active_checkpoint and saved_configuration != actual_configuration:
                         raise ValueError("Runtime controls disagree with recovered algorithm state.")
                 events = runtime.get("events")
                 if not isinstance(events, dict):
                     raise ValueError("Invalid runtime event journal.")
                 for event_id, entry in events.items():
-                    event = ControllerRuntimeUpdatePayload.from_mapping(entry["command"])
+                    event = parse_runtime_command(entry["command"])
                     if event_id != event.event_id or event.run_id != self.current_run_id:
                         raise ValueError("Runtime event journal belongs to another run.")
                     if not isinstance(entry.get("result"), dict):
@@ -743,6 +789,7 @@ class ControllerService:
                 self.runtime_configuration_current = copy.deepcopy(saved_configuration)
                 self.runtime_events = copy.deepcopy(events)
                 self.runtime_last_result = copy.deepcopy(runtime.get("last_result"))
+                self._restore_online_parameter_document(document)
                 pending = runtime.get("pending")
                 refresh = runtime.get("refresh")
                 if not isinstance(refresh, dict) or refresh.get("state") not in {"pending", "completed", "failed"}:
@@ -755,7 +802,7 @@ class ControllerService:
                         raise ValueError("Invalid pending runtime command.")
                     pending_command = ControllerRuntimeUpdatePayload.from_mapping(pending["command"])
                     pending_entry = events.get(pending_command.event_id)
-                    if (state != ControllerState.RUNNING or pending_command.run_id != self.current_run_id
+                    if (not restore_active_checkpoint or pending_command.run_id != self.current_run_id
                             or pending_command.expected_revision != revision
                             or pending_entry is None or pending_entry["result"].get("status") != "pending"
                             or pending_entry["command"] != pending_command.to_dict()
@@ -765,21 +812,27 @@ class ControllerService:
                     candidate = dict(self.adapter.validate_runtime_update(pending_command.changes))
                     if candidate != pending.get("configuration"):
                         raise ValueError("Pending runtime candidate disagrees with checkpoint.")
-                elif any(entry["result"].get("status") == "pending" for entry in events.values()):
+                elif any(entry["result"].get("status") == "pending"
+                         and (self.run_parameter_pending is None
+                              or event_id != self.run_parameter_pending["command"]["event_id"])
+                         for event_id, entry in events.items()):
                     raise ValueError("Runtime journal has an orphaned pending command.")
+                if pending is not None and self.run_parameter_pending is not None:
+                    raise ValueError("Checkpoint contains two pending runtime updates.")
                 actual_refresh = self.adapter.refresh_status() or {}
-                if state == ControllerState.RUNNING and (
+                if restore_active_checkpoint and (
                         actual_refresh.get("count", 0) != refresh["count"]
                         or actual_refresh.get("segment_id", 0) != refresh["segment_id"]):
                     raise ValueError("Runtime refresh counters disagree with recovered algorithm.")
-                if state == ControllerState.RUNNING:
+                if restore_active_checkpoint:
                     last_completed = actual_refresh.get("last_event")
                     if refresh["count"] > 0:
                         if not isinstance(last_completed, Mapping):
                             raise ValueError("Algorithm refresh receipt is missing.")
                         completed_id = last_completed.get("event_id")
                         completed = events.get(completed_id, {}).get("result", {})
-                        if (completed.get("status") != "applied" or completed.get("refreshed") is not True
+                        if ((completed.get("status") != "applied" and not completed.get("controller_applied"))
+                                or completed.get("refreshed") is not True
                                 or completed.get("refresh_count") != refresh["count"]
                                 or completed.get("segment_id") != refresh["segment_id"]
                                 or completed.get("effective_tick") != last_completed.get("effective_tick")
@@ -792,13 +845,30 @@ class ControllerService:
                             raise ValueError("Runtime refresh receipt disagrees with algorithm boundary.")
                     elif last_completed is not None:
                         raise ValueError("Unexpected algorithm refresh receipt before any refresh.")
-                    if revision != refresh["count"]:
-                        raise ValueError("Runtime revision disagrees with completed refresh count.")
+                    # Metadata-only changes consume a common configuration
+                    # revision without claiming a numerical filter refresh.
+                    committed = [entry["result"] for entry in events.values()
+                                 if entry["result"].get("controller_applied") is True
+                                 or (entry["result"].get("status") == "applied"
+                                     and entry["result"].get("no_change") is False)]
+                    if sorted(item.get("revision") for item in committed) != list(range(1, revision + 1)):
+                        raise ValueError("Runtime revision disagrees with its committed journal.")
+                    if sum(item.get("refreshed") is True for item in committed) != refresh["count"]:
+                        raise ValueError("Runtime refresh count disagrees with its committed journal.")
                 self.runtime_pending = copy.deepcopy(pending)
                 self.runtime_refresh = copy.deepcopy(refresh)
             else:
                 raise ValueError("Controller checkpoint is missing runtime refresh state.")
-            self.recovery_status = "restored"
+            if restore_active_checkpoint:
+                self.state = ControllerState.RECOVERY_REQUIRED
+                self.recovery_status = "confirmation_required"
+                if self.safety_hold is None:
+                    self.safety_hold = {
+                        "reason": "controller_restart", "occurred_at": _utc_timestamp(self._wall_clock()),
+                        "detail": "Controller restarted during an experiment; End this run before creating a new run.",
+                    }
+            else:
+                self.recovery_status = "restored"
             self.recovery_error = None
         except Exception as exc:
             self.state = ControllerState.ERROR
@@ -878,6 +948,7 @@ class ControllerService:
 
         while not self._control_stop.is_set():
             with self._lock:
+                self._check_growth_timeout_locked()
                 deadline = (
                     self._next_tick_monotonic
                     if self.state == ControllerState.RUNNING
@@ -888,8 +959,12 @@ class ControllerService:
                 self._control_wakeup.clear()
                 continue
             delay = max(0.0, deadline - self._monotonic_clock())
-            if self._control_wakeup.wait(delay):
+            # Watch the established live-G stream between control deadlines;
+            # no optimizer or process step is called by this short wait.
+            if self._control_wakeup.wait(min(delay, 0.25)):
                 self._control_wakeup.clear()
+                continue
+            if delay > 0.25:
                 continue
             try:
                 self._control_tick_once(now=self._monotonic_clock())
@@ -968,6 +1043,12 @@ class ControllerService:
         payload = message.get("payload")
         if not isinstance(payload, Mapping):
             raise ValueError("Message payload must be an object.")
+        if (self.state == ControllerState.RECOVERY_REQUIRED
+                and not (msg_type == "command" and name == EXPERIMENT_STOP_COMMAND and source == "central")):
+            raise ValueError(
+                "Controller is in a persistent safety hold and requires confirmation. "
+                "Use End Experiment for the matching run before creating a new run; automatic or same-run resume is disabled."
+            )
 
         if msg_type == "params" and name == PARAMS_UPDATE_MESSAGE:
             if source != "central":
@@ -999,6 +1080,16 @@ class ControllerService:
                 raise ValueError("controller.runtime.update must come from Central.")
             return self._update_runtime(payload)
 
+        if msg_type == "command" and name == PARAMETERS_UPDATE:
+            if source != "central":
+                raise ValueError("experiment.parameters.update must come from Central.")
+            return self._update_run_parameters(payload)
+
+        if msg_type == "status" and name == PARAMETERS_RESULT:
+            if source != "gsensor":
+                raise ValueError("experiment.parameters.result must come from GSensor.")
+            return self._accept_parameter_result(payload)
+
         if msg_type == "command" and name in {
             GSENSOR_ENABLE_COMMAND,
             GSENSOR_DISABLE_COMMAND,
@@ -1028,16 +1119,25 @@ class ControllerService:
         if not isinstance(params, Mapping):
             raise ValueError("params.update payload.params must be an object.")
         normalized = {str(key): copy.deepcopy(value) for key, value in params.items()}
+        sections = copy.deepcopy(payload.get("parameter_sections"))
+        normalized = self._complete_startup_parameters(normalized, sections)
 
         with self._lock:
+            if self.state == ControllerState.RECOVERY_REQUIRED:
+                raise ValueError("End the interrupted experiment before changing Controller parameters.")
             if self.recovery_status == "error":
                 raise ValueError(self._recovery_failure_reason_locked())
+            if self.state != ControllerState.RUNNING and self._has_unended_started_run_locked():
+                raise ValueError("End the failed experiment before changing Controller parameters; old parameters cannot resume it.")
             if self.state == ControllerState.RUNNING:
-                if version == self.parameter_version and normalized == self.parameters:
+                if (version == self.parameter_version and normalized == self.parameters
+                        and (sections is None or sections == self._configured_parameter_sections)):
                     return {"accepted": True, "duplicate": True, "kind": "params"}
                 raise ValueError("Controller parameters cannot change during an experiment.")
+            self._reset_run_parameters(sections, parameters=normalized)
             self.parameters = normalized
             self.parameter_version = version
+            self._configured_parameter_sections = sections
             self.state = ControllerState.CONFIGURED
 
         return {
@@ -1050,10 +1150,22 @@ class ControllerService:
     def _recovery_failure_reason_locked(self) -> str:
         return f"Controller recovery failed: {self.recovery_error}"
 
+    def _has_unended_started_run_locked(self) -> bool:
+        """An immutable started identity remains owned until explicit End."""
+        if not self.current_run_id or self.stopped_at is not None:
+            return False
+        try:
+            _timestamp_utc(self.started_at, "started_at")
+        except ValueError:
+            return False
+        return True
+
     def _start_experiment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         _positive_int(payload.get("parameter_version"), "parameter_version")
         command = ExperimentStartPayload.from_mapping(payload)
         with self._lock:
+            if self.state == ControllerState.RECOVERY_REQUIRED:
+                raise ValueError("End the interrupted experiment before starting a new run; same-run resume is disabled.")
             if self.recovery_status == "error":
                 raise ValueError(
                     "Preserve the failed checkpoint and create a new experiment in a new "
@@ -1067,9 +1179,13 @@ class ControllerService:
                 )
             if self.current_run_id == command.run_id:
                 if self.state == ControllerState.RUNNING:
+                    if _timestamp_utc(command.started_at, "started_at") != _timestamp_utc(self.started_at, "started_at"):
+                        raise ValueError("experiment.start does not match the running experiment start identity.")
                     return {"accepted": True, "duplicate": True, "kind": "start"}
-                if self.state == ControllerState.STOPPED:
+                if self.state == ControllerState.STOPPED or self.stopped_at is not None:
                     raise ValueError("A stopped experiment cannot be restarted.")
+            if self.state != ControllerState.RUNNING and self._has_unended_started_run_locked():
+                raise ValueError("End the failed experiment before starting a new run; same-run resume is disabled.")
             if self.current_run_id and self.state == ControllerState.RUNNING:
                 raise ValueError("Controller is already running another experiment.")
             run_type = str(
@@ -1083,6 +1199,10 @@ class ControllerService:
             self.current_run_id = command.run_id
             self.started_at = command.started_at
             self.stopped_at = None
+            self.safety_hold = None
+            self.growth_stream_last_valid_at = None
+            self._growth_stream_last_valid_monotonic = None
+            self._growth_stream_arrival_age_s = None
             self.last_frame_seq = None
             self.last_sample = None
             self.last_valid_sample = None
@@ -1097,6 +1217,7 @@ class ControllerService:
             self.gsensor_last_command_requested_at = None
             self.gsensor_initialization_generation = 0
             self.gsensor_alignment_revision = 0
+            self.gsensor_alignment_method = None
             self.gsensor_sample_floor_frame_seq = 0
             self.gsensor_transition_occurred_at = command.started_at
             self.gsensor_last_status_at = None
@@ -1137,6 +1258,7 @@ class ControllerService:
             self.runtime_refresh = {"state": "completed", "event_id": None,
                                     "count": 0, "segment_id": 0}
             self.runtime_configuration_current = None
+            self._reset_run_parameters(self._configured_parameter_sections)
 
             try:
                 self.adapter.configure(copy.deepcopy(self.parameters), command.run_id)
@@ -1170,6 +1292,7 @@ class ControllerService:
                 self.adapter.start()
                 if activation_state is not None:
                     self.adapter.initialize_process_state(activation_state)
+                    self.last_process_state = activation_state.to_dict()
             except Exception as exc:
                 self.adapter_error_count += 1
                 try:
@@ -1198,6 +1321,14 @@ class ControllerService:
                 raise ValueError("Controller has no current experiment.")
             if command.run_id != self.current_run_id:
                 raise ValueError("experiment.stop run_id does not match current experiment.")
+            confirming_recovery = self.state == ControllerState.RECOVERY_REQUIRED
+            ending_failed_run = self.state != ControllerState.RUNNING and self._has_unended_started_run_locked()
+            confirming_interruption = confirming_recovery or ending_failed_run
+            if confirming_interruption:
+                if _timestamp_utc(payload.get("experiment_started_at"), "experiment_started_at") != _timestamp_utc(self.started_at, "started_at"):
+                    raise ValueError("Ending an interrupted experiment requires its matching experiment_started_at identity.")
+                if _timestamp_value(command.stopped_at, "stopped_at") < _timestamp_value(self.started_at, "started_at"):
+                    raise ValueError("experiment.stop cannot predate the interrupted experiment start.")
             if self.state == ControllerState.STOPPED:
                 self._mark_archive_finalized(command.run_id)
                 return {"accepted": True, "duplicate": True, "kind": "stop"}
@@ -1206,11 +1337,22 @@ class ControllerService:
                 self.adapter.stop()
             except Exception as exc:
                 self.adapter_error_count += 1
-                self.state = ControllerState.ERROR
+                self.state = (ControllerState.RECOVERY_REQUIRED if confirming_recovery
+                              else ControllerState.ERROR)
                 raise RuntimeError(f"Controller adapter stop failed: {exc}") from exc
             finally:
-                self.process_adapter.disconnect()
+                try:
+                    self.process_adapter.disconnect()
+                except Exception as exc:
+                    self.process_error_count += 1
+                    if confirming_recovery:
+                        self.state = ControllerState.RECOVERY_REQUIRED
+                    raise RuntimeError(f"Controller process disconnect failed: {exc}") from exc
             self.state = ControllerState.STOPPED
+            if confirming_interruption:
+                self.recovery_status = "restored"
+                self.recovery_error = None
+            previous_stopped_at = self.stopped_at
             self.stopped_at = command.stopped_at
             self._invalidate_growth_input_locked(
                 reason="experiment_stopped",
@@ -1221,6 +1363,26 @@ class ControllerService:
             self.gsensor_enabled = False
             self._next_tick_monotonic = None
             self._control_wakeup.set()
+
+            if confirming_interruption and not self._try_persist_state_locked():
+                # A successful method return is not enough to release the
+                # restart latch. Keep the run blocked if its explicit End
+                # could not be committed. No old params/start replay may
+                # turn this failed End into permission to control again.
+                self.state = ControllerState.RECOVERY_REQUIRED if confirming_recovery else ControllerState.ERROR
+                self.stopped_at = previous_stopped_at
+                self.recovery_status = "confirmation_required" if confirming_recovery else "persistence_error"
+                end_error = self.recovery_error
+                # This was an End-commit failure, not failed checkpoint
+                # recovery. on_message records it as last_error. If saving
+                # the retained hold also fails, persistence sets its own
+                # recovery error again; never leave a stale recovery error
+                # after that save succeeds.
+                self.recovery_error = None
+                raise RuntimeError(
+                    "Ending the interrupted experiment could not be persisted; retry End for this same run."
+                    + (f" {end_error}" if end_error else "")
+                )
 
             self._mark_archive_finalized(command.run_id)
 
@@ -1339,7 +1501,7 @@ class ControllerService:
                 if (type(self.adapter).rollback_runtime_refresh is ControllerAdapter.rollback_runtime_refresh
                         or type(self.adapter).commit_runtime_refresh is ControllerAdapter.commit_runtime_refresh):
                     raise ValueError("This Controller adapter does not support atomic runtime refresh.")
-                if self.runtime_pending is not None:
+                if self.runtime_pending is not None or self.run_parameter_pending is not None:
                     raise ValueError("Another runtime refresh is pending.")
                 after = dict(self.adapter.validate_runtime_update(event.changes))
             except (ValueError, TypeError, NotImplementedError) as exc:
@@ -1368,6 +1530,8 @@ class ControllerService:
 
     def _reject_pending_runtime_locked(self, reason: str) -> None:
         """Produce a terminal result without pretending the staged patch applied."""
+        if self.run_parameter_pending is not None:
+            self._reject_run_parameters(reason)
         if self.runtime_pending is None:
             return
         event_id = self.runtime_pending["command"]["event_id"]
@@ -1394,10 +1558,20 @@ class ControllerService:
 
     def _runtime_persistence_failure_locked(self, event_id: str) -> None:
         reason = "Runtime refresh checkpoint persistence failed; Controller stopped."
+        # A rollback or disconnect failure must not reopen persistence of a
+        # partially committed refresh or replace its primary checkpoint error.
+        self._persistence_halted = True
+        self.state = ControllerState.ERROR
+        self._next_tick_monotonic = None
+        self.last_error = reason
         if self.runtime_pending is not None:
             self._reject_pending_runtime_locked(reason)
         else:
-            self.adapter.rollback_runtime_refresh(event_id)
+            try:
+                self.adapter.rollback_runtime_refresh(event_id)
+            except Exception as exc:
+                reason = f"{reason} Numerical rollback failed: {exc}"
+                logger.exception("Could not roll back refresh after checkpoint failure.")
             entry = self.runtime_events[event_id]
             entry["result"].update(accepted=False, status="rejected", reason=reason,
                                   refreshed=False, configuration=copy.deepcopy(self.runtime_configuration_current))
@@ -1405,14 +1579,19 @@ class ControllerService:
             self.runtime_last_result = copy.deepcopy(entry["result"])
             self.runtime_refresh.update(state="failed", event_id=event_id, reason=reason)
             self._archive_runtime_event(entry["command"], entry["result"])
-        self._persistence_halted = True
-        self.state = ControllerState.ERROR
-        self._next_tick_monotonic = None
         self.last_error = reason
-        self.process_adapter.disconnect()
+        try:
+            self.process_adapter.disconnect()
+        except Exception as exc:
+            self.process_error_count += 1
+            self.last_process_error = f"{reason}; disconnect failed: {exc}"
+            logger.exception("Could not disconnect process after refresh checkpoint failure.")
 
     def _complete_pending_runtime_locked(self, tick: ControllerTickInput,
                                          output: ControllerStepResult | None) -> None:
+        if self.run_parameter_pending is not None:
+            self._complete_run_parameter_tick(tick, output)
+            return
         if self.runtime_pending is None:
             return
         pending = self.runtime_pending
@@ -1467,6 +1646,60 @@ class ControllerService:
             raise RuntimeError(self.last_error)
         self.adapter.commit_runtime_refresh(event_id)
         self._archive_runtime_event(command, result)
+
+    def _enter_safety_hold_locked(self, reason: str, detail: str, *, boundary: str = "notification") -> None:
+        """Latch a fault without advancing or resetting numerical state."""
+        # Close the scheduler before calling rollback or persistence hooks.
+        # Even a failing hook must not leave a running, unobserved experiment.
+        self.state = ControllerState.RECOVERY_REQUIRED
+        self.recovery_status = "confirmation_required"
+        self.recovery_error = None
+        self.safety_hold = {"reason": reason, "detail": detail, "boundary": boundary,
+                            "occurred_at": _utc_timestamp(self._wall_clock())}
+        self.last_error = detail
+        self._next_tick_monotonic = None
+        self._control_wakeup.set()
+        try:
+            # A staged refresh must not be committed by a later message.
+            self._reject_pending_runtime_locked(detail)
+        except Exception as exc:
+            self._persistence_halted = True
+            self.recovery_error = f"Safety hold runtime rejection failed: {exc}"
+            logger.exception("Safety hold could not reject a pending runtime change.")
+        finally:
+            # The rollback helper may set ERROR. A latched safety fault remains
+            # an operator-confirmed hold; keep its actual failure separately.
+            self.state = ControllerState.RECOVERY_REQUIRED
+            self._next_tick_monotonic = None
+        if self._persistence_halted:
+            self.recovery_error = self.recovery_error or str(
+                (self.runtime_last_result or {}).get("reason") or "Checkpoint persistence halted."
+            )
+            self.safety_hold["rollback_error"] = self.recovery_error
+        # A failed save still leaves the in-memory latch closed. The previous
+        # RUNNING checkpoint also becomes a hold on restart, never auto-resumes.
+        try:
+            self._try_persist_state_locked()
+        except Exception as exc:
+            self.recovery_error = f"Safety hold checkpoint failed: {exc}"
+            logger.exception("Safety hold checkpoint raised unexpectedly.")
+
+    def _check_growth_timeout_locked(self, *, now: float | None = None, boundary: str = "watchdog") -> bool:
+        if (self.state != ControllerState.RUNNING or not self._uses_live_growth_locked()
+                or not self.gsensor_desired_enabled
+                or self._growth_stream_last_valid_monotonic is None
+                or self._growth_stream_arrival_age_s is None):
+            return False
+        current = self._monotonic_clock() if now is None else float(now)
+        age = self._growth_stream_arrival_age_s + max(0.0, current - self._growth_stream_last_valid_monotonic)
+        maximum = 2.0 * float(self._active_parameter("dt_G", 15.0))
+        if age <= maximum:
+            return False
+        self._enter_safety_hold_locked("growth_timeout",
+            f"Established live G input expired after {age:.3f} s (limit {maximum:g} s). "
+            "Use End Experiment for this run, then create a new run; fresh data cannot resume it.",
+            boundary=boundary)
+        return True
 
     def _invalidate_growth_input_locked(
         self,
@@ -1537,12 +1770,17 @@ class ControllerService:
                 raise ValueError("GSensor activation revision conflicts with its prior event.")
             if command.event_id == self.gsensor_control_event_id:
                 raise ValueError("A new GSensor activation revision requires a new event_id.")
+            if self._check_growth_timeout_locked():
+                raise ValueError("Live G input already timed out. Use End Experiment; activation cannot release the safety hold.")
 
             self.gsensor_control_revision = command.revision
             self.gsensor_control_event_id = command.event_id
             self.gsensor_last_command_enabled = enabled
             self.gsensor_last_command_requested_at = command.requested_at
             self.gsensor_desired_enabled = enabled
+            self.growth_stream_last_valid_at = None
+            self._growth_stream_last_valid_monotonic = None
+            self._growth_stream_arrival_age_s = None
             # Central's request closes the gate immediately. Enabling still
             # requires a matching GSensor status acknowledgement.
             self.gsensor_enabled = False
@@ -1588,6 +1826,8 @@ class ControllerService:
                 raise ValueError(
                     "growth_rate.status experiment_started_at does not match current experiment."
                 )
+            if (status.parameter_revision or 0) != self.measurement_parameter_revision:
+                raise ValueError("growth_rate.status measurement parameter revision is stale or unexpected.")
             if status.control_revision != self.gsensor_control_revision:
                 raise ValueError("growth_rate.status control revision is stale or unexpected.")
             if self.gsensor_control_revision > 0:
@@ -1617,6 +1857,22 @@ class ControllerService:
             ):
                 raise ValueError("growth_rate.status processing context regressed.")
 
+            if status.status.value == "error" and self._uses_live_growth_locked():
+                if self.gsensor_last_status_at is not None and status_time <= _timestamp_value(
+                        self.gsensor_last_status_at, "saved GSensor status occurred_at"):
+                    raise ValueError("Terminal GSensor status must be newer than the last accepted status.")
+                if status.frame_seq < max(self.last_frame_seq or 0, self.gsensor_sample_floor_frame_seq):
+                    raise ValueError("Terminal GSensor status frame is older than the accepted stream.")
+                if status_time > self._wall_clock() + 1.0:
+                    raise ValueError("Terminal GSensor status is future-dated.")
+                self.gsensor_last_status_at = status.occurred_at
+                self._enter_safety_hold_locked("gsensor_error",
+                    f"GSensor reported a terminal error: {status.error}. "
+                    "Use End Experiment for this run, then create a new run.")
+                return {"accepted": True, "kind": "growth_status", "safety_hold": "gsensor_error"}
+            if self._check_growth_timeout_locked():
+                raise ValueError("Established live G stream timed out before this status. Use End Experiment.")
+
             context_changed = (
                 status.initialization_generation
                 != self.gsensor_initialization_generation
@@ -1624,6 +1880,8 @@ class ControllerService:
             )
             self.gsensor_initialization_generation = status.initialization_generation
             self.gsensor_alignment_revision = status.alignment_revision
+            if status.alignment_method is not None:
+                self.gsensor_alignment_method = status.alignment_method
             self.gsensor_last_status_at = status.occurred_at
             self.gsensor_enabled = bool(status.enabled)
             if context_changed or not status.enabled or not status.measurement_ready:
@@ -1686,6 +1944,11 @@ class ControllerService:
                 raise ValueError(
                     "growth_rate.sample experiment_started_at does not match current experiment."
                 )
+            if (sample.parameter_revision or 0) != self.measurement_parameter_revision:
+                raise ValueError("growth_rate.sample measurement parameter revision is stale or unexpected.")
+            if self.measurement_parameter_revision > 0 and not math.isclose(
+                    float(sample.dt_s), float(self._active_parameter("dt_G", 15.0)), rel_tol=0, abs_tol=1e-9):
+                raise ValueError("growth_rate.sample sampling interval disagrees with its parameter revision.")
             if not self.gsensor_desired_enabled or not self.gsensor_enabled:
                 raise ValueError("growth_rate.sample arrived while GSensor is disabled or unacknowledged.")
             if sample.control_revision != self.gsensor_control_revision:
@@ -1719,7 +1982,7 @@ class ControllerService:
             ):
                 raise ValueError("growth_rate.sample predates the active transition barrier.")
             arrival_age = max(0.0, self._wall_clock() - processed_time)
-            if arrival_age > 2.0 * float(self.parameters.get("dt_G", 15.0)):
+            if arrival_age > 2.0 * float(self._active_parameter("dt_G", 15.0)):
                 raise ValueError("growth_rate.sample was already stale when received.")
             if self.last_frame_seq is not None and sample.frame_seq <= self.last_frame_seq:
                 self.duplicate_sample_count += 1
@@ -1729,6 +1992,10 @@ class ControllerService:
                     "kind": "sample",
                     "frame_seq": sample.frame_seq,
                 }
+            # A late fresh frame must not erase a gap that already exceeded the
+            # watchdog limit before the next ordinary control deadline.
+            if self._check_growth_timeout_locked():
+                raise ValueError("Established live G stream timed out before this sample. Use End Experiment.")
             if self.last_frame_seq is not None and sample.frame_seq > self.last_frame_seq + 1:
                 self.missing_frame_count += sample.frame_seq - self.last_frame_seq - 1
 
@@ -1752,6 +2019,9 @@ class ControllerService:
             self.last_valid_sample = sample
             self.last_valid_sample_received_monotonic = self._monotonic_clock()
             self.last_valid_sample_arrival_age_s = arrival_age
+            self.growth_stream_last_valid_at = sample.processed_at
+            self._growth_stream_last_valid_monotonic = self.last_valid_sample_received_monotonic
+            self._growth_stream_arrival_age_s = arrival_age
             self.gsensor_gate_reason = "ready"
             self.valid_sample_count += 1
 
@@ -1803,7 +2073,7 @@ class ControllerService:
             0.0,
             now_value - self.last_valid_sample_received_monotonic,
         )
-        maximum_age = 2.0 * float(self.parameters.get("dt_G", 15.0))
+        maximum_age = 2.0 * float(self._active_parameter("dt_G", 15.0))
         if age > maximum_age:
             return False, "stale_growth_sample", age
         return True, "ready", age
@@ -1814,10 +2084,12 @@ class ControllerService:
         with self._lock:
             if self.state != ControllerState.RUNNING:
                 return {"executed": False, "reason": "not_running"}
+            if self._check_growth_timeout_locked(now=now):
+                return {"executed": False, "reason": "growth_timeout"}
             self._last_committed_diagnostics = None
             self._last_diagnostics_capture_error = None
             now_value = self._monotonic_clock() if now is None else float(now)
-            dt = float(self.parameters.get("dt", 5.0))
+            dt = float(self._active_parameter("dt", 5.0))
             if not math.isfinite(dt) or dt <= 0:
                 self._reject_pending_runtime_locked("Controller parameter dt is invalid.")
                 self.state = ControllerState.ERROR
@@ -1826,7 +2098,8 @@ class ControllerService:
                 raise RuntimeError("Controller parameter dt must be finite and positive.")
             self.control_tick_count += 1
             tick_seq = self.control_tick_count
-            elapsed = tick_seq * dt
+            self._run_elapsed_s += dt
+            elapsed = self._run_elapsed_s
             sample = self.last_valid_sample
             growth_available, growth_reason, age = self._growth_input_availability_locked(
                 now=now_value
@@ -1839,47 +2112,54 @@ class ControllerService:
                 sample = None
                 age = None
 
-            process_state: ProcessState | None = None
-            if self.settings.process_enabled:
-                try:
-                    process_state = self.process_adapter.read_state()
-                except Exception as exc:
-                    self.process_error_count += 1
-                    self.control_tick_error_count += 1
-                    self.last_process_error = str(exc)
-                    self._reject_pending_runtime_locked(f"Fresh process measurement failed: {exc}")
-                    self.state = ControllerState.ERROR
-                    self._next_tick_monotonic = None
-                    self.process_adapter.disconnect()
-                    self._try_persist_state_locked()
-                    raise RuntimeError(f"Controller process read failed: {exc}") from exc
-                if not isinstance(process_state, ProcessState):
-                    self._reject_pending_runtime_locked("Fresh process measurement is invalid.")
-                    self.state = ControllerState.ERROR
-                    self._next_tick_monotonic = None
-                    self._try_persist_state_locked()
-                    raise RuntimeError("Fresh process measurement must be a ProcessState.")
-                self.last_process_state = process_state.to_dict()
-                self.last_process_error = None
-
+            # Allocate an auditable attempt before process I/O. A failed read
+            # still owns this sequence; it must not leave a missing row below
+            # the final producer watermark or look like a successful cycle.
             tick = ControllerTickInput(
                 tick_seq=tick_seq,
                 controller_dt_s=dt,
                 elapsed_s=elapsed,
                 growth_sample=sample,
                 growth_sample_age_s=age,
-                process_state=process_state,
                 runtime_update=(
                     {"event_id": self.runtime_pending["command"]["event_id"],
                      "changes": copy.deepcopy(self.runtime_pending["command"]["changes"])}
-                    if self.runtime_pending is not None else None
+                    if self.runtime_pending is not None else self._parameter_tick_patch()
                 ),
+                control_hold_reason=("parameter_confirmation" if self._parameter_confirmation_holds_control() else None),
             )
+            process_state: ProcessState | None = None
+            if self.settings.process_enabled:
+                try:
+                    candidate = self.process_adapter.read_state()
+                    if not isinstance(candidate, ProcessState):
+                        raise TypeError("Fresh process measurement must be a ProcessState.")
+                    candidate.__post_init__()
+                    current_process_state = candidate.to_dict()
+                except Exception as exc:
+                    self.process_error_count += 1
+                    self.control_tick_error_count += 1
+                    self.last_process_error = str(exc)
+                    error = f"Controller process read failed: {exc}"
+                    self._record_failed_tick_locked(tick, error)
+                    raise RuntimeError(error) from exc
+                process_state = candidate
+                self.last_process_state = current_process_state
+                self.last_process_error = None
+                tick = replace(tick, process_state=process_state)
+            tick = self._revalidate_prepared_parameters(tick, process_state)
+            if self._check_growth_timeout_locked(boundary="after_process_read"):
+                return self._record_growth_abort_locked(tick, process_state=process_state,
+                                                        step_executed=False)
             try:
-                fits_before = (self.adapter.adaptation_status() or {}).get("fit_count")
+                fit_snapshot_before, _ = self._adaptation_snapshot_locked()
+                fits_before = (fit_snapshot_before or {}).get("fit_count")
                 output = self.adapter.step(tick)
-                fits_after = (self.adapter.adaptation_status() or {}).get("fit_count")
-                if fits_before is not None and fits_after is not None and fits_after > fits_before:
+                fit_snapshot_after, _ = self._adaptation_snapshot_locked()
+                fits_after = (fit_snapshot_after or {}).get("fit_count")
+                if (isinstance(fits_before, int) and not isinstance(fits_before, bool)
+                        and isinstance(fits_after, int) and not isinstance(fits_after, bool)
+                        and fits_after > fits_before):
                     self.last_fit_success_at = utc_ts()
                 if output is not None and not isinstance(output, ControllerStepResult):
                     raise TypeError(
@@ -1888,28 +2168,31 @@ class ControllerService:
             except Exception as exc:
                 self.adapter_error_count += 1
                 self.control_tick_error_count += 1
-                self._reject_pending_runtime_locked(f"Controller refresh/control tick failed: {exc}")
-                self.state = ControllerState.ERROR
-                self._next_tick_monotonic = None
-                self.process_adapter.disconnect()
-                self._try_persist_state_locked()
-                raise RuntimeError(f"Controller adapter step failed: {exc}") from exc
+                error = f"Controller adapter step failed: {exc}"
+                self._record_failed_tick_locked(tick, error, process_state=process_state)
+                raise RuntimeError(error) from exc
+
+            if self._check_growth_timeout_locked(boundary="after_algorithm_step"):
+                return self._record_growth_abort_locked(tick, process_state=process_state)
 
             output_status: dict[str, Any] | None = None
             if output is not None:
                 process_write: ProcessWriteResult | None = None
-                process_write_attempted = bool(
+                process_write_requested = bool(
                     self.settings.process_enabled
                     and self.settings.process_write_enabled
                     and output.valid
                     and output.T_j_set is not None
                 )
-                process_write_error: str | None = None
-                if process_write_attempted:
+                process_write_attempted = False
+                if process_write_requested:
                     try:
                         self.process_adapter.set_command_context(
                             self.current_run_id, self.started_at, tick_seq
                         )
+                        if self._check_growth_timeout_locked(boundary="before_process_write"):
+                            return self._record_growth_abort_locked(tick, process_state=process_state)
+                        process_write_attempted = True
                         process_write = self.process_adapter.write_jacket_setpoint(
                             output.T_j_set
                         )
@@ -1917,38 +2200,41 @@ class ControllerService:
                         self.process_error_count += 1
                         self.control_tick_error_count += 1
                         self.last_process_error = str(exc)
-                        process_write_error = str(exc)
-                        self._reject_pending_runtime_locked(f"Controller process write failed: {exc}")
-                        self.state = ControllerState.ERROR
-                        self._next_tick_monotonic = None
-                        self.process_adapter.disconnect()
+                        error = f"Controller process write failed: {exc}"
+                        self._record_failed_tick_locked(
+                            tick, error, process_state=process_state, process_write=process_write,
+                            process_write_attempted=process_write_attempted,
+                            process_write_error=str(exc) if process_write_attempted else None,
+                        )
+                        raise RuntimeError(error) from exc
                     else:
                         self.last_process_write = process_write.to_dict()
                         self.last_process_error = None
-                if process_write_error is None:
-                    try:
-                        self._complete_pending_runtime_locked(tick, output)
-                    except Exception as exc:
-                        self._reject_pending_runtime_locked(f"Controller refresh failed: {exc}")
-                        self.state = ControllerState.ERROR
-                        self._next_tick_monotonic = None
-                        self.process_adapter.disconnect()
-                        self._try_persist_state_locked()
-                        raise
+                if self._check_growth_timeout_locked(boundary="after_process_write"):
+                    # A command already sent cannot be undone or reported as
+                    # not attempted. Keep its actual receipt, but do not commit
+                    # the aborted control/refresh as a successful cycle.
+                    return self._record_growth_abort_locked(tick,
+                        process_state=process_state, process_write=process_write,
+                        process_write_attempted=process_write_attempted)
+                try:
+                    self._complete_pending_runtime_locked(tick, output)
+                except Exception as exc:
+                    self.control_tick_error_count += 1
+                    error = f"Controller refresh failed: {exc}"
+                    self._record_failed_tick_locked(
+                        tick, error, process_state=process_state, process_write=process_write,
+                        process_write_attempted=process_write_attempted,
+                    )
+                    raise RuntimeError(error) from exc
                 output_status = self._record_control_output_locked(
                     tick,
-                    output if process_write_error is None else ControllerStepResult(
-                        valid=False, error=f"Controller process write failed: {process_write_error}"
-                    ),
+                    output,
                     process_state=process_state,
                     process_write=process_write,
                     process_write_attempted=process_write_attempted,
-                    process_write_error=process_write_error,
                 )
-                if process_write_error is not None:
-                    self._try_persist_state_locked()
-                    raise RuntimeError(f"Controller process write failed: {process_write_error}")
-            elif self.runtime_pending is not None:
+            elif self.runtime_pending is not None or self._parameter_tick_patch() is not None:
                 self._reject_pending_runtime_locked("Controller refresh produced no output.")
                 self.state = ControllerState.ERROR
                 self._next_tick_monotonic = None
@@ -1956,7 +2242,8 @@ class ControllerService:
                 raise RuntimeError("Controller refresh produced no output.")
             if self.state == ControllerState.RUNNING:
                 previous_deadline = self._next_tick_monotonic or now_value
-                self._next_tick_monotonic = max(previous_deadline + dt, now_value + dt)
+                next_dt = float(self._active_parameter("dt", 5.0))
+                self._next_tick_monotonic = max(previous_deadline + next_dt, now_value + next_dt)
             self._try_persist_state_locked()
             result = {
                 "executed": True,
@@ -1970,6 +2257,59 @@ class ControllerService:
             if output_status is not None:
                 result.update(output_status)
             return result
+
+    def _record_failed_tick_locked(
+        self, tick: ControllerTickInput, error: str, *, process_state: ProcessState | None = None,
+        process_write: ProcessWriteResult | None = None, process_write_attempted: bool = False,
+        process_write_error: str | None = None,
+    ) -> None:
+        """Retain a failed cycle and its actual I/O, without filter-success proof."""
+        self.state = ControllerState.ERROR
+        self._next_tick_monotonic = None
+        self.last_error = error
+        try:
+            self._reject_pending_runtime_locked(error)
+        except Exception:
+            self._persistence_halted = True
+            logger.exception("Could not reject runtime change after failed Controller tick.")
+        try:
+            self.process_adapter.disconnect()
+        except Exception as exc:
+            self.process_error_count += 1
+            self.last_process_error = f"{self.last_process_error or error}; disconnect failed: {exc}"
+            logger.exception("Could not disconnect process after failed Controller tick.")
+        try:
+            self._record_control_output_locked(
+                tick, ControllerStepResult(valid=False, error=error), process_state=process_state,
+                process_write=process_write, process_write_attempted=process_write_attempted,
+                process_write_error=process_write_error,
+            )
+        finally:
+            try:
+                self._try_persist_state_locked()
+            except Exception as exc:
+                self.recovery_status = "persistence_error"
+                self.recovery_error = str(exc)
+                logger.exception("Could not persist failed Controller tick.")
+
+    def _record_growth_abort_locked(
+        self, tick: ControllerTickInput, *, process_state: ProcessState | None,
+        step_executed: bool = True, process_write: ProcessWriteResult | None = None,
+        process_write_attempted: bool = False,
+    ) -> dict[str, Any]:
+        """Keep every attempted tick auditable without fabricating control success."""
+        boundary = (self.safety_hold or {}).get("boundary", "unknown")
+        error = f"growth_timeout: cycle aborted at {boundary}"
+        if process_write_attempted:
+            error += "; actual process-write attempt and receipt retained"
+        outcome = self._record_control_output_locked(
+            tick, ControllerStepResult(valid=False, error=error),
+            process_state=process_state, process_write=process_write,
+            process_write_attempted=process_write_attempted,
+        )
+        self._try_persist_state_locked()
+        return {"executed": step_executed, "reason": "growth_timeout", "tick_seq": tick.tick_seq,
+                "step_executed": step_executed, **outcome}
 
     def _record_control_output_locked(
         self,
@@ -2015,6 +2355,7 @@ class ControllerService:
                 else _configured_control_target(self.parameters)
             ),
             runtime_revision=self.runtime_revision,
+            measurement_parameter_revision=self.measurement_parameter_revision,
             diagnostics=diagnostics,
             diagnostics_capture_error=diagnostic_error,
         )
@@ -2048,6 +2389,15 @@ class ControllerService:
         self.control_output_count += 1
         if not output.valid:
             self.invalid_control_output_count += 1
+        # External acceptance observes a completed cycle through /api/status.
+        # Keep its fit status and diagnostics aligned with that cycle, rather
+        # than combining an old output with a later scheduler/fit status.
+        # This is observational and must never turn a successful control tick
+        # into a failure if an optional adapter cannot supply diagnostics.
+        adaptation_fitting = None
+        adaptation_capture_error = None
+        if output.valid and process_write_error is None:
+            adaptation_fitting, adaptation_capture_error = self._adaptation_snapshot_locked()
         self.last_control_output = {
             "run_id": self.current_run_id,
             "tick_seq": tick.tick_seq,
@@ -2062,7 +2412,12 @@ class ControllerService:
             "computed_at": computed_at,
             "runtime_configuration": copy.deepcopy(self.runtime_configuration_current),
             "runtime_revision": self.runtime_revision,
+            "measurement_parameter_revision": self.measurement_parameter_revision,
             "runtime_refresh": copy.deepcopy(self.runtime_refresh),
+            "adaptation_fitting": adaptation_fitting,
+            "adaptation_capture_error": adaptation_capture_error,
+            "diagnostics": diagnostics.to_dict() if diagnostics is not None else None,
+            "diagnostics_capture_error": diagnostic_error,
             "result": output.to_dict(),
             "process_state": (
                 process_state.to_dict() if process_state is not None else None
@@ -2085,6 +2440,20 @@ class ControllerService:
                 process_write is not None if process_write_attempted else None
             ),
         }
+
+    def _adaptation_snapshot_locked(self) -> tuple[dict[str, Any] | None, str | None]:
+        """Optional status observation cannot change a control or HTTP result."""
+        try:
+            snapshot = self.adapter.adaptation_status()
+            if snapshot is not None and not isinstance(snapshot, Mapping):
+                raise TypeError("adaptation_status must return a mapping or None")
+            captured = copy.deepcopy(dict(snapshot)) if snapshot is not None else None
+            # Optional malformed observations must not break status JSON or
+            # inject NaN/Inf into a committed-cycle acceptance record.
+            json.dumps(captured, allow_nan=False)
+            return captured, None
+        except Exception as exc:
+            return None, type(exc).__name__
 
     def _integration_status_locked(self) -> dict[str, dict[str, object]]:
         integrations = self.settings.integration_status()
@@ -2146,6 +2515,9 @@ class ControllerService:
                 and not growth_available
                 else None
             )
+            if self._parameter_confirmation_holds_control():
+                control_hold_reason = "parameter_confirmation"
+            adaptation_fitting, adaptation_capture_error = self._adaptation_snapshot_locked()
             return {
                 "role": ROLE,
                 "status": ControllerState.ERROR.value if recovery_failed else self.state.value,
@@ -2160,7 +2532,7 @@ class ControllerService:
                     "revision": self.runtime_revision,
                     "configuration": copy.deepcopy(self.runtime_configuration_current),
                     "last_result": copy.deepcopy(self.runtime_last_result),
-                    "pending": copy.deepcopy(self.runtime_pending),
+                    "pending": copy.deepcopy(self.runtime_pending or self.run_parameter_pending),
                     "refresh": copy.deepcopy(self.runtime_refresh),
                     "recent_events": [
                         copy.deepcopy(entry["result"])
@@ -2168,6 +2540,7 @@ class ControllerService:
                     ],
                     "history_error": self.runtime_history_error,
                 },
+                "run_parameters": self._run_parameter_status(),
                 "parameters": copy.deepcopy(self.parameters),
                 "started_at": self.started_at,
                 "stopped_at": self.stopped_at,
@@ -2187,23 +2560,28 @@ class ControllerService:
                     "enabled": self.gsensor_enabled,
                     "measurement_ready": self.gsensor_measurement_ready,
                     "control_revision": self.gsensor_control_revision,
+                    "parameter_revision": self.measurement_parameter_revision,
                     "control_event_id": self.gsensor_control_event_id,
                     "last_command_enabled": self.gsensor_last_command_enabled,
                     "initialization_generation": self.gsensor_initialization_generation,
                     "alignment_revision": self.gsensor_alignment_revision,
+                    "alignment_method": self.gsensor_alignment_method,
                     "sample_floor_frame_seq": self.gsensor_sample_floor_frame_seq,
                     "transition_occurred_at": self.gsensor_transition_occurred_at,
                     "last_status_at": self.gsensor_last_status_at,
+                    "stream_last_valid_at": self.growth_stream_last_valid_at,
                     "sample_age_s": current_growth_age,
                 },
                 "scheduler": {
+                    "deadline_set": self._next_tick_monotonic is not None,
                     "thread_alive": bool(
                         self._control_thread and self._control_thread.is_alive()
                     ),
                     "tick_count": self.control_tick_count,
                     "tick_error_count": self.control_tick_error_count,
-                    "controller_dt_s": float(self.parameters.get("dt", 5.0)),
-                    "growth_dt_s": float(self.parameters.get("dt_G", 15.0)),
+                    "controller_dt_s": float(self._active_parameter("dt", 5.0)),
+                    "growth_dt_s": float(self._active_parameter("dt_G", 15.0)),
+                    "elapsed_s": self._run_elapsed_s,
                     "last_growth_sample_age_s": self.last_growth_sample_age_s,
                 },
                 "sample_counts": {
@@ -2218,8 +2596,9 @@ class ControllerService:
                     "last": copy.deepcopy(self.last_seed_event),
                 },
                 "adaptation": {
-                    "fitting": ({**copy.deepcopy(self.adapter.adaptation_status()), "last_success_at": self.last_fit_success_at}
-                                if self.adapter.adaptation_status() is not None else None),
+                    "fitting": ({**adaptation_fitting, "last_success_at": self.last_fit_success_at}
+                                if adaptation_fitting is not None else None),
+                    "capture_error": adaptation_capture_error,
                     "enabled": self.adaptation_enabled,
                     "active": (
                         self.state == ControllerState.RUNNING
@@ -2263,6 +2642,11 @@ class ControllerService:
                 "recovery": {
                     "status": self.recovery_status,
                     "error": self.recovery_error,
+                    "requires_confirmation": self.state == ControllerState.RECOVERY_REQUIRED,
+                    "requires_new_run": self.state == ControllerState.RECOVERY_REQUIRED,
+                    "hold_reason": (self.safety_hold or {}).get("reason"),
+                    "hold_detail": (self.safety_hold or {}).get("detail"),
+                    "hold_occurred_at": (self.safety_hold or {}).get("occurred_at"),
                     "state_file": str(self.state_path) if self.state_path else None,
                 },
                 "control_output_enabled": self.last_control_output is not None,
@@ -2300,6 +2684,10 @@ def _positive_int(value: Any, name: str) -> int:
 
 
 def _timestamp_value(value: Any, name: str) -> float:
+    return _timestamp_utc(value, name).timestamp()
+
+
+def _timestamp_utc(value: Any, name: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a timestamp string.")
     text = value.strip()
@@ -2311,7 +2699,7 @@ def _timestamp_value(value: Any, name: str) -> float:
         raise ValueError(f"{name} must be an ISO-8601 timestamp.") from exc
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include a timezone.")
-    return parsed.astimezone(timezone.utc).timestamp()
+    return parsed.astimezone(timezone.utc)
 
 
 def _utc_timestamp(epoch_seconds: float) -> str:

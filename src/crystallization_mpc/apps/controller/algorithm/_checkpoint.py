@@ -78,11 +78,66 @@ def validate_checkpoint(
     params = _mapping(state["params"], "params")
     for key, template in configured.items():
         _parameter_shape(params[key], template, f"params.{key}")
-    # These fields may legitimately change through runtime control or fitting.
+    # Reconstruct operator changes from the immutable startup snapshot.  New
+    # online fields are not blanket-whitelisted: each must be justified by a
+    # validated event in the numerical checkpoint's ledger.
+    from crystallization_mpc.messaging.parameter_policy import parameter_defaults, parameter_policies, validate_parameter_changes
+    from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
+    from .parameters import merge_runtime_parameters
+    expected = dict(configured)
+    ledger = state.get("runtime_parameter_updates", [])
+    if not isinstance(ledger, list):
+        raise ValueError("Checkpoint parameter ledger must be an array.")
+    event_ids = set()
+    previous_tick = 0
+    previous_event_time = -1.0
+    defaults = parameter_defaults()
+    policies = parameter_policies()
+    for event in ledger:
+        event = _mapping(event, "parameter update")
+        event_id = event["event_id"]
+        if not isinstance(event_id, str) or not event_id.strip() or event_id in event_ids:
+            raise ValueError("Checkpoint parameter event identity is invalid.")
+        event_ids.add(event_id)
+        tick = _integer(event["effective_tick"], "parameter effective tick")
+        if not previous_tick < tick <= frame:
+            raise ValueError("Checkpoint parameter event order is invalid.")
+        previous_tick = tick
+        event_time = _number(event["elapsed_s"], "parameter elapsed time", minimum=0)
+        if not previous_event_time < event_time <= elapsed:
+            raise ValueError("Checkpoint parameter event time is invalid.")
+        previous_event_time = event_time
+        _boolean(event["refreshed"], "parameter refreshed")
+        current = {section: {key: expected.get(key.removeprefix("params."), default)
+                             for key, default in defaults[section].items()}
+                   for section in ("shared", "controller")}
+        patch = validate_parameter_changes(_mapping(event["parameter_changes"], "parameter changes"), current)
+        actual_patch = validate_parameter_changes(event.get("actual_parameter_changes", patch))
+        if any(key not in patch.get(section, {}) or value != patch[section][key]
+               for section, values in actual_patch.items() for key, value in values.items()):
+            raise ValueError("Checkpoint actual parameter changes contradict the submitted patch.")
+        legacy = _mapping(event.get("changes", {}), "parameter legacy changes")
+        if legacy:
+            validate_runtime_changes(legacy)
+        measurement_changed = event.get("measurement_changed", False)
+        _boolean(measurement_changed, "measurement_changed")
+        effects = {policies[section][key]["effect"] for section, values in actual_patch.items() for key in values}
+        should_refresh = bool(legacy or measurement_changed or
+            effects & {"controller_refresh", "measurement_segment", "reserved_filter"} or
+            ("simulation_only" in effects and configured["run_type"] == "simulation"))
+        if event["refreshed"] != should_refresh or not (patch or legacy or measurement_changed):
+            raise ValueError("Checkpoint parameter refresh receipt contradicts its changes.")
+        canonical = {key.removeprefix("params."): value for section, values in patch.items()
+                     if section != "gsensor" for key, value in values.items()}
+        expected = merge_runtime_parameters(expected, canonical)
+    # Legacy target changes and fitted kinetics retain their established checks.
     mutable = {"target", "target_set", "sigma_set", "G_set", "n", "k_0", "E_A",
                "K_P_T", "K_I_T", "dT_dt_min", "dT_dt_max", "t_lag_threshold_perc"}
-    for key, initial in configured.items():
-        if key not in mutable and params[key] != initial:
+    if set(params) != set(expected):
+        raise ValueError("Checkpoint parameter keys do not match startup plus confirmed changes.")
+    for key, initial in expected.items():
+        _parameter_shape(params[key], initial, f"params.{key}")
+        if key not in mutable and params[key] != expected[key]:
             raise ValueError(f"Checkpoint immutable parameter {key} does not match.")
     if params["target"] not in {"sigma", "G"}:
         raise ValueError("Checkpoint control target is invalid.")
@@ -129,10 +184,66 @@ def validate_checkpoint(
             raise ValueError("Checkpoint process temperature must be positive.")
     seeds = _vector(simulation["size_list_seed"], "size_list_seed", minimum=0)
     sizes = _vector(simulation["size_list"], "size_list", minimum=0)
-    if not seeds or any(value == 0 for value in seeds) or len(seeds) != len(sizes):
+    if not seeds or not sizes or any(value == 0 for value in seeds):
         raise ValueError("Checkpoint crystal size arrays are incompatible.")
     for key in ("pending_seed", "mark_seed"):
         _boolean(simulation[key], key)
+    population = simulation.get("seed_population")
+    if population is None:
+        # Historical archives have exactly one seed population.  Do not turn
+        # backwards compatibility into blanket permission for arbitrary sizes.
+        if len(seeds) != len(sizes):
+            raise ValueError("Legacy checkpoint crystal size arrays differ.")
+    else:
+        population = _mapping(population, "seed_population")
+        initial_count = _integer(population["initial_count"], "initial seed count")
+        _boolean(population["base_seeded"], "base_seeded")
+        additions = population["additions"]
+        if initial_count == 0 or not isinstance(additions, list):
+            raise ValueError("Checkpoint seed population metadata is invalid.")
+        seed_keys = {"m_seed", "d_mean_seed", "d_std_seed", "rho_solute"}
+        seed_params = dict(configured)
+
+        def count_from_parameters() -> int:
+            mean, std = float(seed_params["d_mean_seed"]), float(seed_params["d_std_seed"])
+            volume = math.pi / 6 * (mean ** 3 + 3 * mean * std ** 2)
+            return max(1, int(round(float(seed_params["m_seed"]) / (float(seed_params["rho_solute"]) * volume))))
+
+        seed_updates = []
+        for event in ledger:
+            changed = {key.removeprefix("params."): value
+                       for key, value in event.get("actual_parameter_changes", event["parameter_changes"]).get("controller", {}).items()
+                       if key.removeprefix("params.") in seed_keys}
+            if changed:
+                seed_updates.append((event["effective_tick"], changed))
+        update_position, previous_seed_tick = 0, 0
+        current_seed_count = initial_count
+        active_count = initial_count if population["base_seeded"] else 0
+        for addition in additions:
+            addition = _mapping(addition, "seed addition")
+            seed_tick = _integer(addition["tick_seq"], "seed tick")
+            if not previous_seed_tick < seed_tick <= frame:
+                raise ValueError("Checkpoint seed addition order is invalid.")
+            previous_seed_tick = seed_tick
+            while update_position < len(seed_updates) and seed_updates[update_position][0] < seed_tick:
+                seed_params.update(seed_updates[update_position][1])
+                current_seed_count = count_from_parameters()
+                update_position += 1
+            if _integer(addition["added_count"], "added seed count") != current_seed_count:
+                raise ValueError("Checkpoint seed addition count lacks matching configuration.")
+            active_count += current_seed_count
+            if _integer(addition["total_count"], "active seed count") != active_count:
+                raise ValueError("Checkpoint existing crystal population was replaced.")
+        while update_position < len(seed_updates):
+            seed_params.update(seed_updates[update_position][1])
+            current_seed_count = count_from_parameters()
+            update_position += 1
+        if len(seeds) != current_seed_count:
+            raise ValueError("Checkpoint future seed population has the wrong count.")
+        if len(sizes) != (active_count if additions or population["base_seeded"] else initial_count):
+            raise ValueError("Checkpoint active crystal population has the wrong count.")
+        if configured["run_type"] == "simulation" and simulation["mark_seed"] != bool(additions or population["base_seeded"]):
+            raise ValueError("Checkpoint seed flag contradicts actual additions.")
 
     adaptation = _mapping(state["adaptation"], "adaptation")
     _boolean(adaptation["enabled"], "adaptation.enabled")
@@ -163,10 +274,19 @@ def validate_checkpoint(
         if event_time > elapsed or not isinstance(event["reason"], str) or not event["reason"]:
             raise ValueError("Checkpoint refresh event metadata is invalid.")
         from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
-        if not validate_runtime_changes(_mapping(event["changes"], "refresh.changes")):
+        legacy = _mapping(event["changes"], "refresh.changes")
+        if legacy:
+            validate_runtime_changes(legacy)
+        raw_changes = validate_parameter_changes(event.get("parameter_changes", {}))
+        if not legacy and not raw_changes and event["reason"] != "measurement_changed":
             raise ValueError("Checkpoint refresh changes are empty.")
         if history_start >= length or history["t"][history_start] != event_time:
             raise ValueError("Checkpoint refresh boundary is not recorded in history.")
+        completed = [event for event in ledger if event["refreshed"]]
+        if completed:
+            last = completed[-1]
+            if any(last[key] != event[key] for key in ("event_id", "effective_tick", "elapsed_s", "changes")) or last.get("actual_parameter_changes", last["parameter_changes"]) != event.get("parameter_changes", {}):
+                raise ValueError("Checkpoint latest parameter receipt disagrees with filter refresh.")
 
     segment = _mapping(adaptation["fitting_segment"], "adaptation.fitting_segment")
     if set(segment) != {"G", "sigma", "T", "ticks"}:
@@ -182,9 +302,34 @@ def validate_checkpoint(
         raise ValueError("Checkpoint fitting segment lengths are inconsistent.")
     if count > len(ticks):
         raise ValueError("Checkpoint adaptation count exceeds its segment/window.")
-    history_by_time = {time: i for i, time in enumerate(history["t"])}
+    recorded_ticks = state.get("history_tick_seq")
+    if recorded_ticks is None:
+        # Archives without an explicit tick map predate online dt changes.
+        recorded_ticks = [int(round(value / float(configured["dt"]))) for value in history["t"]]
+    if (not isinstance(recorded_ticks, list) or len(recorded_ticks) != length
+            or any(_integer(tick, "history tick") < 1 or tick > frame for tick in recorded_ticks)
+            or any(b <= a for a, b in zip(recorded_ticks, recorded_ticks[1:]))):
+        raise ValueError("Checkpoint history tick identities are inconsistent.")
+    history_by_tick = {tick: index for index, tick in enumerate(recorded_ticks)}
+    for event in ledger:
+        index = history_by_tick.get(event["effective_tick"])
+        if index is None or history["t"][index] != event["elapsed_s"]:
+            raise ValueError("Checkpoint parameter receipt is not a completed recorded tick.")
+    # The interval ending on an update tick still belongs to the old period.
+    # A new period is used only for subsequent intervals; this validates the
+    # historical axis without rewriting it as tick * the latest dt.
+    dt_updates = {event["effective_tick"]: event["parameter_changes"].get("shared", {}).get("dt")
+                  for event in ledger if "dt" in event["parameter_changes"].get("shared", {})}
+    period, accumulated = float(configured["dt"]), 0.0
+    for tick in range(1, frame + 1):
+        accumulated += period
+        if tick in history_by_tick and not math.isclose(history["t"][history_by_tick[tick]], accumulated,
+                                                       rel_tol=1e-10, abs_tol=1e-8):
+            raise ValueError("Checkpoint time axis disagrees with its period-change ledger.")
+        if tick in dt_updates:
+            period = float(dt_updates[tick])
     for position, tick in enumerate(ticks):
-        index = history_by_time.get(tick * float(params["dt"]))
+        index = history_by_tick.get(tick)
         if index is None or not history["to_adapt"][index]:
             raise ValueError("Checkpoint fitting sample has no eligible recorded tick.")
         for key, historical in (("G", "G_measure_KF"), ("sigma", "sigma"), ("T", "T")):
@@ -199,7 +344,7 @@ def validate_checkpoint(
         if not ticks or _integer(last_tick, "fitting_last_tick") != ticks[-1] or not 1 <= len(fitting) <= 3:
             raise ValueError("Checkpoint fitting derivative boundary is inconsistent.")
         for offset, value in enumerate(reversed(fitting)):
-            index = history_by_time.get((last_tick - offset) * float(params["dt"]))
+            index = history_by_tick.get(last_tick - offset)
             if index is None or not history["to_adapt"][index] or value != history["G_measure"][index]:
                 raise ValueError("Checkpoint fitting derivative history crosses a gap.")
     for key in ("pause_reason", "control_hold_reason"):

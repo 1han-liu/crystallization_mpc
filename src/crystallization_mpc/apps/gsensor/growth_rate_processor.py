@@ -213,6 +213,27 @@ class GrowthRateProcessor:
         self.invalid_frame_count = inherited_invalid
         self.alignment_warmup_pending = True
 
+    def rebase_pending_segment_counters(
+        self, *, frame_seq: int, valid_frame_count: int, invalid_frame_count: int,
+    ) -> None:
+        """Rebase a prepared, unused candidate after an old frame drains.
+
+        Candidate alignment may already be primed for validation, but no edge
+        or G update is allowed before commit. This transfers counters only.
+        """
+        frame_seq = _non_negative_int(frame_seq, "frame_seq")
+        valid_frame_count = _non_negative_int(valid_frame_count, "valid_frame_count")
+        invalid_frame_count = _non_negative_int(invalid_frame_count, "invalid_frame_count")
+        if not self.alignment_warmup_pending or self.algorithm_step != 0 or self.last_result is not None or any(
+            not _edge_history_is_empty(item) for item in self.uv_structs
+        ):
+            raise ValueError("Only an unused prepared segment may inherit frame counters.")
+        if valid_frame_count + invalid_frame_count > frame_seq or frame_seq < self.frame_seq:
+            raise ValueError("Prepared segment counters cannot move backwards.")
+        self.frame_seq = frame_seq
+        self.valid_frame_count = valid_frame_count
+        self.invalid_frame_count = invalid_frame_count
+
     def prime_alignment_from_baseline(self) -> AlignmentDiagnostics:
         """Initialize a candidate aligner from the immutable marked image.
 

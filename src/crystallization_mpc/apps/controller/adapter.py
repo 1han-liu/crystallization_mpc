@@ -94,6 +94,16 @@ class ControllerAdapter(ABC):
         """Validate a candidate without changing configuration or estimator state."""
         raise NotImplementedError("This Controller adapter does not support runtime refresh.")
 
+    def validate_parameter_update(self, changes: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Validate a run-only, sectioned parameter patch without mutating state."""
+        raise NotImplementedError("This Controller adapter does not support online parameters.")
+
+    def runtime_parameter_values(self) -> Mapping[str, Any] | None:
+        return None
+
+    def runtime_parameter_status(self) -> Mapping[str, Any] | None:
+        return None
+
     def refresh_status(self) -> Mapping[str, Any] | None:
         """Report the last completed numerical refresh and its calculation segment."""
         return None
@@ -132,6 +142,17 @@ class ControllerAdapter(ABC):
         """Restore a running algorithm and return whether recovery succeeded."""
 
         return False
+
+    def restore_held_state(
+        self, params: Mapping[str, Any], run_id: str, state: Mapping[str, Any]
+    ) -> bool:
+        """Restore numerical state for a nonrunning service confirmation hold.
+
+        Adapters may support a stopped numerical checkpoint after a failed End.
+        The default retains the adapter's existing strict restore contract.
+        This hook must not connect process equipment or execute control steps.
+        """
+        return self.restore_state(params, run_id, state)
 
 
 class NoOpControllerAdapter(ControllerAdapter):

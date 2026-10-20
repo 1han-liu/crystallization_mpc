@@ -90,6 +90,11 @@ from crystallization_mpc.messaging.contracts import (
     GrowthRateStatusPayload,
 )
 from crystallization_mpc.messaging.idgen import next_seq
+from crystallization_mpc.messaging.parameter_policy import (
+    measurement_parameter_changes,
+    parameter_defaults,
+    validate_parameter_changes,
+)
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for, route
 from crystallization_mpc.messaging.schema import build_envelope, utc_ts
 
@@ -341,6 +346,16 @@ class GsensorService:
         self.alignment_changes: list[Dict[str, Any]] = []
         self.alignment_change_error: str | None = None
         self._alignment_change_pending = False
+        # Run-only parameter updates have their own measurement generation;
+        # activation and alignment revisions keep their independent identities.
+        self.parameter_revision = 0
+        self.runtime_parameter_revision = 0
+        self.parameter_measurement_ready = True
+        self.parameter_events: Dict[str, Dict[str, Any]] = {}
+        self.pending_parameter_event_id: str | None = None
+        self._prepared_parameter_processors: Dict[str, Any] = {}
+        self._parameter_change_pending = False
+        self.last_parameter_result_publish_error: str | None = None
         self.last_lifecycle_message: Dict[str, Any] | None = None
         # Values are revision identities (name + mtime_ns + size), not filenames.
         self.processed_image_files: set[str] = set()
@@ -458,7 +473,12 @@ class GsensorService:
             with self._lock:
                 self.last_command_message = msg
             name = msg.get("name")
-            if name in {GSENSOR_ENABLE_COMMAND, GSENSOR_DISABLE_COMMAND}:
+            if name in {
+                "experiment.parameters.prepare", "experiment.parameters.commit",
+                "experiment.parameters.abort",
+            }:
+                self.handle_parameter_update(msg)
+            elif name in {GSENSOR_ENABLE_COMMAND, GSENSOR_DISABLE_COMMAND}:
                 try:
                     self._validate_central_lifecycle_message(msg)
                     self.set_gsensor_enabled(
@@ -597,6 +617,13 @@ class GsensorService:
         self.alignment_changes = []
         self.alignment_change_error = None
         self._alignment_change_pending = False
+        self.parameter_revision = 0
+        self.runtime_parameter_revision = 0
+        self.parameter_measurement_ready = True
+        self.parameter_events = {}
+        self.pending_parameter_event_id = None
+        self._prepared_parameter_processors = {}
+        self._parameter_change_pending = False
         self.experiment_lifecycle_error = None
         self.last_lifecycle_message = None
         self.recovery_status = "not_attempted"
@@ -635,6 +662,13 @@ class GsensorService:
             },
             "parameter_version": self.experiment_parameter_version,
             "algorithm_params": self.experiment_params,
+            "runtime_parameters": {
+                "revision": self.runtime_parameter_revision,
+                "measurement_revision": self.parameter_revision,
+                "measurement_ready": self.parameter_measurement_ready,
+                "pending_event_id": self.pending_parameter_event_id,
+                "events": copy.deepcopy(self.parameter_events),
+            },
             "alignment_configuration": {
                 key: value
                 for key, value in self._alignment_configuration_locked().items()
@@ -808,6 +842,34 @@ class GsensorService:
         self.experiment_params = (
             dict(algorithm_params) if isinstance(algorithm_params, dict) else None
         )
+        parameter_state = state.get("runtime_parameters") or {}
+        if not isinstance(parameter_state, dict):
+            raise ValueError("Persisted runtime parameters must be an object.")
+        for field in ("revision", "measurement_revision"):
+            value = parameter_state.get(field, 0)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"Persisted runtime parameter {field} is invalid.")
+        events = parameter_state.get("events", {})
+        if not isinstance(events, dict) or any(not isinstance(v, dict) for v in events.values()):
+            raise ValueError("Persisted runtime parameter events are invalid.")
+        self.runtime_parameter_revision = parameter_state.get("revision", 0)
+        self.parameter_revision = parameter_state.get("measurement_revision", 0)
+        ready = parameter_state.get("measurement_ready", True)
+        if not isinstance(ready, bool):
+            raise ValueError("Persisted parameter measurement readiness must be boolean.")
+        self.parameter_measurement_ready = ready
+        self.parameter_events = copy.deepcopy(events)
+        self.pending_parameter_event_id = parameter_state.get("pending_event_id")
+        if self.pending_parameter_event_id is not None and (
+            self.pending_parameter_event_id not in self.parameter_events
+            or self.parameter_events[self.pending_parameter_event_id].get("phase") != "prepared"
+        ):
+            raise ValueError("Persisted pending parameter event is invalid.")
+        self._validate_parameter_checkpoint_locked(parameter_state)
+        # Candidates are rebuilt only after an explicit commit retry. Recovery
+        # must never turn a prepared update into an applied update by itself.
+        self._prepared_parameter_processors = {}
+        self._parameter_change_pending = False
         self.baseline = state.get("baseline")
         self.initialized_at = state.get("initialized_at")
         self.last_growth_rate_result = state.get("last_growth_rate_result")
@@ -996,6 +1058,13 @@ class GsensorService:
                 self.alignment_changes = []
                 self.alignment_change_error = None
                 self._alignment_change_pending = False
+                self.parameter_revision = 0
+                self.runtime_parameter_revision = 0
+                self.parameter_measurement_ready = True
+                self.parameter_events = {}
+                self.pending_parameter_event_id = None
+                self._prepared_parameter_processors = {}
+                self._parameter_change_pending = False
                 self.experiment_lifecycle_status = (
                     GrowthRateStatus.DISABLED.value
                 )
@@ -1173,6 +1242,11 @@ class GsensorService:
             self.active = False
             self._measurement_stop.set()
             self.image_discovery_revision += 1
+            if self.pending_parameter_event_id is not None:
+                event = self.parameter_events[self.pending_parameter_event_id]
+                event.update(phase="rejected", error="Experiment ended before parameter commit.")
+                self.pending_parameter_event_id = None
+                self._prepared_parameter_processors.clear()
             self.last_lifecycle_command_error = None
             current_status = self.experiment_lifecycle_status
             if current_status in {
@@ -1320,10 +1394,13 @@ class GsensorService:
                 control_event_id=self.gsensor_control_event_id,
                 initialization_generation=self.initialization_generation,
                 alignment_revision=self.alignment_revision,
+                alignment_method=self._alignment_configuration_locked()["method"],
+                parameter_revision=self.parameter_revision or None,
                 measurement_ready=bool(
                     status == GrowthRateStatus.MEASURING and self.gsensor_enabled
                     and self.initialized and self.growth_rate_processor is not None
                     and not self._processing_transition_pending
+                    and self.parameter_measurement_ready
                     and not getattr(self.growth_rate_processor, "alignment_warmup_pending", False)
                 ),
             )
@@ -1389,6 +1466,7 @@ class GsensorService:
             control_revision=self.gsensor_control_revision,
             initialization_generation=self.initialization_generation,
             alignment_revision=self.alignment_revision,
+            parameter_revision=self.parameter_revision or None,
             **values,
         )
 
@@ -1482,6 +1560,7 @@ class GsensorService:
             u_distance_m=u.distance_m if u is not None else None,
             v_distance_px=v.distance_px if v is not None else None,
             v_distance_m=v.distance_m if v is not None else None,
+            parameter_revision=self.parameter_revision or None,
         )
         try:
             write_gsensor_measurement(self.measurement_writer, record)
@@ -2024,10 +2103,16 @@ class GsensorService:
             self.measurement_valid_frame_count += int(result.valid)
             self.measurement_invalid_frame_count += int(not result.valid)
             self.last_growth_rate_result = payload
+            # A later invalid frame closes availability as well. Otherwise the
+            # ordinary status published after an invalid sample (or a failed
+            # invalid-sample delivery) could reopen the previous cached G.
+            self.parameter_measurement_ready = bool(result.valid)
             self.last_growth_rate_result["initialization_generation"] = self.initialization_generation
             self.last_growth_rate_result["alignment_revision"] = self.alignment_revision
+            self.last_growth_rate_result["parameter_revision"] = self.parameter_revision
             self.processed_image_records[detection.identity_key]["initialization_generation"] = self.initialization_generation
             self.processed_image_records[detection.identity_key]["alignment_revision"] = self.alignment_revision
+            self.processed_image_records[detection.identity_key]["parameter_revision"] = self.parameter_revision
             self.last_processing_error = result.error
             self.latest_overlay_path = result.overlay_path
             # Archive every completed frame before checkpointing it as consumed.
@@ -2103,6 +2188,8 @@ class GsensorService:
     def current_params(self) -> Dict[str, Any]:
         shared, gsensor, _controller, _version = self._load_persisted_params()
         with self._lock:
+            if self._experiment_in_progress_locked() and self.experiment_params is not None:
+                return copy.deepcopy(self.experiment_params)
             return {**shared, **gsensor, **self.params}
 
     def _alignment_configuration_locked(self) -> Dict[str, Any]:
@@ -2136,14 +2223,327 @@ class GsensorService:
 
     @property
     def _processing_transition_pending(self) -> bool:
-        return self._reinitialization_pending or self._alignment_change_pending
+        return self._reinitialization_pending or self._alignment_change_pending or self._parameter_change_pending
 
     def _can_switch_alignment_locked(self) -> bool:
         return bool(
             self.gsensor_enabled and self.initialized and self.growth_rate_processor is not None
             and not self._processing_transition_pending
+            and self.pending_parameter_event_id is None
             and self.experiment_lifecycle_status == GrowthRateStatus.MEASURING.value
         )
+
+    def handle_parameter_update(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare/commit run-only settings without replacing the experiment.
+
+        Controller owns the common revision. GSensor advances its measurement
+        generation only if a setting consumed by image processing changed.
+        A successful reply is emitted only after the corresponding checkpoint.
+        """
+        payload = message.get("payload") or {}
+        try:
+            if message.get("src") != "controller" or message.get("dst") != ROLE or message.get("msg_type") != "command":
+                raise ValueError("Runtime parameter commands must be sent from Controller to GSensor.")
+            if not isinstance(payload, dict):
+                raise ValueError("Runtime parameter payload must be an object.")
+            with self._control_lock:
+                identity = self._parameter_identity(payload)
+                name = message.get("name")
+                if name == "experiment.parameters.prepare":
+                    result = self._prepare_parameters(identity, payload)
+                elif name == "experiment.parameters.commit":
+                    result = self._commit_parameters(identity, payload)
+                elif name == "experiment.parameters.abort":
+                    result = self._abort_parameters(identity, payload)
+                else:
+                    raise ValueError("Unsupported runtime parameter command.")
+        except Exception as exc:
+            # Rejections must not overwrite an already applied record or imply
+            # rollback after a lost result delivery.
+            logger.warning("Rejected GSensor parameter update: %s", exc)
+            result = {
+                **({key: payload.get(key) for key in ("run_id", "experiment_started_at", "event_id", "revision")}
+                   if isinstance(payload, dict) else {}),
+                "phase": "rejected", "error": str(exc),
+                "measurement_revision": self.parameter_revision,
+                "effective_after_frame_seq": self.measurement_step_count,
+            }
+        self._publish_parameter_result(result)
+        return result
+
+    def _parameter_identity(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        identity = {key: payload.get(key) for key in ("run_id", "experiment_started_at", "event_id", "revision")}
+        if any(not isinstance(identity[key], str) or not identity[key].strip()
+               for key in ("run_id", "experiment_started_at", "event_id")):
+            raise ValueError("Runtime parameter identity is incomplete.")
+        if type(identity["revision"]) is not int or identity["revision"] < 1:
+            raise ValueError("Runtime parameter revision must be a positive integer.")
+        with self._lock:
+            if self.current_experiment is None or identity["run_id"] != self.current_experiment["run_id"] or identity["experiment_started_at"] != self.experiment_started_at:
+                raise ValueError("Runtime parameters refer to a different experiment.")
+            if not self._experiment_in_progress_locked() or self.experiment_lifecycle_status == GrowthRateStatus.STOPPING.value:
+                raise ValueError("Runtime parameters require an unfinished experiment.")
+            previous = self.parameter_events.get(identity["event_id"])
+            if previous is not None and any(previous.get(key) != value for key, value in identity.items()):
+                raise ValueError("The parameter event ID belongs to a different request.")
+        return identity
+
+    @staticmethod
+    def _parameter_result(event: Dict[str, Any]) -> Dict[str, Any]:
+        return copy.deepcopy({key: event[key] for key in (
+            "run_id", "experiment_started_at", "event_id", "revision", "phase",
+            "values", "measurement_revision", "effective_after_frame_seq", "error",
+        ) if key in event})
+
+    def _validate_parameter_checkpoint_locked(self, state: Dict[str, Any]) -> None:
+        """Reject a torn/mismatched update journal instead of claiming Applied."""
+        if not state:  # Old processing checkpoints have no parameter journal.
+            return
+        if self.parameter_revision > self.runtime_parameter_revision:
+            raise ValueError("Persisted measurement revision exceeds the run parameter revision.")
+        applied = []
+        prepared = []
+        for event_id, event in self.parameter_events.items():
+            if (event.get("event_id") != event_id
+                or event.get("run_id") != (self.current_experiment or {}).get("run_id")
+                or event.get("experiment_started_at") != self.experiment_started_at):
+                raise ValueError("Persisted parameter event belongs to a different experiment.")
+            revision = event.get("revision")
+            if type(revision) is not int or revision < 1 or event.get("phase") not in {"prepared", "applied", "rejected"}:
+                raise ValueError("Persisted parameter event revision or phase is invalid.")
+            changes = event.get("changes")
+            if not isinstance(changes, dict):
+                raise ValueError("Persisted parameter event changes are missing.")
+            expected_values = validate_parameter_changes({section: values for section, values in changes.items()
+                                                         if section in {"shared", "gsensor"} and values})
+            if event.get("values") != expected_values:
+                raise ValueError("Persisted parameter acknowledgement values disagree with its request.")
+            candidate = event.get("candidate_params")
+            if not isinstance(candidate, dict) or any(candidate.get(key) != value
+                for section in expected_values.values() for key, value in section.items()):
+                raise ValueError("Persisted parameter candidate disagrees with its acknowledged values.")
+            measurement_change = event.get("measurement_change")
+            measurement_revision = event.get("measurement_revision")
+            frame = event.get("effective_after_frame_seq")
+            if (not isinstance(measurement_change, bool)
+                or type(measurement_revision) is not int or measurement_revision < 0
+                or (measurement_change and measurement_revision != revision)
+                or (not measurement_change and measurement_revision > revision)
+                or type(frame) is not int or frame < 0):
+                raise ValueError("Persisted parameter measurement boundary is invalid.")
+            if event["phase"] == "applied":
+                applied.append(event)
+            elif event["phase"] == "prepared":
+                prepared.append(event)
+        if len(prepared) > 1 or (prepared and prepared[0]["event_id"] != self.pending_parameter_event_id):
+            raise ValueError("Persisted parameter preparation is not the pending transaction.")
+        if applied:
+            revisions = [event["revision"] for event in applied]
+            latest = max(applied, key=lambda event: event["revision"])
+            if (len(set(revisions)) != len(revisions)
+                or latest["revision"] != self.runtime_parameter_revision
+                or latest["candidate_params"] != self.experiment_params
+                or latest["measurement_revision"] != self.parameter_revision):
+                raise ValueError("Persisted applied parameter values disagree with the committed journal.")
+        elif self.runtime_parameter_revision != 0 or self.parameter_revision != 0:
+            raise ValueError("Persisted parameter revisions have no committed journal entry.")
+        if prepared and prepared[0]["revision"] <= self.runtime_parameter_revision:
+            raise ValueError("Persisted prepared parameter revision is stale.")
+
+    def _check_parameter_event(self, identity: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any] | None:
+        previous = self.parameter_events.get(identity["event_id"])
+        if previous is not None and "changes" in payload and payload["changes"] != previous["changes"]:
+            raise ValueError("The parameter event ID was retried with different changes.")
+        return previous
+
+    def _prepare_parameters(self, identity: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            previous = self._check_parameter_event(identity, payload)
+            if previous is not None:
+                return self._parameter_result(previous)
+            if self.pending_parameter_event_id is not None or self._processing_transition_pending:
+                raise ValueError("Another image or parameter update is pending.")
+            if identity["revision"] <= self.runtime_parameter_revision:
+                raise ValueError("The parameter revision is stale.")
+            changes = payload.get("changes")
+            if not isinstance(changes, dict) or any(section not in {"shared", "gsensor", "controller"} or not isinstance(values, dict) for section, values in changes.items()):
+                raise ValueError("Runtime parameter changes require known section mappings.")
+            defaults = parameter_defaults()
+            candidate_params = copy.deepcopy(self.experiment_params or self.current_params())
+            if self.confirmed_alignment_method is not None:
+                candidate_params["alignment_method"] = self.confirmed_alignment_method
+            relevant = {section: patch for section, patch in changes.items()
+                        if section in {"shared", "gsensor"} and patch}
+            current = {section: {key: candidate_params.get(key, value) for key, value in defaults[section].items()}
+                       for section in ("shared", "gsensor")}
+            values = validate_parameter_changes(relevant, current=current)
+            for section in values.values():
+                candidate_params.update(section)
+            active_changes = measurement_parameter_changes(values)
+            measurement_change = any(
+                candidate_params.get(key) != current[section].get(key)
+                for section, patch in active_changes.items() for key in patch
+            )
+            selected = parse_alignment_method(candidate_params.get("alignment_method", "none")).value
+            capability = next((item for item in alignment_capabilities() if item.method == selected), None)
+            if capability is None or not capability.available:
+                raise ValueError(f"Alignment method {selected!r} is unavailable.")
+            event = {
+                **identity, "changes": copy.deepcopy(changes), "phase": "prepared",
+                "values": values, "candidate_params": candidate_params,
+                "measurement_change": measurement_change,
+                "measurement_revision": identity["revision"] if measurement_change else self.parameter_revision,
+                "effective_after_frame_seq": self.measurement_step_count,
+                "initialization_generation": self.initialization_generation,
+                "alignment_revision": self.alignment_revision,
+                "session_id": self.initialization.active_session_id,
+                "error": None,
+            }
+        candidate = self._build_parameter_processor(event) if measurement_change and self.initialized else None
+        # Exporting a processor halfway through process() would persist its
+        # incremented frame counter with the previous edge/filter state. Drain
+        # the frame worker before checkpointing preparation, without disabling
+        # the active processor or withholding its already computed sample.
+        with self._image_scan_lock, self._lock:
+            self.parameter_events[identity["event_id"]] = event
+            self.pending_parameter_event_id = identity["event_id"]
+            try:
+                self._persist_processing_state_locked()
+            except Exception:
+                self.parameter_events.pop(identity["event_id"], None)
+                self.pending_parameter_event_id = None
+                raise
+            if candidate is not None:
+                self._prepared_parameter_processors[identity["event_id"]] = candidate
+            return self._parameter_result(event)
+
+    def _build_parameter_processor(self, event: Dict[str, Any]) -> Any:
+        """Build a fresh segment from confirmed marks, never from old edges."""
+        session_id = event["session_id"]
+        payload = self.initialization.payload(session_id)
+        uv_structs, kernel = initialize_DSCGR(self.initialization, session_id=session_id)
+        output = self._measurement_output_directory_locked(parameter_revision=event["measurement_revision"])
+        processor = self.growth_rate_processor_factory(
+            run_id=event["run_id"], params=copy.deepcopy(event["candidate_params"]),
+            uv_struct_list=uv_structs, kernel=kernel,
+            latest_overlay_path=output / LATEST_OVERLAY_FILENAME,
+            final_overlay_path=output / FINAL_OVERLAY_FILENAME,
+            debug_directory=output / "hough_debug" if self.hough_debug_enabled else None,
+            initial_image_path=payload["selected_image"],
+            alignment_method=event["candidate_params"].get("alignment_method", "none"),
+        )
+        processor.begin_alignment_segment(
+            frame_seq=self.measurement_step_count,
+            valid_frame_count=self.measurement_valid_frame_count,
+            invalid_frame_count=self.measurement_invalid_frame_count,
+        )
+        processor.prime_alignment_from_baseline()
+        return processor, kernel
+
+    def _commit_parameters(self, identity: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        event_id = identity["event_id"]
+        with self._publication_lock, self._lock:
+            event = self._check_parameter_event(identity, payload)
+            if event is None:
+                raise ValueError("Runtime parameters were not prepared.")
+            if event["phase"] != "prepared":
+                return self._parameter_result(event)
+            if self.pending_parameter_event_id != event_id:
+                raise ValueError("The prepared runtime parameter event is no longer pending.")
+            if (event["initialization_generation"] != self.initialization_generation
+                or event["alignment_revision"] != self.alignment_revision
+                or event["session_id"] != self.initialization.active_session_id):
+                raise ValueError("Image marking or alignment changed after parameter preparation.")
+            measurement_change = event["measurement_change"]
+            if measurement_change:
+                self._parameter_change_pending = True
+                self.image_discovery_revision += 1
+        try:
+            if measurement_change:
+                self._publish_transition_availability()
+            # Wait without holding the worker's state/publication locks; a
+            # frame already computing may finish archival, but cannot publish G.
+            with self._image_scan_lock:
+                candidate = self._prepared_parameter_processors.get(event_id)
+                if event["measurement_change"] and self.initialized and candidate is None:
+                    candidate = self._build_parameter_processor(event)
+                with self._lock:
+                    updates: Dict[str, Any] = {
+                        "experiment_params": copy.deepcopy(event["candidate_params"]),
+                        "runtime_parameter_revision": identity["revision"],
+                        "parameter_revision": event["measurement_revision"],
+                        "parameter_measurement_ready": (
+                            False if event["measurement_change"] else self.parameter_measurement_ready
+                        ),
+                        "pending_parameter_event_id": None,
+                    }
+                    if candidate is not None:
+                        processor, kernel = candidate
+                        processor.rebase_pending_segment_counters(
+                            frame_seq=self.measurement_step_count,
+                            valid_frame_count=self.measurement_valid_frame_count,
+                            invalid_frame_count=self.measurement_invalid_frame_count,
+                        )
+                        updates.update(growth_rate_processor=processor, uv_struct_list=processor.uv_structs,
+                                       kernel=kernel, last_processing_error=None, final_overlay_path=None)
+                        selected = event["candidate_params"].get("alignment_method", "none")
+                        if selected != self.confirmed_alignment_method:
+                            updates.update(confirmed_alignment_method=selected, alignment_confirmed_at=utc_ts(),
+                                           alignment_revision=self.alignment_revision + 1,
+                                           alignment_effective_after_frame_seq=self.measurement_step_count)
+                    previous = {key: getattr(self, key) for key in updates}
+                    old_event = copy.deepcopy(event)
+                    try:
+                        for key, value in updates.items():
+                            setattr(self, key, value)
+                        event.update(phase="applied", effective_after_frame_seq=self.measurement_step_count, error=None)
+                        self._persist_processing_state_locked()
+                    except Exception:
+                        for key, value in previous.items():
+                            setattr(self, key, value)
+                        event.clear()
+                        event.update(old_event)
+                        raise
+                    self._prepared_parameter_processors.pop(event_id, None)
+                    return self._parameter_result(event)
+        finally:
+            with self._lock:
+                self._parameter_change_pending = False
+            if measurement_change:
+                self._publish_transition_availability()
+
+    def _abort_parameters(self, identity: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._image_scan_lock, self._lock:
+            event = self._check_parameter_event(identity, payload)
+            if event is None:
+                raise ValueError("Runtime parameters were not prepared.")
+            if event["phase"] != "prepared":
+                return self._parameter_result(event)
+            previous = copy.deepcopy(event)
+            event.update(phase="rejected", error="Parameter update aborted before commit.")
+            self.pending_parameter_event_id = None
+            try:
+                self._persist_processing_state_locked()
+            except Exception:
+                event.clear()
+                event.update(previous)
+                self.pending_parameter_event_id = identity["event_id"]
+                raise
+            self._prepared_parameter_processors.pop(identity["event_id"], None)
+            return self._parameter_result(event)
+
+    def _publish_parameter_result(self, result: Dict[str, Any]) -> None:
+        envelope = build_envelope(src=ROLE, dst="controller", msg_type="status",
+                                  name="experiment.parameters.result", seq=next_seq(), payload=result)
+        try:
+            if self.sample_publisher is not None:
+                with self._publication_lock:
+                    self.sample_publisher.publish(route(ROLE, "controller"), envelope)
+        except Exception as exc:
+            self.last_parameter_result_publish_error = str(exc)
+            logger.warning("Could not publish GSensor parameter result: %s", exc)
+        else:
+            self.last_parameter_result_publish_error = None
 
     def select_alignment_method(
         self, run_id: str, session_id: str, control_revision: int,
@@ -2302,6 +2702,8 @@ class GsensorService:
             "parameter_version": self.experiment_parameter_version,
             "params": params,
             "alignment_configuration": configuration,
+            "runtime_parameter_revision": self.runtime_parameter_revision,
+            "parameter_revision": self.parameter_revision,
         }
 
     def params_payload(self) -> Dict[str, Any]:
@@ -2377,11 +2779,16 @@ class GsensorService:
             "applied_run_id": run_id if applied else None,
         }
 
-    def _measurement_output_directory_locked(self, *, alignment_revision: int | None = None) -> Path:
+    def _measurement_output_directory_locked(
+        self, *, alignment_revision: int | None = None, parameter_revision: int | None = None,
+    ) -> Path:
         selection = self.experiments.require_current()
         directory = Path(selection["container_image_path"]).parent
         if self.initialization_generation > 0:
             directory = directory / "gsensor_segments" / str(self.initialization_generation)
+        parameter_revision = self.parameter_revision if parameter_revision is None else parameter_revision
+        if parameter_revision > 0:
+            directory = directory / "gsensor_parameters" / str(parameter_revision)
         revision = self.alignment_revision if alignment_revision is None else alignment_revision
         if revision > 0:
             directory = directory / "gsensor_alignments" / str(revision)
@@ -2390,6 +2797,7 @@ class GsensorService:
     def _can_restart_initialization_locked(self) -> bool:
         return bool(
             self.gsensor_enabled and not self._processing_transition_pending
+            and self.pending_parameter_event_id is None
             and self.latest_ready_image is not None
             and self.experiment_lifecycle_status in {
                 GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE.value,
@@ -2658,6 +3066,13 @@ class GsensorService:
                 "param_count": len(current_params),
                 "params": current_params,
                 "alignment_configuration": self._alignment_configuration_locked(),
+                "runtime_parameters": {
+                    "revision": self.runtime_parameter_revision,
+                    "measurement_revision": self.parameter_revision,
+                    "pending_event_id": self.pending_parameter_event_id,
+                    "events": copy.deepcopy(list(self.parameter_events.values())),
+                    "last_publish_error": self.last_parameter_result_publish_error,
+                },
                 "experiment_parameters": self._experiment_parameters_locked(),
                 "last_message": self.last_message,
                 "last_command_message": self.last_command_message,
@@ -2809,7 +3224,7 @@ class GsensorService:
 
     def require_active_initialization(self, session_id: str | None = None) -> None:
         with self._lock:
-            if self._processing_transition_pending:
+            if self._processing_transition_pending or self.pending_parameter_event_id is not None:
                 raise ValueError("The marking image is changing. Wait for the new session.")
             if not self.gsensor_enabled:
                 raise ValueError("GSensor is disabled; enable it before changing initialization.")

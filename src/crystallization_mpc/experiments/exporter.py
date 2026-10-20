@@ -39,6 +39,7 @@ BASE_COLUMNS = ("run_id", "time_ns", "time_utc")
 PARAMETER_COLUMNS = (
     "run_id", "source", "scope", "parameter", "value", "effective_at",
     "event_id", "effective_tick", "revision", "parameter_version", "status", "is_effective", "requested_at",
+    "effective_after_frame_seq", "measurement_revision", "controller_applied",
 )
 PROCESS_COLUMNS = (
     *BASE_COLUMNS, "device", *PROCESS_FIELDS, "temperature_unit",
@@ -532,7 +533,9 @@ def _runtime_history_events(run_id, root, stored_events):
                     if (previous_result.get("status") in {"applied", "rejected"}
                             and result.get("status") in {"applied", "rejected"}
                             and any(previous_result.get(key) != result.get(key)
-                                    for key in ("status", "configuration", "applied_at", "revision"))):
+                                    for key in ("status", "configuration", "applied_at", "revision",
+                                                "parameter_values", "parameter_changes", "effective_after_frame_seq",
+                                                "measurement_revision"))):
                         conflicts.add(event_id)
                     if previous_result.get("status") in {"applied", "rejected"} and result.get("status") not in {"applied", "rejected"}:
                         previous["sources"] = sorted(sources)
@@ -553,29 +556,40 @@ def _runtime_history_events(run_id, root, stored_events):
         stamp = timestamp_ns(occurred_at) if occurred_at else None
         if status == "applied" and not applied_at:
             untimed.append(event_id)
-        row = {"run_id": run_id, "event_id": event_id, "event_type": "controller.runtime.update",
+        is_parameters = "experiment_started_at" in command
+        before = result.get("parameter_before") if is_parameters else result.get("before")
+        after = result.get("parameter_values") if is_parameters else result.get("configuration")
+        row = {"run_id": run_id, "event_id": event_id,
+               "event_type": "experiment.parameters.update" if is_parameters else "controller.runtime.update",
                "measurement": "runtime_history", "service": "controller" if result else "central",
                "stage": "result" if result else "request", "status": status,
                "time_ns": stamp, "time_utc": timestamp_text(stamp) if stamp is not None else None,
                "timestamp_semantics": "applied_at" if applied_at else (
                    "processed_at" if result.get("processed_at") else "requested_at"),
                "requested_at": command.get("requested_at"), "applied_at": applied_at,
-               "before": result.get("before"), "after": result.get("configuration"),
+               "before": before, "after": after,
                "changes": command.get("changes"), "no_change": bool(result.get("no_change")),
                "revision": result.get("revision"), "effective_tick": result.get("effective_tick"),
                "error": result.get("reason") or entry.get("error"), "history_sources": sources,
                "payload": entry, "influx_persisted": event_id in stored_by_id}
         expected_influx = status == "applied" and not result.get("no_change")
-        if expected_influx and (not isinstance(result.get("before"), dict)
-                               or not isinstance(result.get("configuration"), dict)):
+        row["is_effective"] = expected_influx
+        if is_parameters:
+            row["parameter_changes"] = result.get("parameter_changes", command.get("changes"))
+            for key in ("effective_after_frame_seq", "measurement_revision", "controller_applied"):
+                if key in result:
+                    row[key] = result[key]
+        if expected_influx and (not isinstance(after, dict)
+                               or (not is_parameters and not isinstance(before, dict))):
             incomplete_configuration.append(event_id)
         if expected_influx and event_id not in stored_by_id:
             missing.append(event_id)
         stored = stored_by_id.get(event_id)
         if stored is not None:
             if (not expected_influx or not applied_at or stored["time_ns"] != timestamp_ns(applied_at)
-                    or _mapping_value(stored.get("before")) != result.get("before")
-                    or _mapping_value(stored.get("after")) != result.get("configuration")):
+                    or _mapping_value(stored.get("before")) != before
+                    or _mapping_value(stored.get("after")) != after
+                    or (is_parameters and _mapping_value(stored.get("parameter_changes")) != row["parameter_changes"])):
                 inconsistent.append(event_id)
             # Local Controller outcome is authoritative; retain the stored
             # representation too when it differs so the discrepancy is reviewable.
@@ -610,7 +624,17 @@ def _flatten_parameters(value, prefix=""):
 
 def _parameter_rows(run_id, snapshot, capture, runtime_events, manifest):
     rows = []
-    for key, value in _flatten_parameters(snapshot.get("params", snapshot)):
+    startup_values = snapshot.get("params", snapshot)
+    if "raw_parameter_sections" in snapshot:
+        raw = snapshot["raw_parameter_sections"]
+        if not isinstance(raw, Mapping):
+            raise ValueError("Raw startup parameter sections must be a mapping.")
+        startup_values = {key: value for key, value in startup_values.items() if key != "raw_parameter_sections"}
+        for section, fields in raw.items():
+            if not isinstance(fields, Mapping):
+                raise ValueError("Raw startup fields must be a mapping.")
+            startup_values[section] = {**startup_values.get(section, {}), **fields}
+    for key, value in _flatten_parameters(startup_values):
         scope, _, parameter = key.partition(".")
         rows.append({"run_id": run_id, "source": "params_snapshot", "scope": scope if parameter else "",
                      "parameter": parameter or key, "value": value, "effective_at": manifest["started_at"],
@@ -622,6 +646,32 @@ def _parameter_rows(run_id, snapshot, capture, runtime_events, manifest):
                      "status": "applied", "is_effective": True})
     for event in runtime_events:
         status = event.get("status", "applied")
+        parameter_changes = _parameter_event_changes(event)
+        if parameter_changes is not None:
+            effective = status == "applied" and not event.get("no_change")
+            actual = _mapping_value(event.get("after"))
+            for section, fields in parameter_changes.items():
+                if not isinstance(fields, Mapping):
+                    raise ValueError("Parameter event sections must contain raw-key mappings.")
+                for key, requested in fields.items():
+                    # Applied rows use the committed values, never a later fit
+                    # or the startup snapshot. Unconfirmed rows retain requests.
+                    value = requested
+                    if effective:
+                        if not isinstance(actual, Mapping) or key not in (actual.get(section) or {}):
+                            continue  # An incomplete legacy record is not repaired by guessing.
+                        value = actual[section][key]
+                    row = {"run_id": run_id, "source": "runtime_change" if effective else "runtime_request",
+                           "scope": "run_parameters", "parameter": f"{section}.{key}", "value": value,
+                           "effective_at": event.get("applied_at", event.get("time_utc")) if effective else None,
+                           "event_id": event.get("event_id"), "effective_tick": event.get("effective_tick"),
+                           "revision": event.get("revision"), "status": status, "is_effective": effective,
+                           "requested_at": event.get("requested_at")}
+                    for name in ("effective_after_frame_seq", "measurement_revision", "controller_applied"):
+                        if name in event:
+                            row[name] = event[name]
+                    rows.append(row)
+            continue
         if status != "applied" or event.get("no_change"):
             for key, value in _flatten_parameters(event.get("changes") or {}):
                 rows.append({"run_id": run_id, "source": "runtime_request", "scope": "runtime",
@@ -648,6 +698,19 @@ def _parameter_rows(run_id, snapshot, capture, runtime_events, manifest):
                          "revision": event.get("revision"), "status": status, "is_effective": True,
                          "requested_at": event.get("requested_at")})
     return rows
+
+
+def _parameter_event_changes(event):
+    value = event.get("parameter_changes")
+    if value is not None:
+        value = _mapping_value(value)
+        if not isinstance(value, Mapping):
+            raise ValueError("Parameter event changes must be a section mapping.")
+        return value
+    changes = _mapping_value(event.get("changes"))
+    if isinstance(changes, Mapping) and any(key in changes for key in ("shared", "gsensor", "controller")):
+        return changes
+    return None
 
 
 def _read_optional_json(path):

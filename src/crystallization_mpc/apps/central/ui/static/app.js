@@ -21,6 +21,11 @@ const state = {
   parameterError: null,
   parameterRefreshError: null,
   parameterUnsavedCount: 0,
+  parameterEditRevision: null,
+  parameterDraftContext: null,
+  parameterDrafts: {},
+  parameterViewNeedsRefresh: false,
+  startupParameterPreview: null,
   latestOverlayKey: null,
   lastOverlayRefreshAt: 0,
   controllerStatus: null,
@@ -55,6 +60,7 @@ const state = {
   selectionSentRunId: null,
   selectionRetryRunId: null,
   startSentRunId: null,
+  recoveryEndPending: null,
 };
 
 const shell = document.querySelector(".shell");
@@ -66,6 +72,7 @@ const resetParamsButton = document.querySelector("#reset-params");
 const saveParamsButton = document.querySelector("#save-params");
 const parameterStatus = document.querySelector("#parameter-status");
 const parameterStatusText = document.querySelector("#parameter-status-text");
+const parameterReviewRevisionButton = document.querySelector("#parameter-review-revision");
 const refreshPreviewButton = document.querySelector("#refresh-preview");
 const sharedForm = document.querySelector("#shared-form");
 const gsensorForm = document.querySelector("#gsensor-form");
@@ -172,6 +179,7 @@ function clearCentralOverlay(message = "Waiting for an overlay for this experime
 function renderMutationState() {
   renderExperiments();
   updateParameterDraftState();
+  renderDerivedParameterPreview();
   renderRuntimeControls();
   renderGsensorActivation();
 }
@@ -249,6 +257,85 @@ function controllerRunningForRun(runId) {
     && controller.active === true && controller.recovery?.status !== "error";
 }
 
+function controllerRecoveryHeld() {
+  const controller = state.controllerStatus;
+  return state.systemStatusFresh && controller?.available === true
+    && (controller.status === "recovery_required"
+      || controller.recovery?.requires_confirmation === true
+      || controller.recovery?.status === "confirmation_required"
+      || (controller.status !== "running" && controller.status !== "stopped"
+        && Boolean(controller.current_run_id) && controller.stopped_at == null
+        && recoveryTimestamp(controller.started_at) !== null));
+}
+
+function recoveryTimestamp(value) {
+  // Keep microseconds: Date.parse alone would conflate different start identities.
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match) return null;
+  const local = Date.parse(`${match[1]}Z`);
+  const epoch = Date.parse(`${match[1]}${match[3]}`);
+  if (!Number.isFinite(local) || !Number.isFinite(epoch)
+      || new Date(local).toISOString().slice(0, 19) !== match[1]) return null;
+  return BigInt(epoch) * 1000n + BigInt((match[2] || "").padEnd(6, "0"));
+}
+
+function controllerMatchesRecoveryIdentity(experiment) {
+  const controller = state.controllerStatus;
+  const expected = recoveryTimestamp(experiment?.started_at);
+  return Boolean(experiment?.run_id) && controller?.current_run_id === experiment.run_id
+    && expected !== null && recoveryTimestamp(controller.started_at) === expected;
+}
+
+function controllerRecoveryHeldForRun(experiment) {
+  const controller = state.controllerStatus;
+  return controllerRecoveryHeld() && controller.active === false
+    && ((controller.status === "recovery_required" && controller.recovery?.requires_confirmation === true)
+      || (["error", "configured"].includes(controller.status) && controller.stopped_at == null
+        && controller.recovery?.status !== "error"))
+    && controllerMatchesRecoveryIdentity(experiment);
+}
+
+function recoveryEndConfirmed(experiment) {
+  const controller = state.controllerStatus;
+  return state.systemStatusFresh && controller?.available === true
+    && controllerMatchesRecoveryIdentity(experiment) && controller.status === "stopped"
+    && controller.active === false && controller.recovery?.requires_confirmation !== true
+    && !["confirmation_required", "error", "persistence_error"].includes(controller.recovery?.status);
+}
+
+function recoveryEndMessage(experiment) {
+  if (recoveryEndConfirmed(experiment)) {
+    return "Controller confirmed stopped. Create a new experiment to continue.";
+  }
+  return "End requested; Controller has not confirmed stopped. Wait for confirmation or use End again if the interrupted run remains.";
+}
+
+function renderRecoveryEndStatus() {
+  const pending = state.recoveryEndPending;
+  if (pending && currentExperiment()?.run_id === pending.run_id) {
+    if (recoveryEndConfirmed(pending)) {
+      setExperimentMessage(recoveryEndMessage(pending));
+      state.recoveryEndPending = null;
+    } else {
+      const failure = pending.deliveryError || controllerFailureMessage();
+      const message = state.systemStatusFresh ? recoveryEndMessage(pending)
+        : "End requested; Controller status is unconfirmed. Refresh status before retrying.";
+      setExperimentMessage(`${message}${failure ? ` ${failure}` : ""}`, {
+        error: Boolean(failure) || !state.systemStatusFresh,
+      });
+    }
+  } else if (controllerRecoveryHeld()) {
+    const reasons = {controller_restart: "Controller restarted", growth_timeout: "G data timed out",
+      gsensor_error: "GSensor reported a terminal error"};
+    const reason = reasons[state.controllerStatus?.recovery?.hold_reason]
+      || (state.controllerStatus?.status === "error" ? "Controller stopped after a fault" : "Operator confirmation required");
+    setExperimentMessage(controllerRecoveryHeldForRun(currentExperiment())
+      ? `Controller safety hold: ${reason}. Use End Experiment to release this run; it will not resume automatically.`
+      : `Controller holds ${state.controllerStatus.current_run_id || "another experiment"}. Select that experiment and use End Experiment before starting a new run.`);
+  }
+}
+
 function runtimeReady() {
   return runtimeRunActive() && currentExperiment()?.status !== "stopping"
     && controllerRunningForRun(state.currentRunId)
@@ -257,6 +344,10 @@ function runtimeReady() {
 }
 
 function controllerFailureMessage(controller = state.controllerStatus) {
+  if (controller?.status === "recovery_required") {
+    return controller.recovery?.hold_detail || controller?.last_error
+      || "Controller safety hold requires End Experiment before a new run.";
+  }
   if (controller?.recovery?.status === "error") {
     return `Controller recovery failed: ${controller.recovery.error || "the saved state could not be restored."}`;
   }
@@ -357,11 +448,16 @@ function renderSetpointExplanation(key) {
 }
 
 function runtimeChangeDescription(entry, key) {
+  if (["shared", "gsensor", "controller"].includes(key)
+      && entry.command?.experiment_started_at) {
+    return Object.entries(entry.command.changes[key] || {}).map(([name, value]) =>
+      `${state.paramMeta?.[name]?.label || name}: ${formatFieldValue(value)} (${key}).`).join(" ");
+  }
   const result = entry.result || {};
   const before = result.before || entry.before || {};
   const after = result.configuration || entry.command?.changes || {};
   const label = { control_target: "Control Target", adaptation_enabled: "Adaptation",
-    adaptation_mode: "Adaptive Mode", sigma_set: "σ_set", G_set: "G_set" }[key];
+    adaptation_mode: "Adaptive Mode", sigma_set: "σ_set", G_set: "G_set" }[key] || key;
   const display = value => value === undefined ? "unavailable" : String(value);
   let description = `${label}: ${display(before[key])} → ${display(after[key])}.`;
   if (key === "control_target" && after.control_target) {
@@ -499,7 +595,8 @@ function renderLiveConfiguration() {
   const displayedConfiguration = configuration || state.runConfiguration;
   runConfigurationControls.forEach((control) => { control.disabled = true; });
   adaptationEnableLabel.textContent = configuration ? "Adaptation" : "Adaptation at Start (unconfirmed)";
-  const disabled = !ready || mutationInFlight() || runtimeUnconfirmed();
+  const disabled = !ready || mutationInFlight() || runtimeUnconfirmed()
+    || Boolean(runtime?.pending) || Boolean(state.controllerStatus?.run_parameters?.pending);
   if (displayedConfiguration) {
     controlTargetSelect.value = displayedConfiguration.control_target;
     adaptationEnabledSelect.value = String(displayedConfiguration.adaptation_enabled);
@@ -911,12 +1008,17 @@ function renderForm(form, params, sectionName) {
       input.addEventListener("input", () => {
         state.parameterRequestId += 1;
         state.parameterError = null;
+        if (!state.parameterUnsavedCount) {
+          state.parameterEditRevision = state.controllerStatus?.runtime_controls?.revision;
+        }
+        input.dataset.edited = String(!valuesEqual(readParameterInput(input), state.params?.[sectionName]?.[key]));
         updateParameterDraftState();
       });
       resetButton.addEventListener("click", () => {
         state.parameterRequestId += 1;
         input.value = formatFieldValue(defaultValue);
         state.parameterError = null;
+        input.dataset.edited = String(!valuesEqual(defaultValue, state.params?.[sectionName]?.[key]));
         updateParameterDraftState();
         input.focus();
       });
@@ -992,6 +1094,11 @@ async function loadParams() {
   state.paramMeta = state.params.meta || {};
   state.parameterError = null;
   state.parameterRefreshError = null;
+  state.parameterViewNeedsRefresh = false;
+  if (!state.params.run_parameters) {
+    state.parameterDraftContext = null;
+    state.parameterEditRevision = null;
+  }
   renderParameterForms();
 }
 
@@ -1018,8 +1125,82 @@ function parameterPayloadFromDraft() {
   };
 }
 
+function onlineParametersReady() {
+  return runtimeReady() && controllerMatchesRecoveryIdentity(currentExperiment())
+    && state.controllerStatus?.run_parameters?.supported === true;
+}
+
+function parameterPolicy(section, key) {
+  return state.controllerStatus?.run_parameters?.policies?.[section]?.[key]
+    || state.params?.policies?.[section]?.[key] || {};
+}
+
+function collectParameterChanges() {
+  const changes = {};
+  document.querySelectorAll(".field-input").forEach(input => {
+    const { section, key } = input.dataset;
+    if (!input.disabled && input.dataset.edited === "true"
+        && !valuesEqual(readParameterInput(input), state.params?.[section]?.[key])) {
+      (changes[section] ||= {})[key] = readParameterInput(input);
+    }
+  });
+  return changes;
+}
+
+function stashOnlineParameterDraft() {
+  if (!state.parameterDraftContext) return;
+  const changes = {};
+  document.querySelectorAll(".field-input").forEach(input => {
+    if (input.dataset.edited === "true") {
+      (changes[input.dataset.section] ||= {})[input.dataset.key] = readParameterInput(input);
+    }
+  });
+  (state.parameterDrafts ||= {})[state.parameterDraftContext] = {
+    changes, revision: state.parameterEditRevision,
+  };
+}
+
+function syncOnlineParameterValues() {
+  if (!state.params || !onlineParametersReady()) return;
+  const live = state.controllerStatus.run_parameters;
+  const context = `${state.currentRunId}:${currentExperiment()?.started_at || ""}`;
+  const changedContext = state.parameterDraftContext !== context;
+  if (changedContext && state.parameterDraftContext) stashOnlineParameterDraft();
+  const restoredDraft = changedContext ? state.parameterDrafts?.[context] : null;
+  const applied = state.runtimeRequest?.status === "applied"
+    && state.runtimeRequest.command?.experiment_started_at
+    ? state.runtimeRequest.command.changes : {};
+  document.querySelectorAll(".field-input").forEach(input => {
+    const { section, key } = input.dataset;
+    const value = live.values?.[section]?.[key];
+    if (value === undefined) return;
+    if (changedContext && state.parameterDraftContext) {
+      input.dataset.edited = "false";
+      if (Object.hasOwn(restoredDraft?.changes?.[section] || {}, key)) {
+        input.value = formatFieldValue(restoredDraft.changes[section][key]);
+        input.dataset.edited = "true";
+      }
+    }
+    // A successful request consumes only its own submitted edit. A later
+    // unsaved edit must survive status polling and acknowledgments.
+    if (Object.hasOwn(applied[section] || {}, key)
+        && valuesEqual(readParameterInput(input), applied[section][key])) input.dataset.edited = "false";
+    if (input.dataset.edited !== "true") input.value = formatFieldValue(value);
+    state.params[section][key] = value;
+  });
+  if (changedContext) {
+    state.parameterDraftContext = context;
+    if (restoredDraft) state.parameterEditRevision = restoredDraft.revision;
+  }
+  state.params.run_parameters = live;
+  updateParameterDraftState();
+}
+
 function parametersLocked() {
-  if (!state.systemStatusFresh || mutationInFlight()) return true;
+  if (!state.systemStatusFresh || mutationInFlight() || state.parameterViewNeedsRefresh) return true;
+  if (runtimeRunActive()) return !onlineParametersReady() || runtimeUnconfirmed()
+    || Boolean(state.controllerStatus?.runtime_controls?.pending)
+    || Boolean(state.controllerStatus?.run_parameters?.pending);
   const status = currentExperiment()?.status;
   return Boolean(status && !["created", "completed", "error"].includes(status));
 }
@@ -1037,18 +1218,39 @@ function updateParameterDraftState() {
     const value = readParameterInput(input);
     const savedValue = state.params?.[section]?.[key];
     const defaultValue = state.params?.defaults?.[section]?.[key];
-    input.disabled = state.parameterActionInFlight || locked;
+    const online = runtimeRunActive();
+    const policy = parameterPolicy(section, key);
+    input.disabled = state.parameterActionInFlight || locked
+      || (online && policy.runtime_editable !== true);
+    input.title = online ? (policy.reason || "Online editing is not available for this field.") : "";
     const field = input.closest(".field");
     const fieldState = renderParameterFieldState(field, value, savedValue, defaultValue, state.paramMeta[key]);
-    if (fieldState.unsaved) unsavedCount += 1;
+    if (fieldState.unsaved && (!online || input.dataset.edited === "true")) unsavedCount += 1;
     if (fieldState.differsExactly) modifiedCount += 1;
     const fieldReset = field.querySelector(".field-reset");
-    fieldReset.disabled = state.parameterActionInFlight || locked;
+    fieldReset.disabled = state.parameterActionInFlight || locked || online;
+    let policyNote = field.querySelector(".field-runtime-policy");
+    if (!policyNote) {
+      policyNote = document.createElement("p");
+      policyNote.className = "field-runtime-policy field-description";
+      field.appendChild(policyNote);
+    }
+    policyNote.hidden = !online;
+    policyNote.textContent = online ? `${policy.runtime_editable ? "Online" : "Startup only"}: ${policy.reason || "Not available during a run."}${fieldState.unsaved ? ` Active value: ${formatFieldValue(savedValue)}.` : ""}${key === "dt_G" ? " Match the external camera interval; this does not change its capture rate." : ""}` : "";
   });
 
-  saveParamsButton.disabled = state.parameterActionInFlight || locked || unsavedCount === 0;
-  resetParamsButton.disabled = state.parameterActionInFlight || locked || modifiedCount === 0;
+  const staleRevision = runtimeRunActive() && unsavedCount > 0 && state.parameterEditRevision !== null
+    && state.parameterEditRevision !== state.controllerStatus?.runtime_controls?.revision;
+  saveParamsButton.disabled = state.parameterActionInFlight || locked || staleRevision || unsavedCount === 0;
+  resetParamsButton.disabled = state.parameterActionInFlight || locked || runtimeRunActive() || modifiedCount === 0;
+  if (!unsavedCount) state.parameterEditRevision = null;
   state.parameterUnsavedCount = unsavedCount;
+  if (parameterReviewRevisionButton) {
+    const stale = runtimeRunActive() && unsavedCount > 0 && state.parameterEditRevision !== null
+      && state.parameterEditRevision !== state.controllerStatus?.runtime_controls?.revision;
+    parameterReviewRevisionButton.hidden = !stale;
+    parameterReviewRevisionButton.disabled = locked;
+  }
   renderParameterStatus(unsavedCount);
 }
 
@@ -1067,7 +1269,7 @@ function renderParameterStatus(unsavedCount = 0) {
     message = state.parameterRefreshError;
   } else if (unsavedCount > 0) {
     kind = "unsaved";
-    message = `${unsavedCount} unsaved change${unsavedCount === 1 ? "" : "s"}`;
+    message = `Unsaved changes: ${unsavedCount}`;
   } else if (kind === "draft_saved") {
     const savedTime = formatParameterTime(state.params?.status?.saved_at);
     if (savedTime) {
@@ -1075,10 +1277,39 @@ function renderParameterStatus(unsavedCount = 0) {
     }
   }
 
+  const parameterRequest = state.runtimeRequest?.command?.experiment_started_at
+    ? state.runtimeRequest : null;
+  if (runtimeRunActive() && !state.parameterError && !state.parameterActionInFlight) {
+    if (parameterRequest && runtimeUnconfirmed(parameterRequest)) {
+      kind = "saving";
+      const result = parameterRequest.result || {};
+      message = result.phase === "waiting_for_measurement" || result.waiting_for_fresh_measurement
+        ? "Waiting for fresh measurement" : "Pending — waiting for participant confirmation";
+      if (parameterRequest.transport_error) message += `. ${parameterRequest.transport_error}`;
+      if (parameterRequest.status === "timeout") message += ". Confirmation delayed; retry the same update using Retry Update.";
+    } else if (!unsavedCount && parameterRequest?.status === "applied") {
+      kind = "applied";
+      message = parameterRequest.result?.no_change ? "Values unchanged; no refresh"
+        : `Applied at tick ${parameterRequest.result?.effective_tick ?? "unavailable"} · revision ${parameterRequest.result?.revision ?? "unavailable"}`;
+    } else if (parameterRequest?.status === "rejected") {
+      kind = "error";
+      message = `Failed: ${parameterRequest.result?.reason || "Parameter update rejected"}. Your edits are retained.`;
+    } else if (!unsavedCount) {
+      kind = onlineParametersReady() ? "applied" : "error";
+      message = onlineParametersReady() ? `Current parameters · revision ${state.controllerStatus.runtime_controls.revision}`
+        : state.controllerStatus?.run_parameters?.unavailable_reason
+          || "Waiting for confirmed Controller parameters; editing is locked";
+    }
+  }
+
   parameterStatus.className = `parameter-status ${kind}`;
   parameterStatusText.textContent = message;
   const source = document.getElementById("parameter-source");
   if (source) {
+    if (runtimeRunActive()) {
+      source.textContent = "Changes affect this experiment only. Save Parameters submits edits for the next prepared control boundary; startup values and next-experiment defaults are unchanged.";
+      return;
+    }
     const savedTime = formatParameterTime(state.params?.status?.saved_at);
     source.textContent = savedTime
       ? `Source: saved parameter set · ${savedTime}. Reopening or creating an experiment keeps this set.`
@@ -1120,6 +1351,13 @@ function setExperimentMessage(message, { error = false } = {}) {
 
 function renderControllerStartStatus() {
   if (!state.startSentRunId) return;
+  if (controllerRecoveryHeld() || state.recoveryEndPending) {
+    commandStatus.textContent = "safety confirmation required";
+    commandStatus.className = "status error";
+    state.startSentRunId = null;
+    renderRecoveryEndStatus();
+    return;
+  }
   const current = currentExperiment();
   if (current?.run_id !== state.startSentRunId
       || !["starting", "waiting_for_initial_image", "initializing", "measuring"].includes(current.status)) {
@@ -1393,14 +1631,17 @@ function renderExperiments() {
     && state.lastRenderedExperimentStatus === "stopping"
     && status === "completed";
   const isTerminal = ["completed", "error"].includes(status);
-  const canCreate = !hasCurrent || isTerminal;
+  const recoveryHeld = controllerRecoveryHeld();
+  const recoveryEndWaiting = state.recoveryEndPending && !recoveryEndConfirmed(state.recoveryEndPending);
+  const recoveryBlocksStart = recoveryHeld || recoveryEndWaiting;
+  const canCreate = (!hasCurrent || isTerminal) && !recoveryBlocksStart;
   const controllerRunning = controllerRunningForRun(current?.run_id);
-  const canStart = ["created", "starting"].includes(status) && !controllerRunning;
+  const canStart = ["created", "starting"].includes(status) && !controllerRunning && !recoveryBlocksStart;
   const selectionRetryRequired = status === "created"
     && state.selectionRetryRunId === current?.run_id;
   const canRetrySelection = status === "created" && (selectionRetryRequired
     || (state.gsensorStatusRunId !== current?.run_id && state.selectionSentRunId !== current?.run_id));
-  const canEnd = hasCurrent && !isTerminal;
+  const canEnd = hasCurrent && (!isTerminal || controllerRecoveryHeldForRun(current));
   const action = state.experimentActionName;
   const blocked = !state.systemStatusFresh || mutationInFlight();
   if (state.lastRenderedRunId !== current?.run_id) {
@@ -1426,6 +1667,7 @@ function renderExperiments() {
   newExperimentButton.disabled = !canCreate || blocked;
   startExperimentButton.disabled = !canStart
     || blocked
+    || state.parameterViewNeedsRefresh
     || selectionRetryRequired
     || state.runConfigurationInFlight
     || Boolean(state.runConfigurationError);
@@ -1444,13 +1686,14 @@ function renderExperiments() {
     ? "Ending…"
     : (status === "stopping" ? "Retry End" : "End Experiment");
 
-  if (completedAfterStop) {
+  if (completedAfterStop && !recoveryHeld && !state.recoveryEndPending) {
     setExperimentMessage(`Completed ${displayNameForExperiment(current)}. Gsensor finalization is complete.`);
   }
   state.lastRenderedRunId = current?.run_id || null;
   state.lastRenderedExperimentStatus = status;
   renderRunConfiguration();
   renderGsensorActivation();
+  renderRecoveryEndStatus();
 }
 
 function updateCentralOverlay(runId, frameSeq, { final = false, force = false } = {}) {
@@ -1478,9 +1721,11 @@ function renderSystemStatus(payload) {
     && gsensor.last_status?.run_id === current.run_id;
   const gsensorStatus = gsensorMatchesRun ? gsensor.last_status : {};
   state.controllerStatus = controller;
+  renderDerivedParameterPreview();
   state.runtimeHistory = payload.runtime_history || [];
   state.runtimeHistoryError = payload.runtime_history_error || "";
   observeRuntimeRequest(payload.runtime_request || null);
+  syncOnlineParameterValues();
   observeGsensorActivation(gsensor.activation || null);
 
   if (state.seedActionRunId && state.seedActionRunId !== current?.run_id) {
@@ -1617,6 +1862,15 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
     state.gsensorActivationErrorSource = null;
     state.gsensorActivation = null;
   }
+  const wasActive = runtimeRunActive();
+  const nextStatus = payload.current_experiment?.status;
+  const nextActive = Boolean(nextStatus) && !["created", "completed", "error"].includes(nextStatus);
+  if (!nextActive && (wasActive || state.params?.run_parameters || state.parameterDraftContext)) {
+    stashOnlineParameterDraft();
+    // Never let a live overlay become the next-experiment startup draft.
+    // Save and Start stay locked until the persisted draft has been reloaded.
+    state.parameterViewNeedsRefresh = true;
+  }
   state.experiments = experiments.experiments || [];
   window.updateExperimentArchive?.(payload.archive, payload.archive_error);
   state.currentRunId = experiments.current_run_id || null;
@@ -1625,6 +1879,14 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
   renderExperiments();
   updateParameterDraftState();
   renderSystemStatus(payload);
+  if (state.parameterViewNeedsRefresh && !runtimeRunActive()) {
+    try {
+      await loadParams();
+    } catch (error) {
+      state.parameterRefreshError = `Next-experiment parameters are not confirmed: ${error.message}`;
+    }
+    renderMutationState();
+  }
   if (forceOverlay) {
     const status = payload.gsensor?.last_status || {};
     const frameSeq = Number(status.frame_seq || 0);
@@ -1717,26 +1979,41 @@ async function finishCurrentExperiment() {
   if (!current || endExperimentButton.disabled) {
     return;
   }
+  const recoveryEnd = controllerRecoveryHeldForRun(current);
   const confirmed = window.confirm(
-    current.status === "stopping"
+    recoveryEnd
+      ? "End this interrupted Controller run? Wait for Controller to confirm stopped before creating a new experiment."
+      : current.status === "stopping"
       ? "Retry sending End to Gsensor and Controller for this experiment?"
       : "End the current experiment? New images will no longer be processed.",
   );
   if (!confirmed) {
     return;
   }
+  if (recoveryEnd) {
+    state.recoveryEndPending = { run_id: current.run_id, started_at: current.started_at };
+  }
   const result = await runExperimentAction(
     "end",
-    () => fetchJson(`/api/experiments/${encodeURIComponent(current.run_id)}/finish`, {
-      method: "POST",
-      body: JSON.stringify({ expected_run_id: current.run_id }),
-    }),
-    (experiment) => experiment.status === "completed"
+    async () => {
+      try {
+        return await fetchJson(`/api/experiments/${encodeURIComponent(current.run_id)}/finish`, {
+          method: "POST",
+          body: JSON.stringify({ expected_run_id: current.run_id }),
+        });
+      } catch (error) {
+        if (recoveryEnd && state.recoveryEndPending?.run_id === current.run_id) {
+          state.recoveryEndPending.deliveryError = error.message;
+        }
+        throw error;
+      }
+    },
+    (experiment) => recoveryEnd ? recoveryEndMessage(current) : experiment.status === "completed"
       ? `Ended ${displayNameForExperiment(experiment)}.`
       : `End sent for ${displayNameForExperiment(experiment)}. Waiting for Gsensor to save the final result and confirm completion.`,
   );
   const refreshed = currentExperiment();
-  if (result && refreshed?.run_id === current.run_id && refreshed?.status === "completed"
+  if (!recoveryEnd && result && refreshed?.run_id === current.run_id && refreshed?.status === "completed"
     && state.systemStatusFresh) {
     setExperimentMessage(`Completed ${displayNameForExperiment(refreshed)}. Gsensor finalization is complete.`);
   }
@@ -1911,7 +2188,10 @@ async function retryGsensorActivation() {
 
 
 async function submitRuntimeUpdate(changes, retryCommand = null) {
-  if (!runtimeReady() || mutationInFlight() || (runtimeUnconfirmed() && !retryCommand)) {
+  if (retryCommand?.experiment_started_at) return submitParameterUpdate(retryCommand);
+  if (!runtimeReady() || mutationInFlight() || (runtimeUnconfirmed() && !retryCommand)
+      || (!retryCommand && (state.controllerStatus?.runtime_controls?.pending
+          || state.controllerStatus?.run_parameters?.pending))) {
     renderRunConfiguration();
     return;
   }
@@ -1947,6 +2227,46 @@ async function submitRuntimeUpdate(changes, retryCommand = null) {
   } finally {
     state.runtimeInFlight = false;
     try { await loadSystemStatus(); } catch (error) { state.runtimeError = error.message; }
+    renderMutationState();
+  }
+}
+
+async function submitParameterUpdate(retryCommand = null) {
+  if (!onlineParametersReady() || mutationInFlight() || (runtimeUnconfirmed() && !retryCommand)
+      || (!retryCommand && (state.controllerStatus?.runtime_controls?.pending
+          || state.controllerStatus?.run_parameters?.pending))) return null;
+  const command = retryCommand || {
+    run_id: state.currentRunId, event_id: crypto.randomUUID(),
+    expected_revision: state.parameterEditRevision ?? state.controllerStatus.runtime_controls.revision,
+    experiment_started_at: currentExperiment()?.started_at,
+    changes: collectParameterChanges(), requested_at: new Date().toISOString(),
+  };
+  if (command.run_id !== state.currentRunId || !Object.keys(command.changes).length) return null;
+  const request = retryCommand ? state.runtimeRequest : {
+    command, status: "pending", created_at: Date.now() / 1000, result: null,
+  };
+  rememberRuntimeRequest(request);
+  state.parameterActionInFlight = true;
+  state.parameterError = null;
+  invalidatePendingReads();
+  renderMutationState();
+  try {
+    const response = await fetchJson("/api/params", {method: "POST", body: JSON.stringify({
+      ...command, run_id: undefined, expected_run_id: command.run_id,
+    })});
+    if (state.currentRunId === command.run_id) rememberRuntimeRequest(response.runtime_request);
+    return response;
+  } catch (error) {
+    if (state.currentRunId === command.run_id) {
+      state.parameterError = error.message;
+      if ([400, 403, 404, 409, 422].includes(error.status)) {
+        rememberRuntimeRequest({...request, status: "rejected", result: {reason: error.message}});
+      } else rememberRuntimeRequest({...request, transport_error: "HTTP delivery is unconfirmed; retry the same update."});
+    }
+    return null;
+  } finally {
+    state.parameterActionInFlight = false;
+    try { await loadSystemStatus(); } catch (error) { state.parameterRefreshError = error.message; }
     renderMutationState();
   }
 }
@@ -2033,8 +2353,20 @@ async function loadOperationState({ updateRunConfiguration = true } = {}) {
   if (updateRunConfiguration && !state.runConfigurationInFlight) {
     applyRunConfigurationPayload(payload.run_configuration);
   }
-  derivedPreview.textContent = JSON.stringify(payload.preview, null, 2);
+  state.startupParameterPreview = payload.preview;
+  renderDerivedParameterPreview();
   renderParameterStatus(state.parameterUnsavedCount);
+}
+
+function renderDerivedParameterPreview() {
+  const current = currentExperiment();
+  const controller = state.controllerStatus;
+  const confirmed = state.systemStatusFresh && controller?.available
+    && controllerMatchesRecoveryIdentity(current) && runtimeRunActive();
+  derivedPreview.textContent = JSON.stringify({
+    startup_preview: state.startupParameterPreview,
+    current_runtime_derived: confirmed ? controller.run_parameters?.derived_values ?? null : null,
+  }, null, 2);
 }
 
 async function pollStatus({ refreshParameters = false } = {}) {
@@ -2070,6 +2402,7 @@ function reportPollingError(error) {
 
 async function saveParams() {
   if (saveParamsButton.disabled || !state.systemStatusFresh || mutationInFlight()) return null;
+  if (runtimeRunActive()) return submitParameterUpdate();
   const draft = parameterPayloadFromDraft();
   invalidatePendingReads();
   state.parameterActionInFlight = true;
@@ -2204,6 +2537,15 @@ resetParamsButton.addEventListener("click", async () => {
 
 saveParamsButton.addEventListener("click", async () => {
   await saveParams();
+});
+
+parameterReviewRevisionButton?.addEventListener("click", () => {
+  if (parametersLocked() || !onlineParametersReady()) return;
+  state.parameterEditRevision = state.controllerStatus.runtime_controls.revision;
+  state.parameterError = null;
+  state.parameterRefreshError = null;
+  updateParameterDraftState();
+  parameterStatusText.textContent = `Edits retained. Review against revision ${state.parameterEditRevision}, then click Save Parameters.`;
 });
 
 refreshPreviewButton.addEventListener("click", async (event) => {

@@ -243,6 +243,7 @@ class GrowthRateSamplePayload:
     control_revision: int | None = None
     initialization_generation: int | None = None
     alignment_revision: int | None = None
+    parameter_revision: int | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run_id")
@@ -259,7 +260,7 @@ class GrowthRateSamplePayload:
 
         if self.experiment_started_at is not None:
             _strict_required_text(self.experiment_started_at, "experiment_started_at")
-        for name in ("control_revision", "initialization_generation", "alignment_revision"):
+        for name in ("control_revision", "initialization_generation", "alignment_revision", "parameter_revision"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a nonnegative integer or null.")
@@ -294,7 +295,7 @@ class GrowthRateSamplePayload:
             "G_v_KF": self.G_v_KF,
             "error": self.error,
         }
-        for name in ("experiment_started_at", "control_revision", "initialization_generation", "alignment_revision"):
+        for name in ("experiment_started_at", "control_revision", "initialization_generation", "alignment_revision", "parameter_revision"):
             value = getattr(self, name)
             if value is not None:
                 payload[name] = value
@@ -321,6 +322,7 @@ class GrowthRateSamplePayload:
             control_revision=_mapping_optional_nonnegative_int(payload, "control_revision"),
             initialization_generation=_mapping_optional_nonnegative_int(payload, "initialization_generation"),
             alignment_revision=_mapping_optional_nonnegative_int(payload, "alignment_revision"),
+            parameter_revision=_mapping_optional_nonnegative_int(payload, "parameter_revision"),
         )
 
 
@@ -339,6 +341,8 @@ class GrowthRateStatusPayload:
     initialization_generation: int | None = None
     alignment_revision: int | None = None
     measurement_ready: bool | None = None
+    parameter_revision: int | None = None
+    alignment_method: str | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.run_id, "run_id")
@@ -362,12 +366,15 @@ class GrowthRateStatusPayload:
             )
         if self.control_event_id is not None:
             _strict_required_text(self.control_event_id, "control_event_id")
-        for name in ("initialization_generation", "alignment_revision"):
+        for name in ("initialization_generation", "alignment_revision", "parameter_revision"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a nonnegative integer or null.")
         if self.measurement_ready is not None and type(self.measurement_ready) is not bool:
             raise ValueError("measurement_ready must be a boolean or null.")
+        if self.alignment_method is not None and self.alignment_method not in (
+                "none", "centroid", "fft", "kalman", "loftr", "sift", "optical_flow", "ecc"):
+            raise ValueError("alignment_method must name a supported method or be null.")
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -386,7 +393,7 @@ class GrowthRateStatusPayload:
             payload["experiment_started_at"] = self.experiment_started_at
         if self.control_event_id is not None:
             payload["control_event_id"] = self.control_event_id
-        for name in ("initialization_generation", "alignment_revision", "measurement_ready"):
+        for name in ("initialization_generation", "alignment_revision", "measurement_ready", "parameter_revision", "alignment_method"):
             value = getattr(self, name)
             if value is not None:
                 payload[name] = value
@@ -417,6 +424,8 @@ class GrowthRateStatusPayload:
             initialization_generation=_mapping_optional_nonnegative_int(payload, "initialization_generation"),
             alignment_revision=_mapping_optional_nonnegative_int(payload, "alignment_revision"),
             measurement_ready=_mapping_optional_bool(payload, "measurement_ready"),
+            parameter_revision=_mapping_optional_nonnegative_int(payload, "parameter_revision"),
+            alignment_method=_mapping_optional_strict_text(payload, "alignment_method"),
         )
 
 

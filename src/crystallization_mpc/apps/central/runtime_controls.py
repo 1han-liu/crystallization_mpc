@@ -11,6 +11,7 @@ from uuid import uuid4
 from typing import Any
 
 from crystallization_mpc.messaging.controller_runtime import ControllerRuntimeUpdatePayload
+from crystallization_mpc.messaging.run_parameters import RunParametersUpdatePayload
 from crystallization_mpc.infra.runtime_history import RuntimeHistory
 from crystallization_mpc.infra.storage_paths import system_path
 
@@ -33,7 +34,9 @@ class RuntimeRequestStore:
         if not isinstance(runs, dict):
             raise ValueError("Invalid Central runtime request runs.")
         for run_id, entry in runs.items():
-            command = ControllerRuntimeUpdatePayload.from_mapping(entry["command"])
+            parser = (RunParametersUpdatePayload if "experiment_started_at" in entry["command"]
+                      else ControllerRuntimeUpdatePayload)
+            command = parser.from_mapping(entry["command"])
             if command.run_id != run_id:
                 raise ValueError("Central runtime request run_id mismatch.")
         return runs
@@ -88,6 +91,10 @@ class RuntimeRequestStore:
             results = list(runtime.get("recent_events") or []) + results
             if runtime.get("last_result"):
                 results.insert(0, runtime["last_result"])
+            parameters = controller.get("run_parameters") or {}
+            results = list(parameters.get("events") or []) + results
+            if parameters.get("last_result"):
+                results.insert(0, parameters["last_result"])
         for result in results:
             if (result.get("event_id") == entry["command"]["event_id"]
                     and result.get("run_id") == run_id
