@@ -60,6 +60,8 @@ const state = {
   selectionSentRunId: null,
   selectionRetryRunId: null,
   startSentRunId: null,
+  processWaitRunId: null,
+  growthWaitRunId: null,
   recoveryEndPending: null,
 };
 
@@ -257,6 +259,67 @@ function controllerRunningForRun(runId) {
     && controller.active === true && controller.recovery?.status !== "error";
 }
 
+function controllerWaitingForProcess(controller = state.controllerStatus) {
+  return state.systemStatusFresh && controller?.available === true
+    && controller.status === "running" && controller.active === true
+    && !controller.error
+    && !["error", "persistence_error", "confirmation_required"].includes(controller.recovery?.status)
+    && controller.integrations?.process?.waiting_for_data === true;
+}
+
+function controllerWaitingForGrowth(controller = state.controllerStatus) {
+  const growth = controller?.growth_input;
+  return state.systemStatusFresh && controller?.available === true
+    && controller.status === "running" && controller.active === true
+    && !controller.error
+    && !["error", "persistence_error", "confirmation_required"].includes(controller.recovery?.status)
+    && growth?.source === "live_gsensor" && growth.requested_enabled === true
+    && ["growth_data_timeout", "waiting_for_fresh_valid_sample"].includes(growth.growth_wait?.reason);
+}
+
+function processWaitMessage(controller = state.controllerStatus) {
+  const process = controller?.integrations?.process || {};
+  const concentration = process.last_invalid_state?.raw_c;
+  const detail = process.wait_reason === "negative_concentration"
+    ? ` Concentration is negative${typeof concentration === "number" && Number.isFinite(concentration)
+      ? ` (c = ${concentration.toPrecision(6)})` : ""}.` : "";
+  const reason = process.wait_reason === "process_data_timeout"
+    ? "Waiting for fresh process data. Communication timed out."
+    : `Waiting for valid process data.${detail}`;
+  const reasons = [];
+  if (controllerWaitingForProcess(controller)) reasons.push(reason);
+  if (controllerWaitingForGrowth(controller)) reasons.push("Waiting for fresh valid G data.");
+  return `${reasons.join(" ")} Control calculations and device writes are paused. This experiment will resume automatically when fresh valid measurements arrive.`;
+}
+
+function renderProcessWaitStatus() {
+  const current = currentExperiment();
+  const processWaiting = controllerWaitingForProcess();
+  const growthWaiting = controllerWaitingForGrowth();
+  if ((processWaiting || growthWaiting) && controllerRunningForRun(current?.run_id)
+      && current.status !== "stopping" && !state.recoveryEndPending) {
+    state.processWaitRunId = current.run_id;
+    state.growthWaitRunId = growthWaiting ? current.run_id : null;
+    commandStatus.textContent = processWaiting && growthWaiting ? "waiting for input data"
+      : growthWaiting ? "waiting for G data" : "waiting for process data";
+    commandStatus.className = "status idle";
+    setExperimentMessage(processWaitMessage());
+  } else if (state.processWaitRunId && state.systemStatusFresh) {
+    const previousRunId = state.processWaitRunId;
+    const wasGrowthWaiting = state.growthWaitRunId === previousRunId;
+    state.processWaitRunId = null;
+    state.growthWaitRunId = null;
+    if (previousRunId === current?.run_id && controllerRunningForRun(current.run_id)
+        && !controllerFailureMessage() && current.status !== "stopping" && !state.recoveryEndPending) {
+      commandStatus.textContent = "running";
+      commandStatus.className = "status success";
+      setExperimentMessage(wasGrowthWaiting && state.controllerStatus.growth_input?.requested_enabled === false
+        ? `Controller is running for ${displayNameForExperiment(current)}. GSensor is Off.`
+        : `Controller resumed for ${displayNameForExperiment(current)} after receiving fresh valid measurement data.`);
+    }
+  }
+}
+
 function controllerRecoveryHeld() {
   const controller = state.controllerStatus;
   return state.systemStatusFresh && controller?.available === true
@@ -354,6 +417,7 @@ function controllerFailureMessage(controller = state.controllerStatus) {
   if (controller?.recovery?.status === "persistence_error" && controller.recovery.error) {
     return `Controller state could not be saved: ${controller.recovery.error}`;
   }
+  if (controllerWaitingForProcess(controller) || controllerWaitingForGrowth(controller)) return "";
   return controller?.error || controller?.last_error
     || (controller?.status === "error" ? "Controller reported an error." : "");
 }
@@ -1380,6 +1444,7 @@ function renderControllerStartStatus() {
     commandStatus.className = "status success";
     setExperimentMessage(`Controller confirmed running for ${displayNameForExperiment(current)}.`);
     state.startSentRunId = null;
+    renderProcessWaitStatus();
   } else {
     commandStatus.textContent = "awaiting Controller";
     commandStatus.className = "status idle";
@@ -1479,8 +1544,12 @@ function renderControllerGrowthInput() {
   let label = "Unconfirmed";
   let message = "Controller growth-rate availability is unconfirmed.";
   let className = "status idle";
+  const growthWaiting = controllerWaitingForGrowth(controller);
 
-  if (growthInput?.source && growthInput.source !== "live_gsensor") {
+  if (growthInput && growthWaiting) {
+    label = "Waiting";
+    message = "Waiting for fresh valid G data. Control calculations and device writes are paused. This experiment will resume automatically when a fresh valid measurement arrives.";
+  } else if (growthInput?.source && growthInput.source !== "live_gsensor") {
     label = "Not in use";
     message = "Controller is using a non-camera growth-rate source for this experiment.";
   } else if (growthInput) {
@@ -1514,7 +1583,7 @@ function renderControllerGrowthInput() {
       className = "status running";
       message = "Waiting for a fresh valid growth-rate measurement.";
     }
-    if (growthInput.control_hold_reason) {
+    if (growthInput.control_hold_reason && !growthWaiting) {
       message += " Growth-rate target control is waiting and the current jacket setpoint is being held.";
     }
   }
@@ -1694,6 +1763,7 @@ function renderExperiments() {
   renderRunConfiguration();
   renderGsensorActivation();
   renderRecoveryEndStatus();
+  renderProcessWaitStatus();
 }
 
 function updateCentralOverlay(runId, frameSeq, { final = false, force = false } = {}) {
@@ -1749,10 +1819,16 @@ function renderSystemStatus(payload) {
   gsensorLiveError.hidden = !gsensorLiveError.textContent;
 
   const recoveryFailed = controller.recovery?.status === "error";
-  controllerLiveStatus.textContent = recoveryFailed ? "error" : controller.status || "unavailable";
+  const processWaiting = controllerWaitingForProcess(controller);
+  const growthWaiting = controllerWaitingForGrowth(controller);
+  const inputWaiting = processWaiting || growthWaiting;
+  controllerLiveStatus.textContent = recoveryFailed ? "error"
+    : processWaiting && growthWaiting ? "waiting for input data"
+      : growthWaiting ? "waiting for G data"
+        : processWaiting ? "waiting for process data" : controller.status || "unavailable";
   controllerLiveStatus.className = controller.available
     ? (recoveryFailed || controller.status === "error" ? "status error"
-      : controller.status === "running" ? "status running" : "status idle")
+      : controller.status === "running" && !inputWaiting ? "status running" : "status idle")
     : "status error";
   controllerRunId.textContent = controller.current_run_id || "—";
   controllerLastFrame.textContent = controller.last_frame_seq ?? "—";
@@ -1774,7 +1850,7 @@ function renderSystemStatus(payload) {
     && controller.last_error.startsWith("RabbitMQ consumer error:")
     && controller.consumer?.status === "consuming"
     && controller.consumer?.thread_alive === true;
-  controllerLiveError.textContent = previousConnectionError
+  controllerLiveError.textContent = inputWaiting ? "" : previousConnectionError
     ? `Previous connection error; connection currently reported active. ${controller.last_error}`
     : controllerFailureMessage(controller);
   controllerLiveError.hidden = !controllerLiveError.textContent;

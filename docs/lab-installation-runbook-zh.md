@@ -523,7 +523,7 @@ docker compose exec gsensor python -c "from pathlib import Path; p=Path('/data/e
 docker compose exec -T gsensor python -c "from crystallization_mpc.apps.gsensor.detection.find_edge_points_yolov import OnnxRuntimeYoloV8Seg; OnnxRuntimeYoloV8Seg(); print('ONNX OK')"
 ```
 
-默认 `dt=5s`，`dt_G=15s`，它们不是同一时钟。G 输入丢失/陈旧会影响适应和 G 目标控制；不要因为 σ 模式仍有曲线就认为图像链路正常。`Add Seed` 是记录实际投晶种事件，不会操作投料设备，必须在真正投晶种后按实验规程使用。
+默认 `dt=5s`，`dt_G=15s`，它们不是同一时钟。启用实时 GSensor 后，首次 G 尚未准备好或既有 G 超过 `2 × dt_G`（默认 30 秒）时，Controller 保持同一实验，持续等待新鲜有效 G，暂停控制计算、适应和设备写入；σ 和 G 目标均受此门控。网页显示 **Waiting for fresh valid G data**，可在 Controller `growth_input.growth_wait` 查看原因和等待起点。30 秒是新鲜度阈值，不是自动终止时限；新 G 通过原有身份、版本及有效性检查且过程输入也有效后，同一实验自动继续，恢复首周期只更新基线而不写设备。明确关闭 GSensor 时仍走原有非相机输入逻辑；其他真实故障或容器重启仍需按提示人工处理。`Add Seed` 是记录实际投晶种事件，不会操作投料设备，必须在真正投晶种后按实验规程使用。
 
 相机拍摄周期应与 `dt_G` 对应；缺图不意味着软件会自动推断实际间隔并修正生长率。GSensor 重启后默认关闭，需再次 Enable；Controller 重启也会等待新的 G 状态和样本，不能依赖旧缓存。
 

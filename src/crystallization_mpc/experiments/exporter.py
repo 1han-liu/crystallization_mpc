@@ -275,9 +275,13 @@ def _records(records, run_id):
             row["measurement"] = record["_measurement"]
         if row.get("measurement") == "process_io_event" and not row.get("event_type"):
             # Keep the producer's actual stage as a separate stable CSV column.
-            row["event_type"] = "process.setpoint.write" if row.get("stage") in {
-                "prepared", "published", "executing",
-            } else "process.setpoint.result"
+            measurement_events = {"measurement_wait": "process.measurement.wait",
+                                  "measurement_resumed": "process.measurement.resumed"}
+            row["event_type"] = measurement_events.get(row.get("stage")) or (
+                "process.setpoint.write" if row.get("stage") in {
+                    "prepared", "published", "executing",
+                } else "process.setpoint.result"
+            )
         signature = json.dumps(_json_safe(row), sort_keys=True, ensure_ascii=False)
         if signature not in seen:
             seen.add(signature)
@@ -355,7 +359,14 @@ def _command_coverage(controller, events):
         prepared_ticks.update(row["tick_seq"] for row in prepared if type(row.get("tick_seq")) is int)
         receipts = [row for row in controller_records if row.get("stage") == "receipt"]
         published = [row for row in controller_records if row.get("stage") == "published"]
-        terminal = receipts or [row for row in controller_records if row.get("stage") == "unknown"]
+        execution_observed = bool(published or receipts or any(
+            row.get("service") == "opcua_writer" and row.get("stage") in {"executing", "result", "invalid"}
+            for row in records
+        ))
+        not_sent = [] if execution_observed else [
+            row for row in controller_records if _confirmed_not_sent(row, command_id)
+        ]
+        terminal = receipts or [row for row in controller_records if row.get("stage") == "unknown"] or not_sent
         if prepared and not terminal:
             unconfirmed.append(command_id)
         if (receipts or published) and not any(
@@ -370,6 +381,31 @@ def _command_coverage(controller, events):
             "missing_controller_outcome_commands": sorted(unconfirmed), "missing_writer_result_commands": sorted(missing_writer),
             "reason": ("Some attempted writes lack their persisted command or outcome audit records."
                        if partial else "Available command audit records include the expected outcomes; outcome unknown is preserved as unknown.")}
+
+
+def _confirmed_not_sent(row, command_id):
+    """Accept the Controller's explicit, identity-matched prepublication stop.
+
+    This only proves a command was not sent; it never supplies a writer receipt
+    or changes an already published/unknown command into a successful write.
+    """
+    if row.get("service") != "controller" or row.get("stage") != "not_sent":
+        return False
+    try:
+        payload = _mapping_value(row.get("payload"))
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(payload, dict)
+            and payload.get("command_sent") is False
+            and payload.get("status") == "failed"
+            and "write_result" in payload and payload["write_result"] is None
+            and payload.get("command_id") == command_id
+            and isinstance(row.get("run_id"), str) and bool(row["run_id"])
+            and payload.get("run_id") == row["run_id"]
+            and type(payload.get("tick_seq")) is int
+            and type(row.get("tick_seq")) is int
+            and payload["tick_seq"] == row["tick_seq"]
+            and isinstance(payload.get("error"), str) and bool(payload["error"]))
 
 
 def _process_data(run_id, manifest, capture, source):

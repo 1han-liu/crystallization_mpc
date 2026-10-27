@@ -122,6 +122,10 @@ class CrystallizationController:
         self.size_list = np.empty(0, dtype=float)
         self.simulation_state: dict[str, float] | None = None
         self.control_T_j_reference_K: float | None = None
+        # A transient, same-tick handoff from the service's process-data wait.
+        # It is consumed before that tick can be committed/checkpointed. A
+        # process restart independently enters the existing confirmation hold.
+        self._process_resume_pending = False
         # Only contiguous, eligible measurements feed growth derivatives.
         # Display/audit history is independent from the active fitting segment.
         self.fitting_G_measure_history: list[float] = []
@@ -420,6 +424,22 @@ class CrystallizationController:
         except Exception:
             self._diagnostic_capture_failed = True
 
+    def resume_process_state(self, process_state: ProcessState) -> None:
+        """Mark one measurement-only warm-up after a paused real-data stream.
+
+        Do not call start()/initialize_process_state() again: the run, control
+        reference, integral terms, parameters and crystal population still own
+        their existing state. The next step rebases only the main measurement
+        filter and deliberately does not interpret a cross-gap change as dt.
+        """
+        if (not self.running or self.params.get("run_type") != "experiment"
+                or self.control_T_j_reference_K is None or self.ekf is None):
+            raise RuntimeError("Process recovery requires an initialized, running Experiment.")
+        if not isinstance(process_state, ProcessState):
+            raise TypeError("Process recovery requires a validated ProcessState.")
+        process_state.__post_init__()
+        self._process_resume_pending = True
+
     def _noise_value(self, name: str, index: int, seed: int, scale: float) -> float:
         supplied = self._fixture_simulation_noise
         if supplied is None:
@@ -697,6 +717,7 @@ class CrystallizationController:
         simulation_tick_index = self.frame_index
         self.frame_index = tick_input.tick_seq
         self.elapsed_s = float(tick_input.elapsed_s)
+        process_resuming = self._process_resume_pending
         rollback_state: dict[str, Any] | None = None
         try:
             if self.params["run_type"] == "simulation":
@@ -718,6 +739,19 @@ class CrystallizationController:
                 return ControllerStepResult(valid=False, error="Process input violates physical bounds.")
 
             rollback_state = self._snapshot_numeric_state()
+            if process_resuming:
+                # No propagation of an old state across an unmeasured physical
+                # gap, and no synthetic zero/negative concentration samples.
+                # Preserve the adaptation filters themselves; only their active
+                # derivative/fitting windows must not bridge the missing data.
+                self.ekf = construct_EKF(np.array([T, 0.0, c, 0.0]), self.params, dt)
+                self.ekf.measurement = lambda value: np.array([value[0], value[2]])
+                self.num_adapt = 0
+                self.fitting_G_measure_history = []
+                self.fitting_segment = {key: [] for key in self.fitting_segment}
+                self.fitting_last_tick = None
+                self._process_resume_pending = False
+                self._attach_diagnostic_observers()
             refreshed = (
                 self._refresh_at_measurement(tick_input.runtime_update, T, c)
                 if tick_input.runtime_update is not None else False
@@ -731,8 +765,10 @@ class CrystallizationController:
                                ("c", c), ("count_middle", count_middle)):
                 self.history[key].append(value)
             self._history_tick_seq.append(self.frame_index)
-            dT_dt = calc_dT_dt(self.history["T"][self.segment_history_start :], dt)
-            dc_dt = calc_dc_dt(self.history["c"][self.segment_history_start :], dt)
+            dT_dt = (0.0 if process_resuming else
+                     calc_dT_dt(self.history["T"][self.segment_history_start :], dt))
+            dc_dt = (0.0 if process_resuming else
+                     calc_dc_dt(self.history["c"][self.segment_history_start :], dt))
             self.history["dT_dt"].append(dT_dt)
             self.history["dc_dt"].append(dc_dt)
             if self.ekf is None:
@@ -740,7 +776,7 @@ class CrystallizationController:
             # A refresh initializes at this measurement; predicting immediately
             # would advance the estimator a second time relative to the plant.
             filtered = (
-                self.ekf.state.copy() if refreshed else
+                self.ekf.state.copy() if refreshed or process_resuming else
                 smooth_EKF(self.ekf, self.params, np.array([T, dT_dt, c, dc_dt]))
             )
             T_KF, dT_dt_KF, c_KF, dc_dt_KF = map(float, filtered)
@@ -768,8 +804,12 @@ class CrystallizationController:
                 tick_input, c_KF, T_KF
             )
             hold_growth_control = target == "G" and not adaptation_allowed
-            parameter_hold = getattr(tick_input, "control_hold_reason", None)
-            self.last_control_hold_reason = "controller_refresh" if refreshed else (
+            requested_hold = getattr(tick_input, "control_hold_reason", None)
+            parameter_hold = ((requested_hold or "process_data_recovery")
+                              if process_resuming else requested_hold)
+            self.last_control_hold_reason = (
+                parameter_hold if process_resuming else
+                "controller_refresh" if refreshed else
                 parameter_hold or ((pause_reason or "growth_measurement_unavailable")
                                    if hold_growth_control else None)
             )

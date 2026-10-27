@@ -34,6 +34,9 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def initialize_process_state(self, process_state: ProcessState) -> None:
         self.controller.initialize_process_state(process_state)
 
+    def resume_process_state(self, process_state: ProcessState) -> None:
+        self.controller.resume_process_state(process_state)
+
     def step(
         self,
         sample: GrowthRateSamplePayload | ControllerTickInput,

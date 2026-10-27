@@ -27,6 +27,49 @@ class ProcessSafetyError(ProcessAdapterError):
     """A process value or requested setpoint violated a safety constraint."""
 
 
+class ProcessMeasurementPending(ProcessSafetyError):
+    """A fresh, otherwise valid complete round has negative concentration.
+
+    This exception is never a write receipt: when raised by a write method it
+    guarantees that the corresponding command has not been published.
+    """
+
+    reason = "negative_concentration"
+
+    def __init__(self, *, read_at: str, raw_c: float, waiting_since: str) -> None:
+        self.read_at = read_at
+        self.raw_c = float(raw_c)
+        self.waiting_since = waiting_since
+        super().__init__("Fresh process concentration is negative; waiting for valid measurement data.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"reason": self.reason, "read_at": self.read_at,
+                "raw_c": self.raw_c, "waiting_since": self.waiting_since}
+
+
+class ProcessDataTimeoutPending(ProcessMeasurementPending):
+    """A connected process bus has no fresh complete measurement yet.
+
+    No current concentration or read timestamp is invented. A last-valid time
+    is historical metadata only and never permission to reuse that sample.
+    """
+
+    reason = "process_data_timeout"
+
+    def __init__(self, *, waiting_since: str, last_valid_read_at: str | None = None) -> None:
+        self.waiting_since = waiting_since
+        self.last_valid_read_at = last_valid_read_at
+        self.read_at = None
+        self.raw_c = None
+        ProcessSafetyError.__init__(self, "Waiting for fresh complete process measurement data.")
+
+    def to_dict(self) -> dict[str, Any]:
+        metadata = {"reason": self.reason, "waiting_since": self.waiting_since}
+        if self.last_valid_read_at is not None:
+            metadata["last_valid_read_at"] = self.last_valid_read_at
+        return metadata
+
+
 @dataclass(frozen=True)
 class ProcessState:
     """One real-equipment snapshot using the Controller contract units.
@@ -464,6 +507,8 @@ __all__ = [
     "ProcessAdapterError",
     "ProcessConnectionError",
     "ProcessSafetyError",
+    "ProcessMeasurementPending",
+    "ProcessDataTimeoutPending",
     "ProcessState",
     "ProcessWriteResult",
 ]

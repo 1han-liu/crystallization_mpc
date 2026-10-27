@@ -32,6 +32,15 @@ class ControllerAdapter(ABC):
         """
         return None
 
+    def resume_process_state(self, process_state: ProcessState) -> None:
+        """Prepare a fresh measurement baseline after an input-data pause.
+
+        The service suppresses actuator writes for the recovery warm-up tick.
+        Stateful implementations may recenter measurement estimates without
+        restarting the experiment or resetting its accumulated physical state.
+        """
+        return None
+
     @abstractmethod
     def step(
         self,

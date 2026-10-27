@@ -27,6 +27,8 @@ from .process import (
     OpcUaNodeConfig,
     ProcessAdapter,
     ProcessConnectionError,
+    ProcessDataTimeoutPending,
+    ProcessMeasurementPending,
     ProcessSafetyError,
     ProcessState,
     ProcessWriteResult,
@@ -143,6 +145,14 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         self._invalid_rounds: set[int] = set()
         self._latest: ProcessState | None = None
         self._latest_ns = 0
+        self._negative_sample: dict[str, Any] | None = None
+        self._negative_ns = 0
+        self._waiting_since: str | None = None
+        self._last_invalid_state: dict[str, Any] | None = None
+        self._timeout_sample: dict[str, Any] | None = None
+        self._timeout_boundary_ns = 0
+        self._last_valid_read_at: str | None = None
+        self._hard_telemetry_error: str | None = None
         self._newest_seen_ns = 0
         self._newest_fields: set[str] = set()
         self._pending: _PendingWrite | None = None
@@ -174,7 +184,7 @@ class RabbitMqProcessAdapter(ProcessAdapter):
             if self._thread is None or not self._thread.is_alive():
                 self._stop.clear()
                 self._startup_deadline = self._monotonic() + self.config.startup_timeout_s
-                self._reset_samples_locked()
+                self._reset_samples_locked(clear_fault=True)
                 self._thread = threading.Thread(target=self._io_loop, name="controller-process-io", daemon=True)
                 self._thread.start()
             elif self._stop.is_set():
@@ -191,18 +201,26 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         with self._condition:
             self._stop.set()
             self._connected = False
-            self._reset_samples_locked()
+            self._reset_samples_locked(clear_fault=True)
             self._fail_pending_locked("Process I/O disconnected; write result unknown.")
             thread = self._thread
             self._condition.notify_all()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=4.5)
 
-    def _reset_samples_locked(self) -> None:
+    def _reset_samples_locked(self, *, clear_fault: bool = False) -> None:
         self._rounds.clear()
         self._invalid_rounds.clear()
         self._latest = None
         self._latest_ns = 0
+        self._negative_sample = None
+        self._negative_ns = 0
+        self._waiting_since = None
+        self._timeout_sample = None
+        self._timeout_boundary_ns = 0
+        self._last_valid_read_at = None
+        if clear_fault:
+            self._hard_telemetry_error = None
         self._newest_seen_ns = 0
         self._newest_fields.clear()
         self._last_read_generation = None
@@ -265,20 +283,25 @@ class RabbitMqProcessAdapter(ProcessAdapter):
             while True:
                 if self._stop.is_set() or self._thread is None:
                     raise ProcessConnectionError("Process message bus is not connected.")
+                if self._hard_telemetry_error is not None:
+                    raise ProcessSafetyError(self._hard_telemetry_error)
+                if self._connected:
+                    waiting = self._current_measurement_wait_locked()
+                    if waiting is not None:
+                        raise waiting
                 if self._connected and self._latest is not None:
                     age_s = (self._clock_ns() - self._latest_ns) / 1_000_000_000
-                    if age_s > self.config.sample_max_age_s:
-                        self._last_error = f"Process sample expired ({age_s:.3f} seconds old)."
-                        raise ProcessSafetyError(self._last_error)
+                    if age_s < 0:
+                        raise ProcessSafetyError("Process sample timestamp is in the future.")
                     self._read_count += 1
                     self._last_read_generation = self._generation
                     self._last_read_ns = self._latest_ns
                     return self._latest
                 remaining = self._startup_deadline - self._monotonic()
                 if remaining <= 0:
-                    missing = ", ".join(name for name in FIELDS if name not in self._newest_fields)
-                    self._last_error = f"No fresh complete process sample before startup deadline; missing: {missing}."
-                    raise ProcessConnectionError(self._last_error)
+                    if self._connected:
+                        raise self._begin_timeout_wait_locked()
+                    raise ProcessConnectionError("Process message bus is not connected.")
                 self._condition.wait(remaining)
 
     def _on_telemetry(self, channel: Any, method: Any, properties: Any, body: bytes) -> None:
@@ -287,29 +310,123 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         except (ValueError, TypeError, OverflowError) as exc:
             with self._condition:
                 self._invalid_count += 1
-                self._last_error = f"Invalid process telemetry ({type(exc).__name__})."
+                self._latch_telemetry_fault_locked(f"Invalid process telemetry ({type(exc).__name__}).")
         finally:
             channel.basic_ack(delivery_tag=method.delivery_tag)
 
+    def _measurement_pending_locked(self) -> ProcessMeasurementPending:
+        pending = self._current_measurement_wait_locked()
+        if pending is None:
+            raise ProcessSafetyError("No pending process measurement condition is available.")
+        return pending
+
+    def _begin_timeout_wait_locked(self) -> ProcessDataTimeoutPending:
+        if self._hard_telemetry_error is not None:
+            raise ProcessSafetyError(self._hard_telemetry_error)
+        if self._timeout_sample is None:
+            self._timeout_boundary_ns = self._clock_ns()
+            self._waiting_since = self._waiting_since or _iso_ns(self._timeout_boundary_ns)
+            self._timeout_sample = {"waiting_since": self._waiting_since}
+            if self._last_valid_read_at is not None:
+                self._timeout_sample["last_valid_read_at"] = self._last_valid_read_at
+            self._latest = None
+            self._negative_sample = None
+            self._negative_ns = 0
+            self._last_read_generation = None
+            self._last_read_ns = None
+            pending = ProcessDataTimeoutPending(**self._timeout_sample)
+            self._last_invalid_state = pending.to_dict()
+            self._last_error = str(pending)
+        return ProcessDataTimeoutPending(**self._timeout_sample)
+
+    def _current_measurement_wait_locked(self) -> ProcessMeasurementPending | None:
+        if self._hard_telemetry_error is not None:
+            raise ProcessSafetyError(self._hard_telemetry_error)
+        if self._timeout_sample is not None:
+            return ProcessDataTimeoutPending(**self._timeout_sample)
+        if self._negative_sample is not None:
+            age_s = (self._clock_ns() - self._negative_ns) / 1_000_000_000
+            if age_s < 0:
+                raise ProcessSafetyError("Process sample timestamp is in the future.")
+            if age_s > self.config.sample_max_age_s:
+                return self._begin_timeout_wait_locked()
+            return ProcessMeasurementPending(**self._negative_sample)
+        if self._latest is not None:
+            age_s = (self._clock_ns() - self._latest_ns) / 1_000_000_000
+            if age_s > self.config.sample_max_age_s:
+                return self._begin_timeout_wait_locked()
+        elif self._monotonic() >= self._startup_deadline:
+            return self._begin_timeout_wait_locked()
+        return None
+
+    def _latch_telemetry_fault_locked(self, message: str, *, stamp: int | None = None) -> None:
+        self._hard_telemetry_error = message
+        self._last_error = message
+        self._latest = None
+        self._negative_sample = None
+        self._negative_ns = 0
+        self._timeout_sample = None
+        self._waiting_since = None
+        self._last_read_generation = None
+        self._last_read_ns = None
+        self._last_invalid_state = {"reason": "invalid_process_telemetry", "error": message}
+        if stamp is not None:
+            self._last_invalid_state["read_at"] = _iso_ns(stamp)
+        self._condition.notify_all()
+
+    def _cancel_unsent_for_measurement_locked(self, error: ProcessMeasurementPending | None = None) -> None:
+        pending = self._pending
+        if pending is None or pending.sent or pending.event.is_set():
+            return
+        error = error or self._measurement_pending_locked()
+        self._last_result = {**pending.envelope["payload"], "status": "failed",
+                             "error": str(error), "write_result": None, "command_sent": False}
+        try:
+            self._audit(self._last_result, "not_sent")
+        except ProcessConnectionError as exc:
+            # A durable archive failure is a fault, not recoverable measurement
+            # waiting. The command is still never sent.
+            pending.error = exc
+        else:
+            pending.error = error
+        pending.event.set()
+
     def _accept_telemetry(self, message: Any) -> None:
         if not isinstance(message, dict) or not isinstance(message.get("metrics"), list):
+            with self._condition:
+                self._latch_telemetry_fault_locked("Process telemetry must contain a metrics JSON array.")
             raise ValueError("Process telemetry must contain a metrics JSON array.")
         with self._condition:
+            if self._hard_telemetry_error is not None:
+                return
             now_ns = self._clock_ns()
-            cutoff = max(self._epoch_ns, now_ns - int(self.config.sample_max_age_s * 1_000_000_000))
+            cutoff = max(self._epoch_ns, self._timeout_boundary_ns,
+                         now_ns - int(self.config.sample_max_age_s * 1_000_000_000))
             self._rounds = {ts: values for ts, values in self._rounds.items() if ts >= cutoff}
             self._invalid_rounds = {ts for ts in self._invalid_rounds if ts >= cutoff}
             for metric in message["metrics"]:
                 if not isinstance(metric, dict):
                     self._invalid_count += 1
-                    continue
+                    self._latch_telemetry_fault_locked("Malformed process metric.")
+                    break
                 tags = metric.get("tags")
-                if not isinstance(tags, dict) or tags.get("device") != self.config.device_id:
+                if not isinstance(tags, dict):
+                    if metric.get("name") == self.config.measurement_name:
+                        self._invalid_count += 1
+                        self._latch_telemetry_fault_locked("Missing process metric identity tags.")
+                        break
+                    continue
+                if tags.get("device") != self.config.device_id:
                     continue
                 if metric.get("name") != self.config.measurement_name:
                     continue
                 stamp = metric.get("timestamp")
-                if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp < cutoff or stamp > now_ns:
+                if isinstance(stamp, bool) or not isinstance(stamp, int):
+                    self._invalid_count += 1
+                    self._latch_telemetry_fault_locked("Process metric timestamp must be integer nanoseconds.")
+                    break
+                if (stamp < cutoff or stamp > now_ns
+                        or (self._timeout_boundary_ns and stamp <= self._timeout_boundary_ns)):
                     self._invalid_count += 1
                     continue
                 if stamp < self._latest_ns or stamp in self._invalid_rounds:
@@ -329,7 +446,7 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                             or (type(quality) is int and quality == 0)):
                         raise ProcessSafetyError(f"Missing or bad OPC UA quality for {name}.")
                     value = _number(fields[name], name)
-                    if name in ("c", "count_middle") and value < 0:
+                    if name == "count_middle" and value < 0:
                         raise ProcessSafetyError(f"Negative process {name}.")
                     if name in ("T", "T_j", "T_j_set") and value <= -CELSIUS_TO_KELVIN:
                         raise ProcessSafetyError(f"Invalid absolute temperature for {name}.")
@@ -341,25 +458,50 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                         self._newest_seen_ns = stamp
                         self._newest_fields = set(values)
                     if len(values) == len(FIELDS) and stamp > self._latest_ns:
-                        self._latest = ProcessState(
-                            T=values["T"] + CELSIUS_TO_KELVIN,
-                            T_j=values["T_j"] + CELSIUS_TO_KELVIN,
-                            c=values["c"], count_middle=values["count_middle"],
-                            T_j_set=values["T_j_set"] + CELSIUS_TO_KELVIN,
-                            read_at=_iso_ns(stamp), status_codes={key: "OK (0x0)" for key in FIELDS},
-                        )
+                        if values["c"] < 0:
+                            # All five fields, node identities, qualities and
+                            # other physical constraints have passed. Do not
+                            # expose the preceding positive snapshot as fresh.
+                            self._latest = None
+                            self._timeout_sample = None
+                            self._negative_ns = stamp
+                            self._waiting_since = self._waiting_since or _iso_ns(stamp)
+                            self._negative_sample = {
+                                "read_at": _iso_ns(stamp), "raw_c": values["c"],
+                                "waiting_since": self._waiting_since,
+                            }
+                            self._last_invalid_state = {"reason": ProcessMeasurementPending.reason,
+                                                        **self._negative_sample}
+                            self._last_read_generation = None
+                            self._last_read_ns = None
+                            self._invalid_count += 1
+                            self._last_error = str(self._measurement_pending_locked())
+                            self._cancel_unsent_for_measurement_locked()
+                        else:
+                            self._latest = ProcessState(
+                                T=values["T"] + CELSIUS_TO_KELVIN,
+                                T_j=values["T_j"] + CELSIUS_TO_KELVIN,
+                                c=values["c"], count_middle=values["count_middle"],
+                                T_j_set=values["T_j_set"] + CELSIUS_TO_KELVIN,
+                                read_at=_iso_ns(stamp), status_codes={key: "OK (0x0)" for key in FIELDS},
+                            )
+                            self._negative_sample = None
+                            self._negative_ns = 0
+                            self._waiting_since = None
+                            self._timeout_sample = None
+                            self._timeout_boundary_ns = 0
+                            self._last_valid_read_at = self._latest.read_at
+                            self._last_error = None
                         self._latest_ns = stamp
-                        self._last_error = None
                 except ProcessSafetyError as exc:
                     self._invalid_rounds.add(stamp)
                     self._rounds.pop(stamp, None)
                     self._invalid_count += 1
-                    self._last_error = str(exc)
-                    if stamp == self._latest_ns:
-                        self._latest = None
+                    self._latch_telemetry_fault_locked(str(exc), stamp=stamp)
                     if stamp >= self._newest_seen_ns:
                         self._newest_seen_ns = stamp
                         self._newest_fields.clear()
+                    break
             # Bounds memory even under a producer sending many fresh incomplete rounds.
             for stamp in sorted(self._rounds)[:-128]:
                 self._rounds.pop(stamp, None)
@@ -394,12 +536,18 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                 raise ProcessConnectionError("Process message bus is not connected.")
             if self._pending is not None and not self._pending.event.is_set():
                 raise ProcessSafetyError("Only one process write may be in flight.")
+            waiting = self._current_measurement_wait_locked()
+            if waiting is not None:
+                raise waiting
             if self._context is None:
                 raise ProcessSafetyError("Process write requires experiment and control-cycle context.")
             if self._last_read_generation != self._generation or self._last_read_ns is None:
                 raise ProcessSafetyError("Process write requires a measurement read on the current connection.")
-            if not 0 <= (self._clock_ns() - self._last_read_ns) / 1_000_000_000 <= self.config.sample_max_age_s:
-                raise ProcessSafetyError("The measurement used for this control output has expired.")
+            read_age_s = (self._clock_ns() - self._last_read_ns) / 1_000_000_000
+            if read_age_s > self.config.sample_max_age_s:
+                raise self._begin_timeout_wait_locked()
+            if read_age_s < 0:
+                raise ProcessSafetyError("The control measurement timestamp is in the future.")
             run_id, run_started_at, tick_seq = self._context
             command_id = str(uuid.uuid4())
             payload = {
@@ -421,7 +569,21 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         pending.event.wait(timeout=self.config.write_timeout_s)
         with self._condition:
             if not pending.event.is_set():
-                self._fail_pending_locked("Timed out waiting for device write acknowledgement; result unknown.")
+                # Only an unsubmitted command may be canceled as measurement
+                # waiting. A sent command's missing receipt is always a fault.
+                if (not pending.sent and self._connected
+                        and pending.read_generation == self._generation):
+                    try:
+                        waiting = self._current_measurement_wait_locked()
+                        read_age_s = (self._clock_ns() - pending.read_timestamp_ns) / 1_000_000_000
+                        if waiting is None and read_age_s > self.config.sample_max_age_s:
+                            waiting = self._begin_timeout_wait_locked()
+                        if waiting is not None:
+                            self._cancel_unsent_for_measurement_locked(waiting)
+                    except ProcessSafetyError as exc:
+                        self._fail_pending_locked(f"{exc} Command not sent.")
+                if not pending.event.is_set():
+                    self._fail_pending_locked("Timed out waiting for device write acknowledgement; result unknown.")
             if pending.error is not None:
                 raise pending.error
             if pending.result is None:
@@ -438,12 +600,26 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         with self._condition:
             if pending is not self._pending or pending.event.is_set():
                 return
+            if pending.sent:
+                return
+            if not self._connected or pending.read_generation != self._generation:
+                self._fail_pending_locked("Process connection changed before publication; command not sent.")
+                return
+            try:
+                waiting = self._current_measurement_wait_locked()
+                read_age_s = (self._clock_ns() - pending.read_timestamp_ns) / 1_000_000_000
+                if waiting is None and read_age_s > self.config.sample_max_age_s:
+                    waiting = self._begin_timeout_wait_locked()
+                if waiting is not None:
+                    self._cancel_unsent_for_measurement_locked(waiting)
+                    return
+                if read_age_s < 0:
+                    raise ProcessSafetyError("Control measurement timestamp is in the future.")
+            except ProcessSafetyError as exc:
+                self._fail_pending_locked(f"{exc} Command not sent.")
+                return
             if self._monotonic() >= pending.deadline:
                 self._fail_pending_locked("Write publication deadline expired; result unknown.")
-                return
-            if (pending.read_generation != self._generation
-                    or not 0 <= (self._clock_ns() - pending.read_timestamp_ns) / 1_000_000_000 <= self.config.sample_max_age_s):
-                self._fail_pending_locked("Control measurement expired or connection changed before publication; command not sent.")
                 return
             pending.sent = True
         # This is invoked only on the owning Pika I/O thread. Never retry publication.
@@ -575,6 +751,14 @@ class RabbitMqProcessAdapter(ProcessAdapter):
     def status(self) -> Mapping[str, Any]:
         with self._condition:
             age_s = (self._clock_ns() - self._latest_ns) / 1_000_000_000 if self._latest is not None else None
+            negative_age_s = ((self._clock_ns() - self._negative_ns) / 1_000_000_000
+                              if self._negative_sample is not None else None)
+            waiting = (self._connected and self._hard_telemetry_error is None and (
+                self._timeout_sample is not None or (negative_age_s is not None
+                    and 0 <= negative_age_s <= self.config.sample_max_age_s)))
+            wait_metadata = ((ProcessDataTimeoutPending(**self._timeout_sample).to_dict()
+                              if self._timeout_sample is not None else self._last_invalid_state)
+                             if waiting else None)
             return {
                 "class": f"{type(self).__module__}.{type(self).__qualname__}",
                 "safe_noop": False, "transport": "rabbitmq", "connected": self._connected,
@@ -587,7 +771,14 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                 "collection_timestamp_ns": self._latest_ns if self._latest is not None else None,
                 "last_used_timestamp_ns": self._last_read_ns,
                 "sample_age_s": age_s,
-                "sample_valid": self._connected and age_s is not None and age_s <= self.config.sample_max_age_s,
+                "waiting_for_data": waiting,
+                "wait_reason": wait_metadata.get("reason") if wait_metadata else None,
+                "waiting_since": self._waiting_since if waiting else None,
+                "last_invalid_state": dict(self._last_invalid_state) if self._last_invalid_state else None,
+                "sample_valid": (self._connected and self._hard_telemetry_error is None
+                                 and self._timeout_sample is None and self._negative_sample is None
+                                 and age_s is not None and 0 <= age_s <= self.config.sample_max_age_s),
+                "hard_data_error": self._hard_telemetry_error,
                 "missing_fields": [name for name in FIELDS if name not in self._newest_fields],
                 "last_command": dict(self._last_command) if self._last_command else None,
                 "last_write_result": dict(self._last_result) if self._last_result else None,

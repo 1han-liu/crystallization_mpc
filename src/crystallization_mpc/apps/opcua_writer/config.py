@@ -35,6 +35,7 @@ class WriterSettings:
     certificate: str = ""
     private_key: str = field(default="", repr=False)
     server_certificate: str = ""
+    server_uri: str | None = None
 
     def __post_init__(self) -> None:
         if not self.rabbit_exchange.strip() or not self.rabbit_queue.strip():
@@ -95,6 +96,7 @@ class WriterSettings:
             certificate=os.getenv("OPCUA_CERTIFICATE", ""),
             private_key=os.getenv("OPCUA_PRIVATE_KEY", ""),
             server_certificate=os.getenv("OPCUA_SERVER_CERTIFICATE", ""),
+            server_uri=os.getenv("OPCUA_SERVER_URI", "").strip() or None,
         )
 
     def create_client(self, endpoint: str, timeout_s: float):
@@ -102,6 +104,9 @@ class WriterSettings:
 
         client = Client(endpoint, timeout=timeout_s, sync_wrapper_timeout=timeout_s + 1)
         try:
+            # asyncua 2.0.1's sync wrapper does not proxy server_uri. Setting it
+            # on the wrapper would leave CreateSession's ServerUri unchanged.
+            client.aio_obj.server_uri = self.server_uri
             if self.auth_method == "UserName":
                 client.set_user(self.username)
                 client.set_password(self.password)

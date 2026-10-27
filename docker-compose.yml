@@ -126,7 +126,7 @@ services:
       - PROCESS_TELEMETRY_QUEUE=${PROCESS_TELEMETRY_QUEUE:-process.telemetry}
       - PROCESS_RESULT_QUEUE=${PROCESS_RESULT_QUEUE:-process.results}
       - PROCESS_NAMESPACE_INDEX=${OPCUA_NAMESPACE_INDEX:-2}
-      - PROCESS_T_J_SET_NODE=${OPCUA_T_J_SET_NODE:-iCache.Temperature1}
+      - PROCESS_T_J_SET_NODE=${OPCUA_T_J_SET_READ_NODE:-${OPCUA_T_J_SET_NODE:-iCache.Temperature1}}
       - PROCESS_T_NODE=${OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
       - PROCESS_T_J_NODE=${OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
       - PROCESS_C_NODE=${OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
@@ -161,6 +161,8 @@ services:
       - config/influxdb.env
     environment:
       <<: *opcua-environment
+      # Read-only trend overrides must never retarget the writer.
+      OPCUA_T_J_SET_NODE: ${OPCUA_T_J_SET_READ_NODE:-${OPCUA_T_J_SET_NODE:-iCache.Temperature1}}
       PROCESS_DEVICE_ID: ${PROCESS_DEVICE_ID:-crystallizer}
       RABBIT_URL: amqp://guest:guest@rabbitmq:5672/%2F
       RABBIT_EXCHANGE: idp.bus
@@ -187,6 +189,7 @@ services:
       - config/influxdb.env
     environment:
       <<: *opcua-environment
+      OPCUA_SERVER_URI: ${OPCUA_SERVER_URI:-}
       RABBIT_URL: amqp://guest:guest@rabbitmq:5672/%2F
       RABBIT_EXCHANGE: idp.bus
       OPCUA_WRITER_QUEUE: ${OPCUA_WRITER_QUEUE:-opcua_writer.in}

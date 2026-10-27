@@ -40,7 +40,19 @@ OPC UA ←─ opcua-writer   ←─ controller.to.opcua_writer ←─ Controller
 
 示例只展示一个节点，`Quality` 文本取自固定版本容器的实际输出；交付一个 `ProcessState` 必须集齐同设备、同纳秒时间戳的五个节点。完整轮次可以跨多条消息到达，一条消息也可包含多个轮次。时间戳应由实际采集生成，不能复制示例时间。不要把纳秒整数通过 JavaScript `Number` 中转，否则可能丢失精度。
 
-采集时间使用 `time_source="collection_start"`，是同一次 Telegraf 采集的标签，不代表设备上的原子快照。错误质量、错误节点映射、非有限数值或缺字段不会形成新状态。默认五秒后旧状态过期；启动默认最多等待十秒。重连后必须取得连接建立之后的新完整轮次。检查点仅保留历史诊断，不恢复为新测量。
+采集时间使用 `time_source="collection_start"`，是同一次 Telegraf 采集的标签，不代表设备上的原子快照。错误质量、错误节点映射、非有限数值或缺字段不会形成新状态。默认五秒后旧状态过期；启动后的首份有效采样默认以十秒为超时判定。这些采样时间用于判断数据是否超时，不再作为自动结束实验的等待上限；RabbitMQ 连接本身的失败仍按故障处理。重连后必须取得连接建立之后的新完整轮次。检查点仅保留历史诊断，不恢复为新测量。
+
+当同一轮五项数据齐全、质量良好、时间新鲜，且除 `c < 0` 外均通过接口校验时，Controller 将负浓度作为可恢复的测量等待：保持当前实验与采集连接，暂停算法计算和设备写入，不推进算法周期或控制时间，也不把负浓度替换为零或继续使用旧浓度。启动时遇到这种情况也保留同一实验，等待有效初值。收到新的、五项全部有效且 `c >= 0` 的采样后，同一实验自动初始化或继续控制，无须 End 后重建实验。恢复后的首个有效周期用于更新测量基线，设备写入继续暂停；后续有效周期才可按原有写入开关发送命令。此行为不改变等待期间设备本身最后一次设定值，现场控制软件继续运行。
+
+当 Controller 与 RabbitMQ 保持连接，但采集数据流静默、旧采样过期，或启动等待结束后仍只有部分字段时，保留当前实验并无限期等待，`wait_reason="process_data_timeout"`。这种情况可由 OPC UA 采集中断或通信延迟引起；Controller 保持消费连接，暂停算法计算与新的设备写入，不推进算法周期或控制时间。负浓度等待期间若采集数据流随后静默，也转为这种超时等待。恢复条件是进入等待之后的新采集轮次：同一设备、同一轮次的五项数据齐全、质量 Good、有限数值、符合接口范围且浓度非负，采集时间在 `PROCESS_SAMPLE_MAX_AGE_S` 内；旧缓存、部分字段或只有 TCP 连接成功均不能恢复控制。满足条件后仍使用同一 run，首个恢复周期更新测量基线且不写设备，后续周期按原有写入开关工作。等待没有新的时长上限，操作员仍可随时 End Experiment。
+
+等待期间，`integrations.process.waiting_for_data=true`，并提供 `wait_reason`、`waiting_since` 和 `last_invalid_state`。负浓度的原因是 `negative_concentration`，`last_invalid_state.raw_c` 保留原始负值；网页显示 **Waiting for valid process data**。通信等待的原因是 `process_data_timeout`，网页显示 **Waiting for fresh process data. Communication timed out.**；它没有浓度数值时不补零。提示均说明算法与设备写入暂停。Telegraf 能采集时继续保留原始 `crystallizer_raw`；没有新算法计算时不会生成新的 `controller_measurement` 曲线点。
+
+等待不放宽安全校验。新收到的数据若明确出现坏质量、错误 NodeId、非有限值、负计数、绝对温度无效或消息格式错误，仍按故障处理。Controller 与 RabbitMQ 的连接失败、停止或中断，以及已发送写命令但回执未知、算法异常和持久化失败也仍是故障。真正故障停止后的实验需要 End Experiment，不会自动恢复；容器重启后也不会因保存了等待状态而自动启动设备控制。
+
+启用实时 GSensor 后，Controller 也会等待新鲜有效的 G 测量。默认 `dt_G=15s`，G 新鲜度上限为 `2 × dt_G=30s`；这只是判断测量是否陈旧的阈值，不再是终止实验的时限。首次测量尚未准备好或既有 G 超过新鲜度上限时，同一实验保持 `running`，暂停控制计算、适应和设备写入，持续等待，不补造 G 或沿用过期值。该等待同样适用于 σ 目标；明确关闭 GSensor 时仍走原有的非相机输入逻辑。
+
+G 等待状态见 Controller `growth_input.growth_wait`：原因是 `growth_data_timeout` 或 `waiting_for_fresh_valid_sample`，并保留 `waiting_since`，必要时保留 `last_valid_at` 和检查边界。网页中性显示 **Waiting for fresh valid G data**。新测量必须满足原有 run、版本、激活代次、初始化代次、对齐代次、有效性和新鲜度检查，其他必需过程输入也必须有效，才会继续同一实验。恢复首周期用于更新测量基线且不写设备，后续周期才按原写入开关工作。等待时 GSensor 可继续处理和发布图像结果；没有新的控制计算时，Grafana 的 Controller 曲线不会新增点。其他真实故障以及 Controller 重启后的人工确认要求不变。
 
 命令和回执使用现有 envelope，`ver=1`，`correlation_id=command_id`：
 
@@ -76,11 +88,15 @@ OPC UA ←─ opcua-writer   ←─ controller.to.opcua_writer ←─ Controller
 | `CONTROLLER_OPCUA_VERIFY_WRITE` | `OPCUA_VERIFY_WRITE`，写入服务必须为 true，false 拒绝启动 |
 | `CONTROLLER_OPCUA_VERIFY_TOLERANCE_K` | `OPCUA_VERIFY_TOLERANCE_K`，默认 0.05 |
 
+If setpoint feedback and the writable target have different NodeIds, set `OPCUA_T_J_SET_READ_NODE`. Telegraf reads `T_j_set` from this override and Controller validates the same NodeId; empty or unset preserves `OPCUA_T_J_SET_NODE`. The writer always uses `OPCUA_T_J_SET_NODE` for both writes and immediate readback verification. A lab read-only trend example is `Local.iControl.Experiment1.Trends.Tjset.Value`; verify its physical meaning and Celsius units before accepting it as jacket setpoint feedback. Read access to this trend does not establish a writable device target.
+
 Compose 将节点映射复制为 Controller 的 `PROCESS_NAMESPACE_INDEX` 和 `PROCESS_*_NODE`，用于校验消息中的 NodeId；同时将读回容差映射为 `PROCESS_VERIFY_TOLERANCE_K`。Controller 不接收 endpoint、密码或设备证书。直接运行 Python 时需自行提供对应的 `PROCESS_*` 节点映射和容差。`PROCESS_DEVICE_ID` 必须与 Telegraf `tags.device` 相同。一个 Controller 实例应拥有自己的过程数据/结果队列，不能与另一个实验 Controller 竞争消费同一队列。
 
 新增通信参数为 `PROCESS_SAMPLE_MAX_AGE_S=5`、`PROCESS_STARTUP_TIMEOUT_S=10`、`PROCESS_COMMAND_TTL_S=5`、`PROCESS_WRITE_TIMEOUT_S=5`；Telegraf 的 `TELEGRAF_INTERVAL/TELEGRAF_FLUSH_INTERVAL` 默认 `1s`。五秒和一秒是通信测试默认值，现场再核实允许的控制周期、网络时延、服务器负载和时钟同步。
 
 设备认证配置由两项服务共同使用：`OPCUA_AUTH_METHOD`（Anonymous/UserName/Certificate）、`OPCUA_USERNAME/PASSWORD`、`OPCUA_SECURITY_POLICY/SECURITY_MODE`、`OPCUA_CERTIFICATE/PRIVATE_KEY/SERVER_CERTIFICATE`。证书目录由 `OPCUA_CERT_HOST_ROOT` 挂载到 `/run/opcua-certs`；文件路径填容器内路径。空证书加 None/Anonymous 是测试服务器默认配置，真实认证仍需现场配置。不要提交私钥或实验室密码。
+
+writer 使用固定版本 `asyncua==2.0.1`。可选的 `OPCUA_SERVER_URI` 仅传给 writer，填写 Server 在 `GetEndpoints` 中公布的 `Server.ApplicationUri`；不填写时为 `None`。它与 `OPCUA_ENDPOINT` 的网络地址不同：Docker 使用 `host.docker.internal` 访问宿主机时，也不能据此拼接或改写 Server URI。某些 Server 会严格核对 `CreateSession.ServerUri`；遇到 `BadServerUriInvalid` 时，核实并配置实际 ApplicationUri 后重新构建、重建 writer。同步客户端通过 `client.aio_obj.server_uri` 设置该字段，直接给 `client.server_uri` 赋值不会修改实际请求。用户名、证书和安全策略仍按上面的配置处理。
 
 正式切换先结束活动实验，再修改通信配置并启动新服务：
 

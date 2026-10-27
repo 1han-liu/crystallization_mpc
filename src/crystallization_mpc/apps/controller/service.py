@@ -30,6 +30,7 @@ from crystallization_mpc.apps.controller.process import (
     NoOpProcessAdapter,
     OpcUaNodeConfig,
     ProcessAdapter,
+    ProcessMeasurementPending,
     ProcessState,
     ProcessWriteResult,
 )
@@ -44,6 +45,7 @@ from crystallization_mpc.apps.controller.telemetry import (
 from crystallization_mpc.infra.influxdb.client import InfluxSettings
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
 from crystallization_mpc.infra.influxdb.durable import DurableInfluxWriter, telemetry_path, mark_finalized
+from crystallization_mpc.infra.influxdb.process_events import write_process_event
 from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
@@ -132,9 +134,10 @@ class ControllerService(OnlineParametersMixin):
         self.last_valid_sample: GrowthRateSamplePayload | None = None
         self.last_valid_sample_received_monotonic: float | None = None
         self.last_valid_sample_arrival_age_s: float | None = None
-        # Independent watchdog memory survives invalid/not-ready messages that
-        # legitimately clear the usable sample cache. Only a new activation
-        # segment or explicit disable may restart initial warmup.
+        # Keep the last established G timestamp for diagnostics. Missing or
+        # stale G now pauses this run until fresh valid input arrives.
+        self.growth_wait: dict[str, Any] | None = None
+        self._growth_recovery_pending = False
         self.growth_stream_last_valid_at: str | None = None
         self._growth_stream_last_valid_monotonic: float | None = None
         self._growth_stream_arrival_age_s: float | None = None
@@ -175,6 +178,9 @@ class ControllerService(OnlineParametersMixin):
         self.last_process_error: str | None = None
         self.last_process_state: dict[str, Any] | None = None
         self.last_process_write: dict[str, Any] | None = None
+        self.process_wait: dict[str, Any] | None = None
+        self.process_wait_count = 0
+        self.process_activation_pending = False
         self.last_control_output: dict[str, Any] | None = None
         # Observational, current-tick only. Never checkpointed or exposed through
         # the status/command API; acceptance can retain the full raw snapshot.
@@ -338,6 +344,8 @@ class ControllerService(OnlineParametersMixin):
                 "last_status_at": self.gsensor_last_status_at,
                 "gate_reason": self.gsensor_gate_reason,
                 "stream_last_valid_at": self.growth_stream_last_valid_at,
+                "growth_wait": copy.deepcopy(self.growth_wait),
+                "growth_recovery_pending": self._growth_recovery_pending,
             },
             "last_message": copy.deepcopy(self.last_message),
             "last_message_result": copy.deepcopy(self.last_message_result),
@@ -394,6 +402,9 @@ class ControllerService(OnlineParametersMixin):
                 "last_error": self.last_process_error,
                 "last_state": copy.deepcopy(self.last_process_state),
                 "last_write": copy.deepcopy(self.last_process_write),
+                "waiting": copy.deepcopy(self.process_wait),
+                "wait_count": self.process_wait_count,
+                "activation_pending": self.process_activation_pending,
             },
             "scheduler": {
                 "last_growth_sample_age_s": self.last_growth_sample_age_s,
@@ -560,6 +571,19 @@ class ControllerService(OnlineParametersMixin):
                 "transition_occurred_at"
             )
             self.gsensor_last_status_at = gsensor.get("last_status_at")
+            waiting = gsensor.get("growth_wait")
+            if waiting is not None:
+                if (not isinstance(waiting, dict)
+                        or waiting.get("reason") not in {"growth_data_timeout", "waiting_for_fresh_valid_sample"}):
+                    raise ValueError("Controller recovery G wait metadata is invalid.")
+                _timestamp_value(waiting.get("waiting_since"), "growth_wait.waiting_since")
+                if waiting.get("last_valid_at") is not None:
+                    _timestamp_value(waiting["last_valid_at"], "growth_wait.last_valid_at")
+            pending_growth_recovery = gsensor.get("growth_recovery_pending", False)
+            if type(pending_growth_recovery) is not bool:
+                raise ValueError("Controller recovery G recovery flag is invalid.")
+            self.growth_wait = copy.deepcopy(waiting)
+            self._growth_recovery_pending = pending_growth_recovery
             self.growth_stream_last_valid_at = gsensor.get("stream_last_valid_at")
             if self.growth_stream_last_valid_at is not None:
                 _timestamp_value(self.growth_stream_last_valid_at, "gsensor.stream_last_valid_at")
@@ -618,6 +642,33 @@ class ControllerService(OnlineParametersMixin):
             self.last_process_error = process_io.get("last_error")
             self.last_process_state = copy.deepcopy(process_io.get("last_state"))
             self.last_process_write = copy.deepcopy(process_io.get("last_write"))
+            waiting = process_io.get("waiting")
+            if waiting is not None:
+                if (not isinstance(waiting, dict)
+                        or waiting.get("reason") not in {
+                            "negative_concentration", "process_data_timeout",
+                        }):
+                    raise ValueError("Controller process waiting metadata is invalid.")
+                if waiting["reason"] == "negative_concentration":
+                    if (isinstance(waiting.get("raw_c"), bool)
+                            or not isinstance(waiting.get("raw_c"), (int, float))
+                            or not math.isfinite(waiting["raw_c"]) or waiting["raw_c"] >= 0):
+                        raise ValueError("Controller negative-concentration metadata is invalid.")
+                    _timestamp_value(waiting.get("read_at"), "process waiting read_at")
+                else:
+                    # An absence of measurements is never a synthetic sample.
+                    if "raw_c" in waiting or "read_at" in waiting:
+                        raise ValueError("Timeout waiting metadata cannot contain a process measurement.")
+                    if waiting.get("last_valid_read_at") is not None:
+                        _timestamp_value(waiting["last_valid_read_at"], "process waiting last_valid_read_at")
+                _timestamp_value(waiting.get("waiting_since"), "process waiting waiting_since")
+            self.process_wait = copy.deepcopy(waiting)
+            wait_count = process_io.get("wait_count", 0)
+            activation_pending = process_io.get("activation_pending", False)
+            if type(wait_count) is not int or wait_count < 0 or type(activation_pending) is not bool:
+                raise ValueError("Controller process waiting counters are invalid.")
+            self.process_wait_count = wait_count
+            self.process_activation_pending = activation_pending
             self.control_output_count = int(control_output.get("count", 0))
             self.invalid_control_output_count = int(
                 control_output.get("invalid_count", 0)
@@ -717,14 +768,26 @@ class ControllerService(OnlineParametersMixin):
                     raise ValueError(
                         "The configured Controller adapter does not provide restart state."
                     )
-                restore_adapter = (self.adapter.restore_held_state
-                                   if state == ControllerState.RECOVERY_REQUIRED
-                                   else self.adapter.restore_state)
-                restored = restore_adapter(
-                    copy.deepcopy(self.parameters),
-                    str(self.current_run_id),
-                    copy.deepcopy(adapter_state),
-                )
+                if self.process_activation_pending:
+                    # No measurement, filter or control cycle existed yet.
+                    # Validate a configured-but-never-started snapshot exactly;
+                    # container recovery still requires an explicit End.
+                    if (self.process_wait is None or self.control_tick_count != 0
+                            or self.control_output_count != 0 or self.last_control_output is not None
+                            or self.last_process_state is not None):
+                        raise ValueError("Pending process activation has control history.")
+                    self.adapter.configure(copy.deepcopy(self.parameters), str(self.current_run_id))
+                    self.adapter.set_adaptation(self.adaptation_enabled, self.adaptation_mode, None)
+                    restored = self.adapter.export_state() == adapter_state
+                else:
+                    restore_adapter = (self.adapter.restore_held_state
+                                       if state == ControllerState.RECOVERY_REQUIRED
+                                       else self.adapter.restore_state)
+                    restored = restore_adapter(
+                        copy.deepcopy(self.parameters),
+                        str(self.current_run_id),
+                        copy.deepcopy(adapter_state),
+                    )
                 if not restored:
                     raise ValueError(
                         "The configured Controller adapter cannot restore a running experiment. "
@@ -1200,6 +1263,8 @@ class ControllerService(OnlineParametersMixin):
             self.started_at = command.started_at
             self.stopped_at = None
             self.safety_hold = None
+            self.growth_wait = None
+            self._growth_recovery_pending = False
             self.growth_stream_last_valid_at = None
             self._growth_stream_last_valid_monotonic = None
             self._growth_stream_arrival_age_s = None
@@ -1236,6 +1301,9 @@ class ControllerService(OnlineParametersMixin):
             self.last_process_error = None
             self.last_process_state = None
             self.last_process_write = None
+            self.process_wait = None
+            self.process_wait_count = 0
+            self.process_activation_pending = False
             self.influx_write_success_count = 0
             self.influx_write_failure_count = 0
             self.last_influx_write_at = None
@@ -1272,6 +1340,7 @@ class ControllerService(OnlineParametersMixin):
                 self.state = ControllerState.ERROR
                 raise RuntimeError(f"Controller adapter configure failed: {exc}") from exc
             activation_state = None
+            activation_wait = None
             if self.settings.process_enabled:
                 try:
                     self.process_adapter.connect()
@@ -1280,6 +1349,9 @@ class ControllerService(OnlineParametersMixin):
                         if not isinstance(activation_state, ProcessState):
                             raise TypeError("Process activation requires ProcessState.")
                         activation_state.__post_init__()
+                except ProcessMeasurementPending as exc:
+                    activation_wait = exc
+                    self.process_activation_pending = True
                 except Exception as exc:
                     self.process_error_count += 1
                     self.last_process_error = str(exc)
@@ -1289,7 +1361,8 @@ class ControllerService(OnlineParametersMixin):
                         f"Controller process activation failed: {exc}"
                     ) from exc
             try:
-                self.adapter.start()
+                if not self.process_activation_pending:
+                    self.adapter.start()
                 if activation_state is not None:
                     self.adapter.initialize_process_state(activation_state)
                     self.last_process_state = activation_state.to_dict()
@@ -1310,6 +1383,8 @@ class ControllerService(OnlineParametersMixin):
             now = self._monotonic_clock()
             self._run_started_monotonic = now
             self._next_tick_monotonic = now + float(self.parameters.get("dt", 5.0))
+            if activation_wait is not None:
+                self._wait_for_process_locked(activation_wait, now=now)
             self._control_wakeup.set()
 
         return {"accepted": True, "kind": "start", "run_id": command.run_id}
@@ -1348,7 +1423,11 @@ class ControllerService(OnlineParametersMixin):
                     if confirming_recovery:
                         self.state = ControllerState.RECOVERY_REQUIRED
                     raise RuntimeError(f"Controller process disconnect failed: {exc}") from exc
+            previous_process_wait = self.process_wait
+            previous_activation_pending = self.process_activation_pending
             self.state = ControllerState.STOPPED
+            self.process_wait = None
+            self.process_activation_pending = False
             if confirming_interruption:
                 self.recovery_status = "restored"
                 self.recovery_error = None
@@ -1370,6 +1449,8 @@ class ControllerService(OnlineParametersMixin):
                 # could not be committed. No old params/start replay may
                 # turn this failed End into permission to control again.
                 self.state = ControllerState.RECOVERY_REQUIRED if confirming_recovery else ControllerState.ERROR
+                self.process_wait = previous_process_wait
+                self.process_activation_pending = previous_activation_pending
                 self.stopped_at = previous_stopped_at
                 self.recovery_status = "confirmation_required" if confirming_recovery else "persistence_error"
                 end_error = self.recovery_error
@@ -1685,21 +1766,37 @@ class ControllerService(OnlineParametersMixin):
             logger.exception("Safety hold checkpoint raised unexpectedly.")
 
     def _check_growth_timeout_locked(self, *, now: float | None = None, boundary: str = "watchdog") -> bool:
+        """Close the control gate while live G is unavailable, without ending the run."""
         if (self.state != ControllerState.RUNNING or not self._uses_live_growth_locked()
-                or not self.gsensor_desired_enabled
-                or self._growth_stream_last_valid_monotonic is None
-                or self._growth_stream_arrival_age_s is None):
+                or not self.gsensor_desired_enabled):
+            self.growth_wait = None
             return False
-        current = self._monotonic_clock() if now is None else float(now)
-        age = self._growth_stream_arrival_age_s + max(0.0, current - self._growth_stream_last_valid_monotonic)
-        maximum = 2.0 * float(self._active_parameter("dt_G", 15.0))
-        if age <= maximum:
+        available, reason, _ = self._growth_input_availability_locked(now=now)
+        if available:
+            self.growth_wait = None
             return False
-        self._enter_safety_hold_locked("growth_timeout",
-            f"Established live G input expired after {age:.3f} s (limit {maximum:g} s). "
-            "Use End Experiment for this run, then create a new run; fresh data cannot resume it.",
-            boundary=boundary)
+        wait_reason = ("growth_data_timeout" if reason == "stale_growth_sample"
+                       else "waiting_for_fresh_valid_sample")
+        if self.growth_wait is None:
+            self.growth_wait = {"reason": wait_reason,
+                                "waiting_since": _utc_timestamp(self._wall_clock()),
+                                "boundary": boundary}
+            if self.growth_stream_last_valid_at is not None:
+                self.growth_wait["last_valid_at"] = self.growth_stream_last_valid_at
+        else:
+            self.growth_wait["reason"] = wait_reason
+            self.growth_wait["boundary"] = boundary
+        self._growth_recovery_pending = True
         return True
+
+    def _wait_for_growth_locked(self, *, now: float | None = None) -> dict[str, Any]:
+        current = self._monotonic_clock() if now is None else float(now)
+        self._next_tick_monotonic = current + float(self._active_parameter("dt", 5.0))
+        if not self._try_persist_state_locked():
+            raise RuntimeError("Could not persist Controller G waiting state.")
+        return {"executed": False, "reason": "waiting_growth_data",
+                "waiting_for_data": True, "tick_seq": self.control_tick_count,
+                "process_write_attempted": False}
 
     def _invalidate_growth_input_locked(
         self,
@@ -1770,17 +1867,17 @@ class ControllerService(OnlineParametersMixin):
                 raise ValueError("GSensor activation revision conflicts with its prior event.")
             if command.event_id == self.gsensor_control_event_id:
                 raise ValueError("A new GSensor activation revision requires a new event_id.")
-            if self._check_growth_timeout_locked():
-                raise ValueError("Live G input already timed out. Use End Experiment; activation cannot release the safety hold.")
 
             self.gsensor_control_revision = command.revision
             self.gsensor_control_event_id = command.event_id
             self.gsensor_last_command_enabled = enabled
             self.gsensor_last_command_requested_at = command.requested_at
             self.gsensor_desired_enabled = enabled
+            self.growth_wait = None
             self.growth_stream_last_valid_at = None
             self._growth_stream_last_valid_monotonic = None
             self._growth_stream_arrival_age_s = None
+            # Keep a pending recovery baseline when disabling after a gap.
             # Central's request closes the gate immediately. Enabling still
             # requires a matching GSensor status acknowledgement.
             self.gsensor_enabled = False
@@ -1870,8 +1967,6 @@ class ControllerService(OnlineParametersMixin):
                     f"GSensor reported a terminal error: {status.error}. "
                     "Use End Experiment for this run, then create a new run.")
                 return {"accepted": True, "kind": "growth_status", "safety_hold": "gsensor_error"}
-            if self._check_growth_timeout_locked():
-                raise ValueError("Established live G stream timed out before this status. Use End Experiment.")
 
             context_changed = (
                 status.initialization_generation
@@ -1992,10 +2087,9 @@ class ControllerService(OnlineParametersMixin):
                     "kind": "sample",
                     "frame_seq": sample.frame_seq,
                 }
-            # A late fresh frame must not erase a gap that already exceeded the
-            # watchdog limit before the next ordinary control deadline.
-            if self._check_growth_timeout_locked():
-                raise ValueError("Established live G stream timed out before this sample. Use End Experiment.")
+            # Notice a preceding gap, but permit a fresh identity-matched
+            # frame to reopen this same run's control gate.
+            self._check_growth_timeout_locked()
             if self.last_frame_seq is not None and sample.frame_seq > self.last_frame_seq + 1:
                 self.missing_frame_count += sample.frame_seq - self.last_frame_seq - 1
 
@@ -2023,7 +2117,9 @@ class ControllerService(OnlineParametersMixin):
             self._growth_stream_last_valid_monotonic = self.last_valid_sample_received_monotonic
             self._growth_stream_arrival_age_s = arrival_age
             self.gsensor_gate_reason = "ready"
+            self.growth_wait = None
             self.valid_sample_count += 1
+            self._control_wakeup.set()
 
         result = {
             "accepted": True,
@@ -2078,6 +2174,50 @@ class ControllerService(OnlineParametersMixin):
             return False, "stale_growth_sample", age
         return True, "ready", age
 
+    def _audit_process_wait_locked(self, stage: str, metadata: Mapping[str, Any]) -> None:
+        if self.measurement_writer is None:
+            return
+        try:
+            write_process_event(self.measurement_writer, {
+                "command_id": f"process-input:{self.current_run_id}:{self.process_wait_count}:{stage}",
+                "run_id": self.current_run_id, "run_started_at": self.started_at,
+                "tick_seq": self.control_tick_count, "status": stage,
+                "process_wait": copy.deepcopy(dict(metadata)),
+            }, "controller", stage)
+        except Exception as exc:
+            self.influx_write_failure_count += 1
+            self.last_influx_error = f"Process waiting audit failed: {type(exc).__name__}"
+            logger.exception("Could not persist process waiting audit event.")
+
+    def _wait_for_process_locked(
+        self, pending: ProcessMeasurementPending, *, now: float,
+        executed: bool = False,
+    ) -> dict[str, Any]:
+        """Recoverable input loss pauses control, never the experiment identity."""
+        entering = self.process_wait is None or self.process_wait.get("reason") != pending.reason
+        self.process_wait_count += 1
+        metadata = pending.to_dict()
+        if self.process_wait is not None:
+            metadata["waiting_since"] = self.process_wait["waiting_since"]
+        self.process_wait = metadata
+        self.last_process_error = None
+        self.last_process_state = None
+        self.last_error = None
+        if entering:
+            self._audit_process_wait_locked("measurement_wait", metadata)
+        # Waiting polls do not consume algorithm tick IDs, logical elapsed
+        # time, parameter transactions, or controller_measurement rows.
+        self._next_tick_monotonic = now + min(float(self._active_parameter("dt", 5.0)), 1.0)
+        if not self._try_persist_state_locked():
+            self.state = ControllerState.ERROR
+            self._next_tick_monotonic = None
+            self.last_error = "Could not persist Controller process waiting state."
+            raise RuntimeError(self.last_error)
+        return {"executed": executed, "reason": "waiting_process_data",
+                "waiting_for_data": True, "wait_reason": pending.reason,
+                "tick_seq": self.control_tick_count, "output_generated": executed,
+                "process_write_attempted": False}
+
     def _control_tick_once(self, *, now: float | None = None) -> dict[str, Any]:
         """Execute one scheduler tick; exposed for deterministic integration tests."""
 
@@ -2085,7 +2225,7 @@ class ControllerService(OnlineParametersMixin):
             if self.state != ControllerState.RUNNING:
                 return {"executed": False, "reason": "not_running"}
             if self._check_growth_timeout_locked(now=now):
-                return {"executed": False, "reason": "growth_timeout"}
+                return self._wait_for_growth_locked(now=now)
             self._last_committed_diagnostics = None
             self._last_diagnostics_capture_error = None
             now_value = self._monotonic_clock() if now is None else float(now)
@@ -2096,10 +2236,8 @@ class ControllerService(OnlineParametersMixin):
                 self._next_tick_monotonic = None
                 self._try_persist_state_locked()
                 raise RuntimeError("Controller parameter dt must be finite and positive.")
-            self.control_tick_count += 1
-            tick_seq = self.control_tick_count
-            self._run_elapsed_s += dt
-            elapsed = self._run_elapsed_s
+            tick_seq = self.control_tick_count + 1
+            elapsed = self._run_elapsed_s + dt
             sample = self.last_valid_sample
             growth_available, growth_reason, age = self._growth_input_availability_locked(
                 now=now_value
@@ -2112,9 +2250,8 @@ class ControllerService(OnlineParametersMixin):
                 sample = None
                 age = None
 
-            # Allocate an auditable attempt before process I/O. A failed read
-            # still owns this sequence; it must not leave a missing row below
-            # the final producer watermark or look like a successful cycle.
+            # Prepare an attempt before I/O. Recoverable input waits do
+            # not allocate an algorithm tick; real failed reads still do.
             tick = ControllerTickInput(
                 tick_seq=tick_seq,
                 controller_dt_s=dt,
@@ -2129,6 +2266,9 @@ class ControllerService(OnlineParametersMixin):
                 control_hold_reason=("parameter_confirmation" if self._parameter_confirmation_holds_control() else None),
             )
             process_state: ProcessState | None = None
+            recovering_process = self.process_wait is not None
+            recovering_growth = self._growth_recovery_pending
+            recovering_input = recovering_process or recovering_growth
             if self.settings.process_enabled:
                 try:
                     candidate = self.process_adapter.read_state()
@@ -2136,7 +2276,11 @@ class ControllerService(OnlineParametersMixin):
                         raise TypeError("Fresh process measurement must be a ProcessState.")
                     candidate.__post_init__()
                     current_process_state = candidate.to_dict()
+                except ProcessMeasurementPending as exc:
+                    return self._wait_for_process_locked(exc, now=now_value)
                 except Exception as exc:
+                    self.control_tick_count = tick_seq
+                    self._run_elapsed_s = elapsed
                     self.process_error_count += 1
                     self.control_tick_error_count += 1
                     self.last_process_error = str(exc)
@@ -2147,11 +2291,28 @@ class ControllerService(OnlineParametersMixin):
                 self.last_process_state = current_process_state
                 self.last_process_error = None
                 tick = replace(tick, process_state=process_state)
-            tick = self._revalidate_prepared_parameters(tick, process_state)
             if self._check_growth_timeout_locked(boundary="after_process_read"):
-                return self._record_growth_abort_locked(tick, process_state=process_state,
-                                                        step_executed=False)
+                return self._wait_for_growth_locked()
+            self.control_tick_count = tick_seq
+            self._run_elapsed_s = elapsed
+            if recovering_input:
+                # A baseline-only recovery is not a parameter application
+                # boundary. Keep prepared edits for the next measured tick.
+                tick = replace(tick, runtime_update=None)
+            else:
+                tick = self._revalidate_prepared_parameters(tick, process_state)
             try:
+                if self.process_activation_pending:
+                    self.adapter.start()
+                    self.adapter.initialize_process_state(process_state)
+                    self.process_activation_pending = False
+                elif recovering_input and process_state is not None:
+                    self.adapter.resume_process_state(process_state)
+                if recovering_input:
+                    # Establish a fresh post-gap measurement baseline, with
+                    # no actuator command even when writes are enabled.
+                    tick = replace(tick, control_hold_reason=(
+                        "process_data_recovery" if recovering_process else "growth_data_recovery"))
                 fit_snapshot_before, _ = self._adaptation_snapshot_locked()
                 fits_before = (fit_snapshot_before or {}).get("fit_count")
                 output = self.adapter.step(tick)
@@ -2165,6 +2326,12 @@ class ControllerService(OnlineParametersMixin):
                     raise TypeError(
                         "Controller adapter step() must return ControllerStepResult or None."
                     )
+                if recovering_process:
+                    recovered_wait = self.process_wait
+                    self.process_wait = None
+                    self._audit_process_wait_locked("measurement_resumed", recovered_wait)
+                if recovering_growth:
+                    self._growth_recovery_pending = False
             except Exception as exc:
                 self.adapter_error_count += 1
                 self.control_tick_error_count += 1
@@ -2173,14 +2340,21 @@ class ControllerService(OnlineParametersMixin):
                 raise RuntimeError(error) from exc
 
             if self._check_growth_timeout_locked(boundary="after_algorithm_step"):
-                return self._record_growth_abort_locked(tick, process_state=process_state)
+                return self._record_growth_abort_locked(tick, process_state=process_state, output=output,
+                                                        complete_runtime=not recovering_input)
 
             output_status: dict[str, Any] | None = None
             if output is not None:
                 process_write: ProcessWriteResult | None = None
+                # Equipment writes require an explicit real-experiment mode.
+                # Legacy snapshots use exp_sim; a missing/unknown mode must not
+                # acquire write permission from the environment switches alone.
+                run_type = self.parameters.get("run_type", self.parameters.get("exp_sim"))
                 process_write_requested = bool(
-                    self.settings.process_enabled
+                    run_type == "experiment"
+                    and self.settings.process_enabled
                     and self.settings.process_write_enabled
+                    and not recovering_input
                     and output.valid
                     and output.T_j_set is not None
                 )
@@ -2191,11 +2365,28 @@ class ControllerService(OnlineParametersMixin):
                             self.current_run_id, self.started_at, tick_seq
                         )
                         if self._check_growth_timeout_locked(boundary="before_process_write"):
-                            return self._record_growth_abort_locked(tick, process_state=process_state)
+                            return self._record_growth_abort_locked(tick, process_state=process_state, output=output,
+                                                                    complete_runtime=not recovering_input)
                         process_write_attempted = True
                         process_write = self.process_adapter.write_jacket_setpoint(
                             output.T_j_set
                         )
+                    except ProcessMeasurementPending as exc:
+                        # The adapter guarantees this type means no command
+                        # was published. Keep the completed numerical tick and
+                        # its parameter receipt; do not invent a device write.
+                        try:
+                            self._complete_pending_runtime_locked(tick, output)
+                            self._record_control_output_locked(
+                                tick, output, process_state=process_state,
+                                process_write_attempted=False,
+                            )
+                        except Exception as commit_exc:
+                            self.control_tick_error_count += 1
+                            error = f"Controller refresh failed: {commit_exc}"
+                            self._record_failed_tick_locked(tick, error, process_state=process_state)
+                            raise RuntimeError(error) from commit_exc
+                        return self._wait_for_process_locked(exc, now=now_value, executed=True)
                     except Exception as exc:
                         self.process_error_count += 1
                         self.control_tick_error_count += 1
@@ -2216,9 +2407,11 @@ class ControllerService(OnlineParametersMixin):
                     # the aborted control/refresh as a successful cycle.
                     return self._record_growth_abort_locked(tick,
                         process_state=process_state, process_write=process_write,
-                        process_write_attempted=process_write_attempted)
+                        process_write_attempted=process_write_attempted, output=output,
+                        complete_runtime=not recovering_input)
                 try:
-                    self._complete_pending_runtime_locked(tick, output)
+                    if not recovering_input:
+                        self._complete_pending_runtime_locked(tick, output)
                 except Exception as exc:
                     self.control_tick_error_count += 1
                     error = f"Controller refresh failed: {exc}"
@@ -2234,7 +2427,7 @@ class ControllerService(OnlineParametersMixin):
                     process_write=process_write,
                     process_write_attempted=process_write_attempted,
                 )
-            elif self.runtime_pending is not None or self._parameter_tick_patch() is not None:
+            elif not recovering_input and (self.runtime_pending is not None or self._parameter_tick_patch() is not None):
                 self._reject_pending_runtime_locked("Controller refresh produced no output.")
                 self.state = ControllerState.ERROR
                 self._next_tick_monotonic = None
@@ -2294,22 +2487,27 @@ class ControllerService(OnlineParametersMixin):
 
     def _record_growth_abort_locked(
         self, tick: ControllerTickInput, *, process_state: ProcessState | None,
-        step_executed: bool = True, process_write: ProcessWriteResult | None = None,
+        output: ControllerStepResult | None, complete_runtime: bool = True,
+        process_write: ProcessWriteResult | None = None,
         process_write_attempted: bool = False,
     ) -> dict[str, Any]:
-        """Keep every attempted tick auditable without fabricating control success."""
-        boundary = (self.safety_hold or {}).get("boundary", "unknown")
-        error = f"growth_timeout: cycle aborted at {boundary}"
-        if process_write_attempted:
-            error += "; actual process-write attempt and receipt retained"
-        outcome = self._record_control_output_locked(
-            tick, ControllerStepResult(valid=False, error=error),
-            process_state=process_state, process_write=process_write,
-            process_write_attempted=process_write_attempted,
-        )
-        self._try_persist_state_locked()
-        return {"executed": step_executed, "reason": "growth_timeout", "tick_seq": tick.tick_seq,
-                "step_executed": step_executed, **outcome}
+        """Finish an in-flight calculation for audit, then wait without another write."""
+        # The sample was usable when this cycle began. If it expires during
+        # calculation, retain the real numerical result/refresh receipt, but
+        # withhold its actuator command. New cycles remain gated until fresh G.
+        if complete_runtime:
+            self._complete_pending_runtime_locked(tick, output)
+        outcome = {}
+        if output is not None:
+            outcome = self._record_control_output_locked(
+                tick, output, process_state=process_state, process_write=process_write,
+                process_write_attempted=process_write_attempted,
+            )
+        self._next_tick_monotonic = self._monotonic_clock() + float(self._active_parameter("dt", 5.0))
+        if not self._try_persist_state_locked():
+            raise RuntimeError("Could not persist Controller G waiting state.")
+        return {"executed": True, "reason": "waiting_growth_data", "tick_seq": tick.tick_seq,
+                "waiting_for_data": True, **outcome}
 
     def _record_control_output_locked(
         self,
@@ -2459,6 +2657,10 @@ class ControllerService(OnlineParametersMixin):
         integrations = self.settings.integration_status()
         process = integrations["process"]
         process.update(copy.deepcopy(dict(self.process_adapter.status())))
+        waiting = self.state == ControllerState.RUNNING and (
+            self.process_wait is not None or process.get("waiting_for_data") is True
+        )
+        wait_metadata = self.process_wait or process.get("last_invalid_state") or {}
         process.update(
             {
                 "enabled": self.settings.process_enabled,
@@ -2470,6 +2672,12 @@ class ControllerService(OnlineParametersMixin):
                 "configured": bool(self.settings.rabbit_url and self.settings.rabbit_exchange),
                 "service_error_count": self.process_error_count,
                 "service_last_error": self.last_process_error,
+                "waiting_for_data": waiting,
+                "wait_reason": wait_metadata.get("reason") if waiting else None,
+                "waiting_since": wait_metadata.get("waiting_since") if waiting else None,
+                "last_invalid_state": copy.deepcopy(wait_metadata) if wait_metadata else None,
+                "wait_count": self.process_wait_count,
+                "activation_pending": self.process_activation_pending,
             }
         )
         influx = integrations["influxdb"]
@@ -2511,7 +2719,7 @@ class ControllerService(OnlineParametersMixin):
             control_hold_reason = (
                 growth_reason
                 if self._uses_live_growth_locked()
-                and control_target == "G"
+                and (control_target == "G" or self.gsensor_desired_enabled)
                 and not growth_available
                 else None
             )
@@ -2570,6 +2778,7 @@ class ControllerService(OnlineParametersMixin):
                     "transition_occurred_at": self.gsensor_transition_occurred_at,
                     "last_status_at": self.gsensor_last_status_at,
                     "stream_last_valid_at": self.growth_stream_last_valid_at,
+                    "growth_wait": copy.deepcopy(self.growth_wait),
                     "sample_age_s": current_growth_age,
                 },
                 "scheduler": {
