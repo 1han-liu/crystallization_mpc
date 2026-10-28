@@ -14,6 +14,10 @@ Minimal service skeleton for the crystallization system, focused on message-base
 - Generated files such as `__pycache__`, `.pytest_cache`, and `*.egg-info` should not be included in commits or handoff packages.
 
 ## Docker Quick Start
+For an already configured laboratory PC, see the Chinese
+[daily startup, data-source status, and shutdown guide](docs/lab-daily-operation-zh.md).
+Real process acquisition also requires the `process-io` Compose profile.
+
 ```bash
 docker compose up --build
 ```

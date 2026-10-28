@@ -29,6 +29,8 @@ const state = {
   latestOverlayKey: null,
   lastOverlayRefreshAt: 0,
   controllerStatus: null,
+  processSource: null,
+  processSourceReceivedAt: 0,
   seedActionInFlight: false,
   seedActionRunId: null,
   pendingSeedEventId: null,
@@ -188,6 +190,8 @@ function renderMutationState() {
 
 function markSystemStatusUnavailable(message, label = "offline") {
   state.systemStatusFresh = false;
+  state.processSource = null;
+  renderProcessSource();
   state.controllerStatus = null;
   state.gsensorActivation = null;
   systemRefreshStatus.textContent = label;
@@ -216,13 +220,76 @@ function applyUiMode(mode) {
 
 async function loadUiConfig() {
   applyUiMode("production");
+  configureServiceLinks();
   try {
     const payload = await fetchJson("/api/ui/config");
     applyUiMode(payload.mode);
+    configureServiceLinks(payload.service_links);
     return payload;
   } catch (error) {
     return { mode: "production", development: false };
   }
+}
+
+function configureServiceLinks(links = {}) {
+  const host = window.location?.hostname || "localhost";
+  for (const [name, port] of Object.entries({ grafana: 3000, gsensor: 8001, rabbitmq: 15673, influxdb: 8087 })) {
+    const configured = links?.[name];
+    document.querySelector(`#service-${name}`).setAttribute("href",
+      typeof configured === "string" && /^https?:\/\//i.test(configured)
+        ? configured : `http://${host}:${port}`);
+  }
+}
+
+function renderProcessSource() {
+  const source = state.processSource;
+  const elapsed = Math.max(0, (Date.now() - state.processSourceReceivedAt) / 1000);
+  const age = typeof source?.sample_age_s === "number" ? source.sample_age_s + elapsed : null;
+  let kind = source?.status || "unavailable";
+  // A hanging HTTP request must not leave the last green card on screen.
+  if (kind === "ready" && (source.ready !== true || source.connected !== true
+      || age === null || age < 0 || !(source.sample_max_age_s > 0)
+      || age > source.sample_max_age_s)) kind = "stale";
+  const ready = kind === "ready";
+  const labels = {
+    ready: "Receiving normally", waiting: "Waiting for data", invalid: "Invalid data",
+    stale: "Data expired", disconnected: "Disconnected", disabled: "Monitoring disabled",
+    unavailable: "Unconfirmed",
+  };
+  const messages = {
+    ready: "OPC UA data is being received normally. All five values have Good quality and a fresh, complete collection.",
+    waiting: "Waiting for a complete OPC UA sample. Check that the device server and Telegraf are running.",
+    invalid: source?.error || "Incoming OPC UA data failed validation.",
+    stale: "OPC UA data is no longer fresh. Check the device server, Telegraf and communication link.",
+    disconnected: "The process telemetry connection is unavailable. Check RabbitMQ and Central.",
+    disabled: "OPC UA source monitoring is disabled in Central configuration.",
+    unavailable: "OPC UA data status is unconfirmed. Waiting for a successful status refresh.",
+  };
+  document.querySelector("#process-source-card").dataset.state = ready ? "ready" : kind;
+  const badge = document.querySelector("#process-source-status");
+  badge.textContent = labels[kind] || "Unconfirmed";
+  badge.className = `status ${ready ? "running" : ["invalid", "stale", "disconnected"].includes(kind) ? "error" : "idle"}`;
+  let message = messages[kind] || messages.unavailable;
+  if (kind === "waiting" && source?.missing_fields?.length) {
+    message += ` Missing: ${source.missing_fields.join(", ")}.`;
+  }
+  document.querySelector("#process-source-message").textContent = message;
+  for (const name of ["T", "T_j", "c", "count_middle", "T_j_set"]) {
+    const value = ready ? source.values?.[name] : null;
+    document.querySelector(`#process-source-${name}`).textContent = typeof value === "number" && Number.isFinite(value)
+      ? `${value.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 })}${name.startsWith("T") ? " °C" : ""}` : "—";
+  }
+  const collected = source?.collected_at ? formatExperimentTime(source.collected_at) : null;
+  document.querySelector("#process-source-sample").textContent = collected
+    ? `Latest complete sample: ${collected} · age ${Math.max(0, age ?? 0).toFixed(1)} s · freshness limit ${source.sample_max_age_s} s`
+    : "No complete sample received.";
+  const controller = state.controllerStatus;
+  const process = controller?.integrations?.process;
+  document.querySelector("#process-source-control").textContent = !source || !controller?.available || !process
+    ? "Controller process mode is unconfirmed."
+    : !process.enabled ? "Controller process input is disabled."
+      : !process.write_enabled ? "Controller process input is enabled · read-only mode."
+        : "Controller process input and equipment writes are enabled for Experiment runs.";
 }
 
 function runConfigurationLocked() {
@@ -1791,6 +1858,9 @@ function renderSystemStatus(payload) {
     && gsensor.last_status?.run_id === current.run_id;
   const gsensorStatus = gsensorMatchesRun ? gsensor.last_status : {};
   state.controllerStatus = controller;
+  state.processSource = payload.process_source || null;
+  state.processSourceReceivedAt = Date.now();
+  renderProcessSource();
   renderDerivedParameterPreview();
   state.runtimeHistory = payload.runtime_history || [];
   state.runtimeHistoryError = payload.runtime_history_error || "";
@@ -2776,9 +2846,11 @@ async function bootstrap() {
 bootstrap().catch(reportPollingError);
 
 setInterval(() => {
+  renderProcessSource();
   pollStatus().catch(reportPollingError);
 }, 2000);
 
 window.addEventListener("focus", () => {
+  renderProcessSource();
   pollStatus({ refreshParameters: true }).catch(reportPollingError);
 });

@@ -90,6 +90,7 @@ from crystallization_mpc.messaging.run_parameters import RunParametersUpdatePayl
 from crystallization_mpc.messaging.parameter_policy import (
     derived_parameter_policies, parameter_policies, validate_parameter_changes,
 )
+from crystallization_mpc.apps.central.process_source import ProcessSourceMonitor
 
 ROLE = "central"
 TARGET_VALUES = ("sigma", "G")
@@ -632,6 +633,10 @@ class CentralService:
         )
         self.target: Literal["sigma", "G"] = self.run_configuration.control_target  # type: ignore[assignment]
         self.publisher = publisher or CentralApp()
+        self.process_source = ProcessSourceMonitor.from_env(
+            getattr(self.publisher, "url", os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")),
+            getattr(self.publisher, "exchange", os.getenv("RABBIT_EXCHANGE", EXCHANGE)),
+        )
         self.operation_state = self._build_default_operation_state()
         self._sync_operation_state_from_run_configuration()
         self.controller_status_url = os.getenv(
@@ -741,8 +746,11 @@ class CentralService:
             return self.params_path
         return self.default_params_path
 
-    def ui_config(self) -> Dict[str, str | bool]:
-        return ui_mode_payload(self.ui_mode)
+    def ui_config(self) -> Dict[str, Any]:
+        return {**ui_mode_payload(self.ui_mode), "service_links": {
+            name: os.getenv(f"CENTRAL_{name.upper()}_UI_URL", "").strip()
+            for name in ("grafana", "gsensor", "rabbitmq", "influxdb")
+        }}
 
     @contextmanager
     def ui_action(self, context: ExperimentContext | None = None):
@@ -1379,6 +1387,7 @@ class CentralService:
 
     def start(self) -> None:
         self.publisher.connect()
+        self.process_source.start()
         self.archive.start()
         if not self._runtime_monitor_thread or not self._runtime_monitor_thread.is_alive():
             self._runtime_monitor_stop.clear()
@@ -1394,6 +1403,7 @@ class CentralService:
         self._consumer_thread.start()
 
     def stop(self) -> None:
+        self.process_source.stop()
         self.archive.stop()
         self._runtime_monitor_stop.set()
         if self._runtime_monitor_thread:
@@ -1653,6 +1663,7 @@ class CentralService:
             "experiments": experiments,
             "gsensor": gsensor,
             "controller": controller,
+            "process_source": self.process_source.status(),
             "runtime_request": request,
             "runtime_history": history,
             "runtime_history_error": "; ".join(dict.fromkeys(filter(None, errors))) or None,
@@ -2586,7 +2597,7 @@ def index() -> str:
 
 
 @web_app.get("/api/ui/config")
-def get_ui_config() -> Dict[str, str | bool]:
+def get_ui_config() -> Dict[str, Any]:
     return service.ui_config()
 
 

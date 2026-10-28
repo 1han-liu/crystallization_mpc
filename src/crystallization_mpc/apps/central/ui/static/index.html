@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20261014-experiment-archive">
+    <link rel="stylesheet" href="/static/styles.css?v=20261028-process-source">
   </head>
   <body>
     <div class="shell">
@@ -67,9 +67,28 @@
             <p class="muted">Create, start, and end the current experiment from one control area. Parameters stay in the left drawer.</p>
           </div>
           <div class="hero-actions">
-            <a class="ghost" href="http://localhost:3000" target="_blank" rel="noopener noreferrer">Grafana</a>
-            <a class="ghost" href="http://localhost:8001" target="_blank" rel="noopener noreferrer">Gsensor UI</a>
+            <a id="service-grafana" class="ghost" href="http://localhost:3000" target="_blank" rel="noopener noreferrer">Grafana</a>
+            <a id="service-gsensor" class="ghost" href="http://localhost:8001" target="_blank" rel="noopener noreferrer">Gsensor UI</a>
+            <a id="service-rabbitmq" class="ghost" href="http://localhost:15673" target="_blank" rel="noopener noreferrer">RabbitMQ</a>
+            <a id="service-influxdb" class="ghost" href="http://localhost:8087" target="_blank" rel="noopener noreferrer">InfluxDB</a>
           </div>
+        </section>
+
+        <section id="process-source-card" class="panel process-source-card" data-state="waiting" aria-labelledby="process-source-heading">
+          <div class="panel-head">
+            <h3 id="process-source-heading">OPC UA Data Source</h3>
+            <span id="process-source-status" class="status idle">Checking</span>
+          </div>
+          <p id="process-source-message" role="status" aria-live="polite">Waiting to confirm incoming OPC UA data.</p>
+          <dl class="process-source-values">
+            <div><dt>Reactor temperature</dt><dd id="process-source-T">—</dd></div>
+            <div><dt>Jacket temperature</dt><dd id="process-source-T_j">—</dd></div>
+            <div><dt>Concentration (g/g H₂O)</dt><dd id="process-source-c">—</dd></div>
+            <div><dt>Process count</dt><dd id="process-source-count_middle">—</dd></div>
+            <div><dt>Jacket setpoint</dt><dd id="process-source-T_j_set">—</dd></div>
+          </dl>
+          <p id="process-source-sample" class="muted">No complete sample received.</p>
+          <p id="process-source-control" class="muted">Controller process mode is unconfirmed.</p>
         </section>
 
         <section class="panel run-configuration-panel" aria-labelledby="run-configuration-heading">
@@ -433,7 +452,7 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20261014-experiment-archive"></script>
+    <script src="/static/app.js?v=20261028-process-source"></script>
     <script src="/static/archive.js?v=20261014-1"></script>
   </body>
 </html>

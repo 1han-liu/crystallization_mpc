@@ -51,10 +51,22 @@ services:
       - EXPERIMENT_HOST_ROOT_DISPLAY=${EXPERIMENT_HOST_ROOT:-./.runtime/experiments}
       - EXPERIMENT_EXPORT_ENABLED=${EXPERIMENT_EXPORT_ENABLED:-true}
       - PROCESS_DEVICE_ID=${PROCESS_DEVICE_ID:-crystallizer}
+      - CENTRAL_PROCESS_MONITOR_ENABLED=${CENTRAL_PROCESS_MONITOR_ENABLED:-true}
+      - PROCESS_SAMPLE_MAX_AGE_S=${PROCESS_SAMPLE_MAX_AGE_S:-5.0}
+      - PROCESS_NAMESPACE_INDEX=${OPCUA_NAMESPACE_INDEX:-2}
+      - PROCESS_T_J_SET_NODE=${OPCUA_T_J_SET_READ_NODE:-${OPCUA_T_J_SET_NODE:-iCache.Temperature1}}
+      - PROCESS_T_NODE=${OPCUA_T_NODE:-Local.iControl.Experiment1.Trends.Tr.Value}
+      - PROCESS_T_J_NODE=${OPCUA_T_J_NODE:-Local.iControl.Experiment1.Trends.Tj.Value}
+      - PROCESS_C_NODE=${OPCUA_C_NODE:-Local.iControl.Experiment1.Trends.load.Value}
+      - PROCESS_COUNT_MIDDLE_NODE=${OPCUA_COUNT_MIDDLE_NODE:-Local.iControl.Experiment1.Trends.count.Value}
       - CONTROLLER_PROCESS_ENABLED=${CONTROLLER_PROCESS_ENABLED:-false}
       - TELEGRAF_INTERVAL=${TELEGRAF_INTERVAL:-1s}
       - OPCUA_WRITER_AUDIT_DB=/data/opcua_writer/commands.sqlite3
       - GRAFANA_EXPERIMENT_URL=${GRAFANA_EXPERIMENT_URL:-http://localhost:3000/d/crystallization-mpc-analysis/crystallization-mpc-analysis}
+      - CENTRAL_GRAFANA_UI_URL=${CENTRAL_GRAFANA_UI_URL:-}
+      - CENTRAL_GSENSOR_UI_URL=${CENTRAL_GSENSOR_UI_URL:-}
+      - CENTRAL_RABBITMQ_UI_URL=${CENTRAL_RABBITMQ_UI_URL:-}
+      - CENTRAL_INFLUXDB_UI_URL=${CENTRAL_INFLUXDB_UI_URL:-}
     volumes:
       - opcua_writer_data:/data/opcua_writer:ro
       - type: bind

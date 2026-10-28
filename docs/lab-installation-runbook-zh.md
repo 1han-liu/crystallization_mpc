@@ -1,5 +1,9 @@
 # 结晶控制系统实验室上机流程
 
+已完成现场安装和测试后的日常开关机、当前 `process-io` 开关、Central 数据源
+状态卡片及管理入口，见 [实验室日常操作](lab-daily-operation-zh.md)。下文保留
+首次安装基线，涉及旧环境变量时请先对照该日常说明和 [Process I/O](process-io.md)。
+
 适用基线为 `final` 分支的 `d561aee`。本流程按 2026 年 10 月 13 日首次上机准备，主线采用 Windows 64 位电脑、PowerShell、Docker Desktop 的 Linux 容器。实验室系统、网络、OPC UA 地址和设备允许的控制范围需要现场填写；文中的示例地址不是已确认的设备地址。如果安装的是更新提交，先核对配置和迁移说明。
 
 **已知现场条件：实验室电脑只有 Python 3.9，Docker Desktop 是否已安装仍待确认。按本手册的 Docker 主路线，保留 Python 3.9 即可，不需要先下载新版 Python 或 Miniconda。** 项目在容器中使用 Python 3.11。只有决定用 Windows 原生 Python 运行应用时，3.9 才不够，需要按第 14 节另外准备 3.11 环境。
@@ -298,7 +302,7 @@ Get-Process -Id 1234
 
 ## 6 先完成纯仿真预检
 
-保持 OPC UA 两门关闭，并在 Controller 状态中核实。**当前写入判断没有额外检查 UI 的 Run Type；仅把界面切到 Simulation 不能阻止设备读写。仿真必须把两个 OPC UA 环境开关都设为 false，并让新配置实际生效。** 在 Central 刷新页面，按下列顺序操作：
+保持过程输入和设备写入两门关闭，并在 Controller 状态中核实。当前版本实际设备写入还要求 Run Type 为 Experiment；独立纯仿真仍应将 `CONTROLLER_PROCESS_ENABLED` 和 `CONTROLLER_PROCESS_WRITE_ENABLED` 都设为 false，避免读取现场过程数据，并让新配置实际生效。在 Central 刷新页面，按下列顺序操作：
 
 1. Run Type 选 `Simulation`。
 2. Growth-rate Source 选 `Simulated`。
@@ -531,7 +535,7 @@ docker compose exec -T gsensor python -c "from crystallization_mpc.apps.gsensor.
 
 只读联调通过后，与设备负责人确认设备控制权、温度和速率边界、浓度/图像标定、通信故障处置以及物理急停。此处的确认来自实际设备投运需求：代码中的写门一旦打开，运行中的 Experiment 可能直接把夹套设定值送给真实设备。
 
-先 `End Experiment`，确认 Controller `stopped`，并让设备按实验室规程处于可交接状态。不要仅 `docker stop`：兼容的 RUNNING checkpoint 可在容器重启后自动恢复运行。
+先 `End Experiment`，确认 Controller `stopped`，并让设备按实验室规程处于可交接状态。不要仅 `docker stop`：当前版本活动实验在 Controller 重启后进入 `recovery_required`，需要先 End 原实验再创建新实验，不能把容器重启用作暂停/继续。
 
 先创建确实全新的正式控制会话总目录，保留只读证据。下面目录已存在时会停止；必须选择新名称，并将后面的 `.env` 改成同一个新路径，不能跳过这个错误：
 
@@ -560,7 +564,7 @@ docker compose up -d --force-recreate central gsensor controller
 
 重新检查状态为空闲、新 run 尚未开始。创建正式实验，**重新设置并保存新根目录中的全部现场参数，尤其是与 OPC UA 写边界一致的 `T_j_min/T_j_max`**；不要假定只读会话的参数自动继承。按已确认的工艺选择控制目标、图像和适应设置，然后由现场操作者 Start，并持续看设备实际响应、读回、错误和日志。不要为了测试写权限随意向设备写一个温度。
 
-当前程序在两个 OPC UA 开关均打开、输出有效且有设定值时尝试写入，**写入条件没有单独排除 Simulation**。因此绝不能保持这套写入配置再切换到仿真；回到仿真前先结束实验，将两门改为 false 并重建容器。写后校验读取的是设定值节点，并不代表夹套物理温度已经达到目标。若读回不匹配，检查设备远程控制模式、其他控制程序是否覆盖、节点语义和允许的更新时序；不要一开始就关闭验证或放大容差。
+当前程序要求 Run Type 为 Experiment、过程输入和设备写入两门均打开、输出有效且有设定值，并且不处于输入恢复首周期时，才尝试写入。纯仿真前仍先结束实验，将 `CONTROLLER_PROCESS_ENABLED`、`CONTROLLER_PROCESS_WRITE_ENABLED` 两门改为 false 并重建容器，避免使用现场过程数据。写后校验读取的是设定值节点，并不代表夹套物理温度已经达到目标。若读回不匹配，检查设备远程控制模式、其他控制程序是否覆盖、节点语义和允许的更新时序；不要一开始就关闭验证或放大容差。
 
 写调用超时或读回失败时，命令可能已经到达设备。`write_count` 只统计成功返回的结果，因此真实写入模式下 `write_count=0` 不能证明设备没被写过；必须结合 `process_write_attempted`、错误及设备实际状态判断。
 
@@ -611,7 +615,7 @@ docker compose stop
 
 实验图像、checkpoint 和历史文件在 `EXPERIMENT_HOST_ROOT` 对应主机目录。InfluxDB 和 Grafana 的持久化数据在 Docker 命名卷，**只复制实验文件夹不等于备份数据库**。需要数据库备份时，使用现场认可的 InfluxDB 备份流程。诊断和日志可能包含实验数据，分享前检查内容。
 
-不要用 `docker compose down -v`、`docker volume prune` 或删除旧 checkpoint 做常规排障。普通 `stop` 保留容器和卷；即使使用不带 `-v` 的 `down`，仍应先正常结束实验，防止下次启动按 RUNNING 状态恢复。
+不要用 `docker compose down -v`、`docker volume prune` 或删除旧 checkpoint 做常规排障。普通 `stop` 保留容器和卷；即使使用不带 `-v` 的 `down`，仍应先正常结束实验并完成导出。当前版本在活动实验被重启后进入人工确认状态，不自动继续设备控制。
 
 **关于旧版本升级的准确解释：** Controller 根目录有 `.controller_runtime_state.json`。新版遇到不兼容存档会拒绝恢复，这时仅在 UI 点击 Create Experiment 仍可能被拒绝。要保留旧根目录，在实验停止后把 `.env` 的 `EXPERIMENT_HOST_ROOT` 换为一个全新的目录，重建 Central、GSensor、Controller，再创建新实验；不要手改 schema 或删旧文件冒充兼容。
 

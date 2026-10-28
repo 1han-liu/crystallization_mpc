@@ -1175,3 +1175,17 @@ textarea:disabled {
 #archive-configuration { white-space: pre-wrap; overflow-wrap: anywhere; }
 #archive-downloads { line-height: 1.9; }
 @media (max-width: 780px) { .archive-layout { grid-template-columns: 1fr; } }
+
+.process-source-card { border-left: 4px solid #b4bec8; }
+.process-source-card[data-state="ready"] { border-left-color: #23834b; }
+.process-source-card[data-state="ready"] #process-source-status { background: #edf8f0; color: #176237; border-color: #b5ddc2; }
+.process-source-card[data-state="invalid"],
+.process-source-card[data-state="stale"],
+.process-source-card[data-state="disconnected"] { border-left-color: #b47a25; }
+.process-source-card p { line-height: 1.5; }
+.process-source-values { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; margin: 20px 0; }
+.process-source-values dt { font-size: .8rem; color: var(--muted); }
+.process-source-values dd { margin: 6px 0 0; font-size: 1.15rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+#process-source-sample, #process-source-control { font-size: .85rem; margin-bottom: 0; max-width: none; }
+@media (max-width: 1000px) { .process-source-values { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .process-source-values { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
