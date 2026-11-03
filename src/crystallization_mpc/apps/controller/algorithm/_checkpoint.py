@@ -111,8 +111,9 @@ def validate_checkpoint(
         current = {section: {key: expected.get(key.removeprefix("params."), default)
                              for key, default in defaults[section].items()}
                    for section in ("shared", "controller")}
-        patch = validate_parameter_changes(_mapping(event["parameter_changes"], "parameter changes"), current)
-        actual_patch = validate_parameter_changes(event.get("actual_parameter_changes", patch))
+        patch = validate_parameter_changes(_mapping(event["parameter_changes"], "parameter changes"), current,
+                                           allow_historical_alignment=True)
+        actual_patch = validate_parameter_changes(event.get("actual_parameter_changes", patch), allow_historical_alignment=True)
         if any(key not in patch.get(section, {}) or value != patch[section][key]
                for section, values in actual_patch.items() for key, value in values.items()):
             raise ValueError("Checkpoint actual parameter changes contradict the submitted patch.")
@@ -122,6 +123,11 @@ def validate_checkpoint(
         measurement_changed = event.get("measurement_changed", False)
         _boolean(measurement_changed, "measurement_changed")
         effects = {policies[section][key]["effect"] for section, values in actual_patch.items() for key in values}
+        if "alignment_method" in actual_patch.get("gsensor", {}):
+            # Before startup locking this was a measurement-segment change.
+            # Validate the old receipt using its original effect, without
+            # allowing that change through current runtime command admission.
+            effects.add("measurement_segment")
         should_refresh = bool(legacy or measurement_changed or
             effects & {"controller_refresh", "measurement_segment", "reserved_filter"} or
             ("simulation_only" in effects and configured["run_type"] == "simulation"))
@@ -277,7 +283,7 @@ def validate_checkpoint(
         legacy = _mapping(event["changes"], "refresh.changes")
         if legacy:
             validate_runtime_changes(legacy)
-        raw_changes = validate_parameter_changes(event.get("parameter_changes", {}))
+        raw_changes = validate_parameter_changes(event.get("parameter_changes", {}), allow_historical_alignment=True)
         if not legacy and not raw_changes and event["reason"] != "measurement_changed":
             raise ValueError("Checkpoint refresh changes are empty.")
         if history_start >= length or history["t"][history_start] != event_time:

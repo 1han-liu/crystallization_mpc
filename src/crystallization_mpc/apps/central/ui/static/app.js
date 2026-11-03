@@ -36,6 +36,9 @@ const state = {
   pendingSeedEventId: null,
   seedActionMessage: "",
   seedActionError: false,
+  processRecoveryActionInFlight: false,
+  processRecoveryActionError: "",
+  processRecoveryActionKey: null,
   gsensorActivation: null,
   gsensorActivationInFlight: false,
   gsensorActivationCommand: null,
@@ -96,6 +99,7 @@ const startExperimentButton = document.querySelector("#start-experiment");
 const retrySelectionButton = document.querySelector("#retry-selection");
 const endExperimentButton = document.querySelector("#end-experiment");
 const experimentMessage = document.querySelector("#experiment-message");
+const confirmProcessRecoveryButton = document.querySelector("#confirm-process-recovery");
 const systemRefreshStatus = document.querySelector("#system-refresh-status");
 const gsensorLiveStatus = document.querySelector("#gsensor-live-status");
 const gsensorLiveFrame = document.querySelector("#gsensor-live-frame");
@@ -346,29 +350,59 @@ function controllerWaitingForGrowth(controller = state.controllerStatus) {
 
 function processWaitMessage(controller = state.controllerStatus) {
   const process = controller?.integrations?.process || {};
+  const write = process.write_recovery || {};
+  if (write.pending === true) {
+    const detail = write.manual_confirmation_required === true
+      ? "An earlier device write has an unknown outcome. Verify the actual device state and that no old command can still execute, then confirm below."
+      : "Confirming the previous device command with Writer. No new device command will be sent while its outcome is unresolved.";
+    return `${detail} This experiment is retained. Control calculations and new device writes are paused.${state.processRecoveryActionError ? ` ${state.processRecoveryActionError}` : ""}`;
+  }
   const concentration = process.last_invalid_state?.raw_c;
   const detail = process.wait_reason === "negative_concentration"
     ? ` Concentration is negative${typeof concentration === "number" && Number.isFinite(concentration)
       ? ` (c = ${concentration.toPrecision(6)})` : ""}.` : "";
-  const reason = process.wait_reason === "process_data_timeout"
+  const reason = process.wait_reason === "process_transport_wait"
+    ? "Reconnecting to the process communication link."
+    : process.wait_reason === "process_data_timeout"
     ? "Waiting for fresh process data. Communication timed out."
     : `Waiting for valid process data.${detail}`;
   const reasons = [];
   if (controllerWaitingForProcess(controller)) reasons.push(reason);
   if (controllerWaitingForGrowth(controller)) reasons.push("Waiting for fresh valid G data.");
-  return `${reasons.join(" ")} Control calculations and device writes are paused. This experiment will resume automatically when fresh valid measurements arrive.`;
+  return `${reasons.join(" ")} Control calculations and device writes are paused. This experiment is retained and will resume after communication and fresh valid measurements are confirmed.`;
+}
+
+function processWaitLabel(controller = state.controllerStatus) {
+  const process = controller?.integrations?.process || {};
+  if (process.write_recovery?.pending === true) return "Confirming previous command";
+  if (process.wait_reason === "process_transport_wait") return "Reconnecting";
+  return "Waiting for process data";
 }
 
 function renderProcessWaitStatus() {
   const current = currentExperiment();
   const processWaiting = controllerWaitingForProcess();
   const growthWaiting = controllerWaitingForGrowth();
+  const write = state.controllerStatus?.integrations?.process?.write_recovery || {};
+  const command = write.command || {};
+  const key = `${current?.run_id || ""}:${command.command_id || ""}`;
+  if (state.processRecoveryActionKey !== key) {
+    state.processRecoveryActionKey = key;
+    state.processRecoveryActionError = "";
+  }
+  const canConfirm = processWaiting && write.pending === true && write.manual_confirmation_required === true
+    && command.run_id === current?.run_id && typeof command.command_id === "string"
+    && controllerMatchesRecoveryIdentity(current) && current?.status !== "stopping";
+  confirmProcessRecoveryButton.hidden = !canConfirm;
+  confirmProcessRecoveryButton.disabled = !canConfirm || state.processRecoveryActionInFlight || state.experimentActionInFlight;
+  confirmProcessRecoveryButton.textContent = state.processRecoveryActionInFlight
+    ? "Sending confirmation…" : "Confirm device state and resume";
   if ((processWaiting || growthWaiting) && controllerRunningForRun(current?.run_id)
       && current.status !== "stopping" && !state.recoveryEndPending) {
     state.processWaitRunId = current.run_id;
     state.growthWaitRunId = growthWaiting ? current.run_id : null;
-    commandStatus.textContent = processWaiting && growthWaiting ? "waiting for input data"
-      : growthWaiting ? "waiting for G data" : "waiting for process data";
+    commandStatus.textContent = processWaiting ? processWaitLabel()
+      : "Waiting for G data";
     commandStatus.className = "status idle";
     setExperimentMessage(processWaitMessage());
   } else if (state.processWaitRunId && state.systemStatusFresh) {
@@ -384,6 +418,33 @@ function renderProcessWaitStatus() {
         ? `Controller is running for ${displayNameForExperiment(current)}. GSensor is Off.`
         : `Controller resumed for ${displayNameForExperiment(current)} after receiving fresh valid measurement data.`);
     }
+  }
+}
+
+async function confirmProcessRecovery() {
+  if (confirmProcessRecoveryButton.disabled || confirmProcessRecoveryButton.hidden) return;
+  const runId = state.currentRunId;
+  const command = state.controllerStatus?.integrations?.process?.write_recovery?.command;
+  if (!command || command.run_id !== runId) return;
+  if (!window.confirm(
+    "Confirm only after checking the actual device state and ensuring that the earlier command cannot still execute. This will retain the current experiment and request recovery; no new setpoint is sent by this button.",
+  )) return;
+  state.processRecoveryActionInFlight = true;
+  state.processRecoveryActionError = "";
+  renderProcessWaitStatus();
+  try {
+    await fetchJson("/api/process/recovery/confirm", {
+      method: "POST", body: JSON.stringify({run_id: runId, command_id: command.command_id, confirmation: true}),
+    });
+    if (state.currentRunId === runId) {
+      setExperimentMessage("Confirmation sent. Waiting for Writer acknowledgement and a fresh measurement baseline before control resumes.");
+    }
+  } catch (error) {
+    if (state.currentRunId === runId) state.processRecoveryActionError = error.message;
+  } finally {
+    state.processRecoveryActionInFlight = false;
+    await loadSystemStatus().catch(() => {});
+    renderProcessWaitStatus();
   }
 }
 
@@ -531,7 +592,7 @@ function renderAdaptiveSelection(mode, disabled) {
     box.disabled = disabled;
   });
   adaptiveAllCheckbox.checked = mode === "all";
-  adaptiveAllCheckbox.indeterminate = selected.length > 0 && mode !== "all";
+  adaptiveAllCheckbox.indeterminate = false;
   adaptiveAllCheckbox.disabled = disabled;
   if (selected.length > 0 && mode !== "all") state.lastPartialAdaptationMode = mode;
   adaptationModeSelect.value = mode;
@@ -1262,6 +1323,10 @@ function onlineParametersReady() {
 }
 
 function parameterPolicy(section, key) {
+  if (section === "gsensor" && key === "alignment_method") {
+    return { runtime_editable: false, effect: "startup_only",
+      reason: "Alignment method is locked after experiment start. Create a new experiment to change it." };
+  }
   return state.controllerStatus?.run_parameters?.policies?.[section]?.[key]
     || state.params?.policies?.[section]?.[key] || {};
 }
@@ -1893,9 +1958,8 @@ function renderSystemStatus(payload) {
   const growthWaiting = controllerWaitingForGrowth(controller);
   const inputWaiting = processWaiting || growthWaiting;
   controllerLiveStatus.textContent = recoveryFailed ? "error"
-    : processWaiting && growthWaiting ? "waiting for input data"
-      : growthWaiting ? "waiting for G data"
-        : processWaiting ? "waiting for process data" : controller.status || "unavailable";
+    : processWaiting ? processWaitLabel(controller)
+      : growthWaiting ? "Waiting for G data" : controller.status || "unavailable";
   controllerLiveStatus.className = controller.available
     ? (recoveryFailed || controller.status === "error" ? "status error"
       : controller.status === "running" && !inputWaiting ? "status running" : "status idle")
@@ -2728,6 +2792,8 @@ retrySelectionButton.addEventListener("click", async () => {
 endExperimentButton.addEventListener("click", async () => {
   await finishCurrentExperiment();
 });
+
+confirmProcessRecoveryButton.addEventListener("click", confirmProcessRecovery);
 
 addSeedButton.addEventListener("click", async () => {
   await addSeed();

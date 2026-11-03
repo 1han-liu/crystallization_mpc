@@ -29,23 +29,30 @@ YOLO is not repeated for u and v. LoFTR and SIFT derive their matching masks fro
 
 ## Selection and capabilities
 
-Central's parameter page sets the starting `alignment_method` with a select control.
-Start-time parameters remain locked while an experiment is active; GSensor's
-**Run Parameters** section displays the effective run parameters read-only. The
-GSensor **Image Alignment** selector inside **Latest Processed Frame** can override
-the method during the current run, including switching back to None. During
-marking it is a draft confirmed with the 3D candidate; during measurement it applies
-to subsequent frames without re-marking.
+Choose `alignment_method` on Central's parameter page, click **Save Parameters**,
+then **Start Experiment**. The saved startup method is locked for the whole run,
+including the interval before GSensor is enabled and before image marking is
+confirmed. Central's parameter field is read-only during that run and remains
+the only alignment-method setting. The GSensor page has no separate Image
+Alignment configuration panel. Other parameters retain their existing policies.
 
-A live switch waits for the current frame to finish and preserves the marked image
-and manual geometry. It starts fresh alignment and distance/filter histories; the
-first frame with valid distances establishes a new baseline and produces no G
-value (warm-up). Global frame numbers and cumulative frame counts continue. The
-previous preview keeps its original method and frame identity until a new result
-arrives. Preparation or commit failure leaves the previous method active.
+Image selection, marking and candidate confirmation still take place after Start,
+using the locked method. The confirmation endpoint rejects a different method;
+omitting it uses the locked method. Runtime parameter updates cannot change
+`alignment_method`, including in a batch with otherwise editable parameters.
+The legacy `/api/alignment/select` endpoint rejects method changes and treats a
+matching-method request as a read-only no-op after validating its identities.
 
-The processing snapshot records the method revision, effective frame boundary and
-change history, and retains the previous committed state in `gsensor_history/`.
+Disabling/re-enabling GSensor, re-marking, resetting image sequence numbers and
+recovering service state do not unlock the method. Other image parameter changes
+may still start a fresh measurement segment but retain the same alignment method.
+To choose another method, end the old experiment and configure a new experiment
+before Start. A new method is never substituted automatically if unavailable.
+
+The processing snapshot records the locked method, method revision, effective
+frame boundary and any historical changes. Existing runs from older versions keep
+their already committed method, rather than reverting to the original startup
+default; old change history and `gsensor_history/` records are retained.
 Recovery restores the committed method and warm-up state; after a process restart,
 GSensor remains disabled until enabled again. GSensor exposes:
 

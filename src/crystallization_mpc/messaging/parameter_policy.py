@@ -98,6 +98,8 @@ def parameter_policies() -> dict[str, dict[str, dict[str, Any]]]:
                 effect, reason = "measurement_segment", "Starts a new measurement segment; external image timing must match dt_G."
             if section == "controller" and key in STARTUP_KEYS:
                 effect, reason = "startup_only", "Used only for experiment initialization."
+            elif section == "gsensor" and key == "alignment_method":
+                effect, reason = "startup_only", "Alignment method is locked after experiment start. Create a new experiment to change it."
             elif (section == "controller" and key in UNUSED_CONTROLLER_KEYS) or key in {"ptr_format", "params_G.ratio"}:
                 effect, reason = "unused", "Recorded for this experiment; not used by the current calculation."
             elif section == "controller" and key in RESERVED_FILTER_KEYS:
@@ -162,11 +164,14 @@ def _number(key: str, value: Any, *, positive: bool) -> float:
     return value
 
 
-def validate_parameter_changes(changes: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+def validate_parameter_changes(changes: Mapping[str, Any], current: Mapping[str, Any] | None = None,
+                               *, allow_historical_alignment: bool = False) -> dict[str, dict[str, Any]]:
     """Normalize a closed raw-key patch without mutating values or defaults.
 
     Supply ``current`` for complete candidate dependency checks.  Without it,
     cross-field checks use defaults only when both relevant fields are patched.
+    ``allow_historical_alignment`` is only for reading already persisted ledgers;
+    it must never be enabled when accepting a new operator command.
     """
     if not isinstance(changes, Mapping):
         raise ValueError("Parameter changes must be a section mapping.")
@@ -179,7 +184,9 @@ def validate_parameter_changes(changes: Mapping[str, Any], current: Mapping[str,
         for key, value in patch.items():
             if key not in policies[section]:
                 raise ValueError(f"Unknown or derived parameter: {section}.{key}.")
-            if not policies[section][key]["runtime_editable"]:
+            if not policies[section][key]["runtime_editable"] and not (
+                allow_historical_alignment and section == "gsensor" and key == "alignment_method"
+            ):
                 raise ValueError(f"{section}.{key} is startup-only.")
             result[section][key] = _value(key, value)
         if not result[section]:
@@ -202,8 +209,8 @@ def validate_parameter_changes(changes: Mapping[str, Any], current: Mapping[str,
     return result
 
 
-def measurement_parameter_changes(changes: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    normalized = validate_parameter_changes(changes)
+def measurement_parameter_changes(changes: Mapping[str, Any], *, allow_historical_alignment: bool = False) -> dict[str, dict[str, Any]]:
+    normalized = validate_parameter_changes(changes, allow_historical_alignment=allow_historical_alignment)
     result = {}
     for section, patch in normalized.items():
         selected = {key: value for key, value in patch.items()

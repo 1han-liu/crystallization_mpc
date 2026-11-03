@@ -13,6 +13,9 @@ from crystallization_mpc.messaging.schema import build_envelope
 
 COMMAND_ROUTE = "controller.to.opcua_writer"
 RESULT_ROUTE = "opcua_writer.to.process"
+STATUS_COMMAND = "process.setpoint.status"
+CONFIRM_COMMAND = "process.setpoint.confirm"
+STATUS_RESULT = "process.setpoint.status.result"
 
 
 def timestamp(value: Any, field: str) -> datetime:
@@ -105,13 +108,48 @@ class WriteCommand:
         }
 
 
-def result_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+@dataclass(frozen=True)
+class RecoveryQuery:
+    """Identify one original command without authorizing another device write."""
+
+    command: WriteCommand
+    query_id: str
+    confirm: bool = False
+    recovery_generation: int | None = None
+
+    @classmethod
+    def from_envelope(cls, message: Mapping[str, Any]) -> "RecoveryQuery":
+        name = message.get("name")
+        if name not in {STATUS_COMMAND, CONFIRM_COMMAND}:
+            raise ValueError("Invalid process recovery command.")
+        payload = message.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("Recovery payload must be an object.")
+        query_id = _identifier(payload.get("query_id"), "query_id")
+        if message.get("correlation_id") != query_id:
+            raise ValueError("Recovery correlation_id must equal query_id.")
+        generation = payload.get("recovery_generation")
+        if generation is not None and (type(generation) is not int or generation < 0):
+            raise ValueError("recovery_generation must be a non-negative integer.")
+        if name == CONFIRM_COMMAND and payload.get("operator_confirmed") is not True:
+            raise ValueError("Manual recovery requires operator_confirmed=true.")
+        original = dict(message, name="process.setpoint.write", correlation_id=payload.get("command_id"))
+        return cls(WriteCommand.from_envelope(original), query_id, name == CONFIRM_COMMAND, generation)
+
+    def result(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        payload = dict(result, query_id=self.query_id)
+        if self.recovery_generation is not None:
+            payload["recovery_generation"] = self.recovery_generation
+        return payload
+
+
+def result_envelope(payload: dict[str, Any], *, recovery: bool = False) -> dict[str, Any]:
     return build_envelope(
         src="opcua_writer",
         dst="process",
         msg_type="event",
-        name="process.setpoint.result",
+        name=STATUS_RESULT if recovery else "process.setpoint.result",
         seq=payload.get("tick_seq", 0),
         payload=payload,
-        correlation_id=payload.get("command_id"),
+        correlation_id=payload.get("query_id") if recovery else payload.get("command_id"),
     )

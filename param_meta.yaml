@@ -118,7 +118,7 @@ params:
   alignment_method:
     section: "Image alignment"
     label: "Alignment method"
-    description: "Aligns segmented frames before detecting growth lines."
+    description: "Aligns segmented frames before detecting growth lines. Select before Start Experiment; locked for the entire experiment."
     unit: "-"
     reference:
       origin: "python"

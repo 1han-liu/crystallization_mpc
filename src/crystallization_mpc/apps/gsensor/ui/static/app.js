@@ -11,14 +11,6 @@ const parameterRunId = document.querySelector("#parameter-run-id");
 const parameterRunVersion = document.querySelector("#parameter-run-version");
 const runParametersStatus = document.querySelector("#run-parameters-status");
 const runParametersValues = document.querySelector("#run-parameters-values");
-const alignmentMethodSelect = document.querySelector("#alignment-method-select");
-const alignmentConfigurationStatus = document.querySelector("#alignment-configuration-status");
-const alignmentSelectionHelp = document.querySelector("#alignment-selection-help");
-const alignmentCapabilityNotes = document.querySelector("#alignment-capability-notes");
-const alignmentAppliedMethod = document.querySelector("#alignment-applied-method");
-const alignmentPreviewMethod = document.querySelector("#alignment-preview-method");
-const alignmentEffectiveAfter = document.querySelector("#alignment-effective-after");
-const alignmentActionFeedback = document.querySelector("#alignment-action-feedback");
 let parameterDialogOpener = null;
 
 const currentRunId = document.querySelector("#current-run-id");
@@ -108,9 +100,6 @@ const state = {
   experimentParameters: null,
   parameterRenderKey: null,
   alignmentConfiguration: null,
-  alignmentDraft: null,
-  alignmentDraftScope: null,
-  alignmentDraftEdited: false,
   alignmentSelectionAction: null,
   alignmentSelectionFeedback: null,
   alignmentCapabilitiesReady: false,
@@ -259,9 +248,6 @@ function adoptExperiment(payload) {
   state.sequenceResetFeedback = null;
   state.experimentParameters = null;
   state.alignmentConfiguration = null;
-  state.alignmentDraft = null;
-  state.alignmentDraftScope = null;
-  state.alignmentDraftEdited = false;
   state.alignmentSelectionAction = null;
   state.alignmentSelectionFeedback = null;
   state.initialized = false;
@@ -398,9 +384,6 @@ function renderOnlineMeasurement(payload) {
   const alignment = result?.alignment || null;
   const previewMethod = alignment?.method ? alignmentLabel(alignment.method) : "—";
   alignmentMethod.textContent = previewMethod;
-  alignmentPreviewMethod.textContent = alignment
-    ? `${previewMethod} · frame ${result.frame_seq}`
-    : "—";
   alignmentStatus.textContent = alignment
     ? (alignment.success ? (alignment.fallback_used ? "fallback" : "success") : "failed")
     : "—";
@@ -905,276 +888,11 @@ function alignmentLabel(method) {
   return state.alignmentCapabilities[method]?.label || String(method || "Unknown").replaceAll("_", " ").toUpperCase();
 }
 
-function syncAlignmentDraft() {
-  const scope = `${state.runId || ""}:${state.initialization?.session_id || ""}`;
-  const configuration = state.alignmentConfiguration;
-  if (state.alignmentDraftScope !== scope) {
-    state.alignmentDraftScope = scope;
-    state.alignmentDraftEdited = false;
-  }
-  if (!state.alignmentDraftEdited) state.alignmentDraft = configuration?.method ?? configuration?.configured_method ?? "none";
-  if (configuration?.confirmed) state.alignmentDraft = configuration.method;
-}
-
-function alignmentSelectable() {
-  return initializationEditable() && Boolean(state.initialization?.session_id)
-    && state.alignmentConfiguration?.can_select === true
-    && !state.alignmentConfiguration?.confirmed
-    && state.alignmentCapabilitiesReady;
-}
-
-function runtimeAlignmentSelectable() {
-  return state.statusAvailable
-    && state.experimentLifecycleStatus === "measuring"
-    && state.initialized
-    && Boolean(state.runId)
-    && Boolean(state.initialization?.session_id)
-    && state.alignmentConfiguration?.can_switch === true
-    && state.alignmentConfiguration?.in_progress !== true
-    && state.reinitialization?.in_progress !== true
-    && state.alignmentCapabilitiesReady
-    && !state.alignmentSelectionAction
-    && !state.initializationAction
-    && !state.reinitializationAction
-    && !state.sequenceResetAction
-    && !state.dscgrInFlight;
-}
-
 function alignmentSelectionReady() {
   // During a rolling upgrade the previous service can still confirm initialization.
   if (!state.alignmentConfiguration) return true;
-  return alignmentSelectable() && state.alignmentCapabilities[state.alignmentDraft]?.available === true;
-}
-
-function renderAlignmentConfiguration() {
-  syncAlignmentDraft();
-  const configuration = state.alignmentConfiguration;
-  const action = state.alignmentSelectionAction;
-  const runtimeMode = state.experimentLifecycleStatus === "measuring" && state.initialized;
-  const method = action?.method || (runtimeMode
-    ? (configuration?.method || configuration?.configured_method || "none")
-    : (state.alignmentDraft || "none"));
-  const methods = new Set([
-    "none",
-    ...Object.keys(state.alignmentCapabilities),
-    method,
-    configuration?.method,
-    state.alignmentDraft,
-  ].filter(Boolean));
-  const optionsKey = JSON.stringify([...methods].map((value) => [value, state.alignmentCapabilities[value]]));
-  if (alignmentMethodSelect.dataset.optionsKey !== optionsKey) {
-    alignmentMethodSelect.replaceChildren();
-    methods.forEach((value) => {
-      const option = document.createElement("option");
-      const capability = state.alignmentCapabilities[value];
-      option.value = value;
-      option.textContent = value === "none" ? "None — no image alignment" : alignmentLabel(value);
-      option.disabled = capability?.available !== true;
-      if (capability?.available === false) option.textContent += " (unavailable)";
-      option.title = capability?.reason || "";
-      alignmentMethodSelect.appendChild(option);
-    });
-    alignmentMethodSelect.dataset.optionsKey = optionsKey;
-  }
-  alignmentMethodSelect.value = method;
-  alignmentMethodSelect.disabled = !(alignmentSelectable() || runtimeAlignmentSelectable());
-  const confirmed = Boolean(configuration?.confirmed);
-  const serverPending = configuration?.in_progress === true;
-  if (action || serverPending) {
-    alignmentConfigurationStatus.textContent = `applying · ${alignmentLabel(action?.method || configuration?.method)}`;
-    alignmentConfigurationStatus.className = "status running";
-  } else if (runtimeMode && configuration) {
-    alignmentConfigurationStatus.textContent = `applied · ${alignmentLabel(configuration.method)}`;
-    alignmentConfigurationStatus.className = "status running";
-  } else if (confirmed) {
-    alignmentConfigurationStatus.textContent = `confirmed · ${alignmentLabel(configuration.method)}`;
-    alignmentConfigurationStatus.className = "status running";
-  } else {
-    alignmentConfigurationStatus.textContent = state.initialization?.session_id
-      ? `draft · ${alignmentLabel(method)}` : "waiting for initialization";
-    alignmentConfigurationStatus.className = "status idle";
-  }
-
-  alignmentAppliedMethod.textContent = configuration?.method
-    ? alignmentLabel(configuration.method) : "—";
-  alignmentEffectiveAfter.textContent = Number.isInteger(configuration?.effective_after_frame_seq)
-    ? String(configuration.effective_after_frame_seq) : "—";
-
-  let localFeedback = state.alignmentSelectionFeedback;
-  if (localFeedback && (
-    localFeedback.runId !== state.runId
-    || localFeedback.sessionId !== currentInitializationSessionId()
-  )) {
-    state.alignmentSelectionFeedback = null;
-    localFeedback = null;
-  }
-  const latestResult = state.latestMeasurementResult;
-  const feedbackRevisionMatches = latestResult?.alignment_revision == null
-    ? (Number(latestResult?.frame_seq) > Number(localFeedback?.effectiveAfterFrameSeq ?? -1))
-    : latestResult.alignment_revision === localFeedback?.revision;
-  if (localFeedback?.kind === "success"
-      && latestResult?.alignment?.method === localFeedback.method
-      && feedbackRevisionMatches) {
-    state.alignmentSelectionFeedback = null;
-    localFeedback = null;
-  }
-  const serverError = configuration?.last_error;
-  const feedback = localFeedback || (serverError ? {
-    kind: "error", message: `Alignment method was not changed. ${serverError}`,
-  } : null);
-  alignmentActionFeedback.hidden = !feedback;
-  alignmentActionFeedback.textContent = feedback?.message || "";
-  alignmentActionFeedback.classList.toggle("error", feedback?.kind === "error");
-  alignmentActionFeedback.classList.toggle("pending", feedback?.kind === "pending");
-
-  let help;
-  if (!state.statusAvailable) {
-    help = "Status is unavailable. Alignment selection is disabled until the connection recovers.";
-  } else if (action || serverPending) {
-    help = `Applying ${alignmentLabel(action?.method || configuration?.method)} to future images. The current preview remains unchanged until a new frame is processed.`;
-  } else if (runtimeMode && runtimeAlignmentSelectable()) {
-    help = "Changing the method affects future images only. The latest preview keeps the method used for that frame. The first incoming image after a switch rebuilds the distance baseline and may not produce G; new G values begin with the following image.";
-  } else if (runtimeMode) {
-    help = "Runtime method selection is temporarily unavailable. Wait for the current GSensor operation to finish.";
-  } else if (confirmed) {
-    help = `${alignmentLabel(configuration.method)} was confirmed as the starting method for this marking session. Runtime selection becomes available while measuring.`;
-  } else if (state.initializationAction) {
-    help = "Waiting for the initialization operation to finish. Your alignment draft is retained.";
-  } else if (state.confirmedSessionId === state.initialization?.session_id && state.confirmedSessionId) {
-    help = "Candidate confirmation was accepted. Waiting for the confirmed alignment status; do not submit again.";
-  } else if (!state.initialization?.session_id) {
-    help = "Start an experiment in Central. Choose an alignment method during image marking.";
-  } else if (!configuration) {
-    help = "This service has not provided alignment configuration. Image marking remains available.";
-    alignmentConfigurationStatus.textContent = "configuration unavailable";
-  } else if (!configuration.can_select || state.initialized) {
-    help = "Alignment selection is unavailable in the current experiment state.";
-    alignmentConfigurationStatus.textContent = "selection locked";
-  } else if (!state.alignmentCapabilitiesReady) {
-    help = "Alignment capabilities are unavailable. Use Refresh Images to retry before confirming.";
-  } else if (state.alignmentCapabilities[method]?.available !== true) {
-    help = "This method is unavailable. Choose an available method before confirming the candidate.";
-  } else {
-    help = `Draft: ${alignmentLabel(method)}. “Confirm selected candidate” confirms this starting method for the marking session. You can change it later while measuring. None skips image alignment.`;
-  }
-  alignmentSelectionHelp.textContent = help;
-  const unavailable = Object.values(state.alignmentCapabilities)
-    .filter((item) => item.available === false)
-    .map((item) => `${alignmentLabel(item.method)}: ${item.reason || "unavailable on this service"}`);
-  alignmentCapabilityNotes.textContent = state.alignmentCapabilitiesError || unavailable.join(" · ");
-  alignmentCapabilityNotes.hidden = !alignmentCapabilityNotes.textContent;
-}
-
-async function selectRuntimeAlignment(method) {
-  if (!runtimeAlignmentSelectable()
-      || state.alignmentCapabilities[method]?.available !== true
-      || method === state.alignmentConfiguration?.method) {
-    renderAlignmentConfiguration();
-    return;
-  }
-  const controlRevision = state.gsensorActivation?.control_revision;
-  const alignmentRevision = state.alignmentConfiguration?.revision;
-  if (!Number.isInteger(controlRevision) || controlRevision < 0
-      || !Number.isInteger(alignmentRevision) || alignmentRevision < 0) {
-    state.alignmentSelectionFeedback = {
-      kind: "error",
-      runId: state.runId,
-      sessionId: currentInitializationSessionId(),
-      message: "Alignment control status is incomplete. Refresh status before selecting a method.",
-    };
-    renderAlignmentConfiguration();
-    return;
-  }
-
-  const action = {
-    context: state.contextRevision,
-    runId: state.runId,
-    sessionId: currentInitializationSessionId(),
-    controlRevision,
-    alignmentRevision,
-    method,
-    statusRequest: ++state.statusRequest,
-  };
-  state.alignmentSelectionAction = action;
-  state.alignmentSelectionFeedback = {
-    kind: "pending",
-    runId: action.runId,
-    sessionId: action.sessionId,
-    message: `Applying ${alignmentLabel(method)} to future images…`,
-  };
-  renderAlignmentConfiguration();
-  renderInitialization(state.initialization);
-  renderImageScan(state.imageScan);
-  renderExperimentSource(state.experimentSource);
-
-  const current = () => state.alignmentSelectionAction === action
-    && state.contextRevision === action.context
-    && state.runId === action.runId
-    && currentInitializationSessionId() === action.sessionId
-    && state.gsensorActivation?.control_revision === action.controlRevision
-    && state.alignmentConfiguration?.revision === action.alignmentRevision
-    && state.statusRequest === action.statusRequest;
-
-  try {
-    const payload = await fetchJson("/api/alignment/select", {
-      method: "POST",
-      body: JSON.stringify({
-        run_id: action.runId,
-        session_id: action.sessionId,
-        control_revision: action.controlRevision,
-        alignment_revision: action.alignmentRevision,
-        alignment_method: action.method,
-      }),
-    });
-    if (!current()) return;
-
-    const responseRunId = payload.current_run_id || payload.experiment?.run_id || null;
-    const responseConfiguration = payload.alignment_configuration;
-    if (responseRunId !== action.runId
-        || payload.initialization?.session_id !== action.sessionId
-        || payload.gsensor_activation?.control_revision !== action.controlRevision
-        || responseConfiguration?.revision !== action.alignmentRevision + 1
-        || responseConfiguration?.method !== action.method
-        || responseConfiguration?.in_progress === true) {
-      throw new Error("The alignment response does not match the current experiment. Refresh status before trying again.");
-    }
-
-    state.alignmentSelectionAction = null;
-    renderStatus(payload, { includeInitialization: true });
-    state.alignmentSelectionFeedback = {
-      kind: "success",
-      runId: action.runId,
-      sessionId: action.sessionId,
-      method: action.method,
-      revision: responseConfiguration.revision,
-      effectiveAfterFrameSeq: responseConfiguration.effective_after_frame_seq,
-      message: `${alignmentLabel(action.method)} is applied to future images. The next incoming image rebuilds the distance baseline and may not produce G; new G values begin with the following image.`,
-    };
-    renderAlignmentConfiguration();
-  } catch (error) {
-    if (current()) {
-      state.alignmentSelectionFeedback = {
-        kind: "error",
-        runId: action.runId,
-        sessionId: action.sessionId,
-        message: error.outcomeUnknown
-          ? `The alignment change outcome is unknown. Wait for status to reconnect before trying again. ${error.message}`
-          : `Alignment method was not changed. ${error.message}`,
-      };
-      if (error.outcomeUnknown) setStatusAvailable(false, error.message);
-    }
-  } finally {
-    if (state.alignmentSelectionAction === action) {
-      state.alignmentSelectionAction = null;
-      if (state.alignmentSelectionFeedback?.kind === "pending") {
-        state.alignmentSelectionFeedback = null;
-      }
-      renderAlignmentConfiguration();
-      renderInitialization(state.initialization);
-      renderImageScan(state.imageScan);
-      renderExperimentSource(state.experimentSource);
-    }
-  }
+  const method = state.alignmentConfiguration.method || state.alignmentConfiguration.configured_method;
+  return state.alignmentCapabilitiesReady && state.alignmentCapabilities[method]?.available === true;
 }
 
 function renderRunParameters() {
@@ -1185,7 +903,7 @@ function renderRunParameters() {
   const configuration = snapshot?.alignment_configuration;
   const alignmentMessage = configuration?.confirmed
     ? `Confirmed alignment: ${alignmentLabel(configuration.method)}.`
-    : "Alignment has not been confirmed. The selection in Image Alignment is a local draft until candidate confirmation.";
+    : "Alignment method is selected in Central before Start Experiment and is read-only here.";
   runParametersStatus.textContent = !snapshot
     ? (state.runId ? "No run parameter snapshot is available. Parameters become available after Start in Central."
       : "No experiment has started. Parameters become available after Start in Central.")
@@ -1249,7 +967,6 @@ function renderInitialization(payload) {
   }
   ensure3DSnapshotScope(payload);
   state.initialization = payload;
-  renderAlignmentConfiguration();
   const hasSession = Boolean(payload?.session_id);
   const step = payload?.current_step || null;
   const selected3DChoice = payload?.selected_3d_choice;
@@ -2055,25 +1772,6 @@ runParametersDialog.addEventListener("click", (event) => {
       || event.clientY < bounds.top || event.clientY > bounds.bottom) runParametersDialog.close();
 });
 
-alignmentMethodSelect.addEventListener("change", async () => {
-  const method = alignmentMethodSelect.value;
-  if (state.alignmentCapabilities[method]?.available !== true) {
-    renderAlignmentConfiguration();
-    return;
-  }
-  if (alignmentSelectable()) {
-    state.alignmentDraft = method;
-    state.alignmentDraftEdited = true;
-    renderInitialization(state.initialization);
-    return;
-  }
-  if (runtimeAlignmentSelectable()) {
-    await selectRuntimeAlignment(method);
-    return;
-  }
-  renderAlignmentConfiguration();
-});
-
 refreshImagesButton.addEventListener("click", async () => {
   if (state.sourceActionInFlight || state.reinitializationAction || state.alignmentSelectionAction) return;
   state.sourceActionInFlight = true;
@@ -2139,7 +1837,7 @@ confirm3DChoiceButton.addEventListener("click", async () => {
     return;
   }
   captureCurrent3DSnapshot();
-  const fields = state.alignmentConfiguration ? { alignment_method: state.alignmentDraft } : {};
+  const fields = state.alignmentConfiguration ? { alignment_method: state.alignmentConfiguration.method } : {};
   const successMessage = state.alignmentConfiguration
     ? "Candidate and alignment confirmed; baseline established." : "Candidate confirmed; baseline established.";
   await performInitializationAction("confirm", fields, "Confirming selected candidate…", successMessage, { refresh: true });

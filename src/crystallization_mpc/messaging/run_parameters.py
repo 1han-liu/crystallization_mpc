@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -23,8 +23,9 @@ class RunParametersUpdatePayload:
     changes: Mapping[str, Any]
     requested_at: str
     experiment_started_at: str
+    allow_historical_alignment: InitVar[bool] = False
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, allow_historical_alignment: bool) -> None:
         for key in ("run_id", "event_id", "requested_at", "experiment_started_at"):
             value = getattr(self, key)
             if not isinstance(value, str) or not value.strip():
@@ -35,7 +36,8 @@ class RunParametersUpdatePayload:
                 raise ValueError(f"{key} must contain a timezone.")
         if type(self.expected_revision) is not int or self.expected_revision < 0:
             raise ValueError("expected_revision must be a nonnegative integer.")
-        object.__setattr__(self, "changes", validate_parameter_changes(self.changes))
+        object.__setattr__(self, "changes", validate_parameter_changes(
+            self.changes, allow_historical_alignment=allow_historical_alignment))
 
     def to_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "event_id": self.event_id,
@@ -45,17 +47,17 @@ class RunParametersUpdatePayload:
                 "experiment_started_at": self.experiment_started_at}
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "RunParametersUpdatePayload":
+    def from_mapping(cls, payload: Mapping[str, Any], *, allow_historical_alignment: bool = False) -> "RunParametersUpdatePayload":
         fields = {"run_id", "event_id", "expected_revision", "changes", "requested_at",
                   "experiment_started_at"}
         if not isinstance(payload, Mapping) or set(payload) != fields:
             raise ValueError("Run parameter command fields are missing or unsupported.")
-        return cls(**dict(payload))
+        return cls(**dict(payload), allow_historical_alignment=allow_historical_alignment)
 
 
-def parse_runtime_command(payload: Mapping[str, Any]):
+def parse_runtime_command(payload: Mapping[str, Any], *, allow_historical_alignment: bool = False):
     """Keep existing five-setting commands wire-compatible."""
     if "experiment_started_at" in payload:
-        return RunParametersUpdatePayload.from_mapping(payload)
+        return RunParametersUpdatePayload.from_mapping(payload, allow_historical_alignment=allow_historical_alignment)
     from .controller_runtime import ControllerRuntimeUpdatePayload
     return ControllerRuntimeUpdatePayload.from_mapping(payload)

@@ -60,7 +60,6 @@ select {
 
 .hero > div,
 .panel-head > div,
-.alignment-control-head > div,
 .online-measurement-layout > * {
   min-width: 0;
 }
@@ -70,111 +69,6 @@ select:focus-visible,
 summary:focus-visible {
   outline: 3px solid #336ea8;
   outline-offset: 3px;
-}
-
-.alignment-panel {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 18px;
-  padding: 14px;
-  border: 1px solid #9bbbd8;
-  border-left: 4px solid #336ea8;
-  border-radius: 4px;
-  background: #f7fbff;
-}
-
-.alignment-control-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-}
-
-.alignment-control-head h3 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.alignment-state-facts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.alignment-state-facts > div {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.alignment-state-facts span {
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
-.alignment-state-facts strong {
-  min-height: 40px;
-  padding: 10px;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: #ffffff;
-}
-
-.alignment-selection {
-  display: grid;
-  grid-template-columns: minmax(200px, 300px) minmax(0, 1fr);
-  gap: 20px;
-  align-items: center;
-}
-
-.alignment-field {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
-.alignment-field label {
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.alignment-field select {
-  width: 100%;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: #ffffff;
-  color: var(--ink);
-}
-
-.alignment-field select:disabled {
-  background: #f4f4f4;
-  color: #666666;
-  cursor: not-allowed;
-}
-
-.alignment-selection p {
-  margin: 0;
-  line-height: 1.5;
-}
-
-.alignment-panel .save-status {
-  margin: 0;
-}
-
-.alignment-panel .save-status.error {
-  color: #8a1c1c;
-}
-
-.alignment-panel .save-status.pending {
-  color: #705000;
-}
-
-.alignment-panel .save-status[hidden] {
-  display: none;
 }
 
 body.modal-open {
@@ -1044,15 +938,12 @@ button:disabled {
 }
 
 @media (max-width: 700px) {
-  .alignment-selection,
-  .alignment-state-facts,
   .run-parameter-facts,
   .reinitialization-facts {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .panel-head,
-  .alignment-control-head,
   .reinitialization-head {
     flex-wrap: wrap;
   }

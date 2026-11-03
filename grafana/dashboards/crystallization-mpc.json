@@ -2267,2094 +2267,1345 @@
       "description": "Two curves from the original MATLAB Figure 12: solid blue shows dynamic lag time t_lag on the left axis (s); dotted pink shows the percentage increase over the base lag, (t_lag_perc - 1) × 100, on the right axis (%). t_lag_perc is the multiplier computed in the current Controller cycle, not the configured increase ratio. Displays recorded results only; historical experiments without these fields are not zero-filled or backfilled. If no data appear, check the selected experiment and the upper-right time range."
     },
     {
-      "collapsed": true,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "crystallization-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": null,
+          "noValue": "",
+          "unit": "sci",
+          "mappings": [],
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "P / P₀",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            },
+            "axisSoftMax": 1.5,
+            "axisWidth": 72,
+            "axisGridShow": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#B8B8B8",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main P T / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Temperature · ${__field.labels.run_label}"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main P dT_dt / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Temperature Rate · ${__field.labels.run_label}"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main P c / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Concentration · ${__field.labels.run_label}"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main P dc_dt / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Concentration Rate · ${__field.labels.run_label}"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G P G / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Rate · ${__field.labels.run_label}"
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G P dG_dt / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Slope · ${__field.labels.run_label}"
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G P d2G_dt2 / initial(?: .*)?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Curvature · ${__field.labels.run_label}"
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ T(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Temperature P [K²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ T\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Temperature P0 [K²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ dT_dt(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Temperature Rate P [(K/s)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ dT_dt\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Temperature Rate P0 [(K/s)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ c(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Concentration P [(g/gH₂O)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ c\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Concentration P0 [(g/gH₂O)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ dc_dt(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Concentration Rate P [((g/gH₂O)/s)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^main\\ P\\ dc_dt\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Concentration Rate P0 [((g/gH₂O)/s)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G\\ P\\ G(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Rate P [(m/s)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G\\ P\\ G\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Rate P0 [(m/s)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G\\ P\\ dG_dt(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Slope P [(m/s²)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G\\ P\\ dG_dt\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Slope P0 [(m/s²)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G\\ P\\ d2G_dt2(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Curvature P [(m/s³)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^G\\ P\\ d2G_dt2\\ initial(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Growth Curvature P0 [(m/s³)²] · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "sci"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Cycle(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cycle · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Reset\\ Count(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Reset Count · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Control\\ Time\\ \\(min\\)(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Control Time (min) · ${__field.labels.run_label}"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.scaleDistribution",
+                "value": {
+                  "type": "linear"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 0
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "Unavailable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^Reset(?: \\{.*\\})?$"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Reset · ${__field.labels.run_label}"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF9830"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 10
+              },
+              {
+                "id": "custom.thresholdsStyle",
+                "value": {
+                  "mode": "off"
+                }
+              }
+            ]
+          }
+        ]
+      },
       "gridPos": {
-        "h": 1,
+        "h": 12,
         "w": 24,
         "x": 0,
         "y": 52
       },
-      "id": 15,
-      "panels": [
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "width": 250
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none",
+          "maxWidth": 650,
+          "maxHeight": 650
+        }
+      },
+      "pluginVersion": "10.4.3",
+      "targets": [
         {
+          "refId": "A",
           "datasource": {
             "type": "influxdb",
             "uid": "crystallization-influxdb"
           },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "none",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Refresh count(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Refreshes · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Segment(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Fit Segment · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Samples(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Samples · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Minimum samples(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Min Samples · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 0,
-            "y": 53
-          },
-          "id": 16,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_refresh_count\" or r._field == \"diag_segment_id\" or r._field == \"diag_sample_count\" or r._field == \"diag_minimum_samples\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"Refresh count\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_refresh_count then float(v: r.diag_refresh_count) else debug.null(type: \"float\"), \"Segment\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_segment_id then float(v: r.diag_segment_id) else debug.null(type: \"float\"), \"Samples\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_sample_count then float(v: r.diag_sample_count) else debug.null(type: \"float\"), \"Minimum samples\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_minimum_samples then float(v: r.diag_minimum_samples) else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Refresh & Samples",
-          "type": "timeseries",
-          "description": "Committed refreshes and fitting samples. Check reset states and sample counts together; a count alone does not prove a correct reset. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
+          "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_main_P_T\" or r._field == \"diag_main_P_T_initial\" or r._field == \"diag_main_P_dT_dt\" or r._field == \"diag_main_P_dT_dt_initial\" or r._field == \"diag_main_P_c\" or r._field == \"diag_main_P_c_initial\" or r._field == \"diag_main_P_dc_dt\" or r._field == \"diag_main_P_dc_dt_initial\" or r._field == \"diag_G_P_G\" or r._field == \"diag_G_P_G_initial\" or r._field == \"diag_G_P_dG_dt\" or r._field == \"diag_G_P_dG_dt_initial\" or r._field == \"diag_G_P_d2G_dt2\" or r._field == \"diag_G_P_d2G_dt2_initial\" or r._field == \"diag_refresh_count\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with tick_seq: if exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\")}))\n  |> sort(columns: [\"_time\", \"tick_seq\", \"tick_key\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"main P T / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_T and exists r.diag_main_P_T_initial and r.diag_main_P_T > 0.0 and r.diag_main_P_T_initial > 0.0 then float(v: r.diag_main_P_T) / float(v: r.diag_main_P_T_initial) else debug.null(type: \"float\"), \"main P T\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_T then float(v: r.diag_main_P_T) else debug.null(type: \"float\"), \"main P T initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_T_initial then float(v: r.diag_main_P_T_initial) else debug.null(type: \"float\"), \"main P dT_dt / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dT_dt and exists r.diag_main_P_dT_dt_initial and r.diag_main_P_dT_dt > 0.0 and r.diag_main_P_dT_dt_initial > 0.0 then float(v: r.diag_main_P_dT_dt) / float(v: r.diag_main_P_dT_dt_initial) else debug.null(type: \"float\"), \"main P dT_dt\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dT_dt then float(v: r.diag_main_P_dT_dt) else debug.null(type: \"float\"), \"main P dT_dt initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dT_dt_initial then float(v: r.diag_main_P_dT_dt_initial) else debug.null(type: \"float\"), \"main P c / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_c and exists r.diag_main_P_c_initial and r.diag_main_P_c > 0.0 and r.diag_main_P_c_initial > 0.0 then float(v: r.diag_main_P_c) / float(v: r.diag_main_P_c_initial) else debug.null(type: \"float\"), \"main P c\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_c then float(v: r.diag_main_P_c) else debug.null(type: \"float\"), \"main P c initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_c_initial then float(v: r.diag_main_P_c_initial) else debug.null(type: \"float\"), \"main P dc_dt / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dc_dt and exists r.diag_main_P_dc_dt_initial and r.diag_main_P_dc_dt > 0.0 and r.diag_main_P_dc_dt_initial > 0.0 then float(v: r.diag_main_P_dc_dt) / float(v: r.diag_main_P_dc_dt_initial) else debug.null(type: \"float\"), \"main P dc_dt\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dc_dt then float(v: r.diag_main_P_dc_dt) else debug.null(type: \"float\"), \"main P dc_dt initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dc_dt_initial then float(v: r.diag_main_P_dc_dt_initial) else debug.null(type: \"float\"), \"G P G / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_G and exists r.diag_G_P_G_initial and r.diag_G_P_G > 0.0 and r.diag_G_P_G_initial > 0.0 then float(v: r.diag_G_P_G) / float(v: r.diag_G_P_G_initial) else debug.null(type: \"float\"), \"G P G\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_G then float(v: r.diag_G_P_G) else debug.null(type: \"float\"), \"G P G initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_G_initial then float(v: r.diag_G_P_G_initial) else debug.null(type: \"float\"), \"G P dG_dt / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_dG_dt and exists r.diag_G_P_dG_dt_initial and r.diag_G_P_dG_dt > 0.0 and r.diag_G_P_dG_dt_initial > 0.0 then float(v: r.diag_G_P_dG_dt) / float(v: r.diag_G_P_dG_dt_initial) else debug.null(type: \"float\"), \"G P dG_dt\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_dG_dt then float(v: r.diag_G_P_dG_dt) else debug.null(type: \"float\"), \"G P dG_dt initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_dG_dt_initial then float(v: r.diag_G_P_dG_dt_initial) else debug.null(type: \"float\"), \"G P d2G_dt2 / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_d2G_dt2 and exists r.diag_G_P_d2G_dt2_initial and r.diag_G_P_d2G_dt2 > 0.0 and r.diag_G_P_d2G_dt2_initial > 0.0 then float(v: r.diag_G_P_d2G_dt2) / float(v: r.diag_G_P_d2G_dt2_initial) else debug.null(type: \"float\"), \"G P d2G_dt2\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_d2G_dt2 then float(v: r.diag_G_P_d2G_dt2) else debug.null(type: \"float\"), \"G P d2G_dt2 initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_d2G_dt2_initial then float(v: r.diag_G_P_d2G_dt2_initial) else debug.null(type: \"float\"), \"Cycle\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\"), \"Reset Count\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_refresh_count then float(v: r.diag_refresh_count) else debug.null(type: \"float\"), \"Control Time (min)\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\")}))"
         },
         {
+          "refId": "B",
           "datasource": {
             "type": "influxdb",
             "uid": "crystallization-influxdb"
           },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "none",
-              "mappings": [
-                {
-                  "type": "value",
-                  "options": {
-                    "refresh_init": {
-                      "text": "Reset",
-                      "color": "orange"
-                    },
-                    "updated": {
-                      "text": "Updated",
-                      "color": "green"
-                    },
-                    "reanchored_updated": {
-                      "text": "Re-anchored",
-                      "color": "purple"
-                    },
-                    "paused": {
-                      "text": "Paused",
-                      "color": "gray"
-                    },
-                    "reserved": {
-                      "text": "Unused",
-                      "color": "gray"
-                    },
-                    "refresh_reserved": {
-                      "text": "Reset (unused)",
-                      "color": "orange"
-                    }
-                  }
-                }
-              ],
-              "displayName": "${__field.name} · ${__field.labels.run_label}"
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Process (T, c) · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Growth (G) · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^E_A(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "E_A · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^k_0(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "k₀ · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^n(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "n · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 12,
-            "y": 53
-          },
-          "id": 17,
-          "options": {
-            "mergeValues": true,
-            "rowHeight": 0.85,
-            "showValue": "auto",
-            "alignValue": "left",
-            "legend": {
-              "showLegend": true,
-              "displayMode": "list",
-              "placement": "bottom"
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_snapshot_stage\" or r._field == \"diag_main_lifecycle\" or r._field == \"diag_G_lifecycle\" or r._field == \"diag_E_A_lifecycle\" or r._field == \"diag_k_0_lifecycle\" or r._field == \"diag_n_lifecycle\")\n  |> map(fn: (r) => ({r with _value: string(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with tick_seq: if exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\")}))\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, main: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_lifecycle then r.diag_main_lifecycle else debug.null(type: \"string\"), G: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_G_lifecycle then r.diag_G_lifecycle else debug.null(type: \"string\"), E_A: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_E_A_lifecycle then r.diag_E_A_lifecycle else debug.null(type: \"string\"), k_0: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_k_0_lifecycle then r.diag_k_0_lifecycle else debug.null(type: \"string\"), n: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_n_lifecycle then r.diag_n_lifecycle else debug.null(type: \"string\")}))"
-            }
-          ],
-          "title": "Filter Status",
-          "type": "state-timeline",
-          "description": "Actual filter activity. Reset means full refresh initialization; Re-anchored means growth-input recovery, not a full reset. E_A, k₀ and n are unused reserve filters, not active parameter-learning curves. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "celsius",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^T measured(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Measured · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^T prior(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Predicted · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^T state(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Estimated · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 0,
-            "y": 63
-          },
-          "id": 18,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_main_T_measured\" or r._field == \"diag_main_T_prior\" or r._field == \"diag_main_T_state\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"T measured\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_T_measured then float(v: r.diag_main_T_measured) - 273.15 else debug.null(type: \"float\"), \"T prior\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_T_prior then float(v: r.diag_main_T_prior) - 273.15 else debug.null(type: \"float\"), \"T state\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_T_state then float(v: r.diag_main_T_state) - 273.15 else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Temperature Filter",
-          "type": "timeseries",
-          "description": "Measured temperature, pre-correction prediction and estimated state. On a reset cycle, Estimated is the initialization value, not a corrected value; Predicted is absent. Check the zero temperature rate in Reset Check. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "suffix:g/gH₂O",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^c measured(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Measured · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^c prior(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Predicted · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^c state(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Estimated · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 12,
-            "y": 63
-          },
-          "id": 19,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_main_c_measured\" or r._field == \"diag_main_c_prior\" or r._field == \"diag_main_c_state\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"c measured\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_c_measured then float(v: r.diag_main_c_measured) else debug.null(type: \"float\"), \"c prior\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_c_prior then float(v: r.diag_main_c_prior) else debug.null(type: \"float\"), \"c state\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_c_state then float(v: r.diag_main_c_state) else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Concentration Filter",
-          "type": "timeseries",
-          "description": "Measured concentration, pre-correction prediction and estimated state. On a reset cycle, Estimated is the initialization value, not a corrected value. Check the zero concentration rate in Reset Check. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "suffix:μm/s",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G input(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Input · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G prior(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Predicted · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G state(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Estimated · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 0,
-            "y": 73
-          },
-          "id": 20,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_G_input\" or r._field == \"diag_G_prior\" or r._field == \"diag_G_state\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"G input\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_input then float(v: r.diag_G_input) * 1000000.0 else debug.null(type: \"float\"), \"G prior\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_prior then float(v: r.diag_G_prior) * 1000000.0 else debug.null(type: \"float\"), \"G state\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_state then float(v: r.diag_G_state) * 1000000.0 else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Growth Rate Filter",
-          "type": "timeseries",
-          "description": "Valid growth-rate input, pre-correction prediction and estimated state. The reset initialization G = 0 is not plotted as a measurement or corrected estimate. Input may be simulated or camera-derived; re-anchoring is not a full reset. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 3,
-              "noValue": "—",
-              "unit": "sci",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "dimensionless",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "log",
-                  "log": 10
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main P T / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Temperature · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main P dT_dt / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Temperature Rate · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main P c / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Concentration · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main P dc_dt / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Concentration Rate · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G P G / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Growth Rate · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G P dG_dt / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Growth Slope · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G P d2G_dt2 / initial(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Growth Curvature · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 12,
-            "y": 73
-          },
-          "id": 21,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_main_P_T\" or r._field == \"diag_main_P_T_initial\" or r._field == \"diag_main_P_dT_dt\" or r._field == \"diag_main_P_dT_dt_initial\" or r._field == \"diag_main_P_c\" or r._field == \"diag_main_P_c_initial\" or r._field == \"diag_main_P_dc_dt\" or r._field == \"diag_main_P_dc_dt_initial\" or r._field == \"diag_G_P_G\" or r._field == \"diag_G_P_G_initial\" or r._field == \"diag_G_P_dG_dt\" or r._field == \"diag_G_P_dG_dt_initial\" or r._field == \"diag_G_P_d2G_dt2\" or r._field == \"diag_G_P_d2G_dt2_initial\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"main P T / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_T and exists r.diag_main_P_T_initial and r.diag_main_P_T > 0.0 and r.diag_main_P_T_initial > 0.0 then float(v: r.diag_main_P_T) / float(v: r.diag_main_P_T_initial) else debug.null(type: \"float\"), \"main P dT_dt / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dT_dt and exists r.diag_main_P_dT_dt_initial and r.diag_main_P_dT_dt > 0.0 and r.diag_main_P_dT_dt_initial > 0.0 then float(v: r.diag_main_P_dT_dt) / float(v: r.diag_main_P_dT_dt_initial) else debug.null(type: \"float\"), \"main P c / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_c and exists r.diag_main_P_c_initial and r.diag_main_P_c > 0.0 and r.diag_main_P_c_initial > 0.0 then float(v: r.diag_main_P_c) / float(v: r.diag_main_P_c_initial) else debug.null(type: \"float\"), \"main P dc_dt / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_P_dc_dt and exists r.diag_main_P_dc_dt_initial and r.diag_main_P_dc_dt > 0.0 and r.diag_main_P_dc_dt_initial > 0.0 then float(v: r.diag_main_P_dc_dt) / float(v: r.diag_main_P_dc_dt_initial) else debug.null(type: \"float\"), \"G P G / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_G and exists r.diag_G_P_G_initial and r.diag_G_P_G > 0.0 and r.diag_G_P_G_initial > 0.0 then float(v: r.diag_G_P_G) / float(v: r.diag_G_P_G_initial) else debug.null(type: \"float\"), \"G P dG_dt / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_dG_dt and exists r.diag_G_P_dG_dt_initial and r.diag_G_P_dG_dt > 0.0 and r.diag_G_P_dG_dt_initial > 0.0 then float(v: r.diag_G_P_dG_dt) / float(v: r.diag_G_P_dG_dt_initial) else debug.null(type: \"float\"), \"G P d2G_dt2 / initial\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_P_d2G_dt2 and exists r.diag_G_P_d2G_dt2_initial and r.diag_G_P_d2G_dt2 > 0.0 and r.diag_G_P_d2G_dt2_initial > 0.0 then float(v: r.diag_G_P_d2G_dt2) / float(v: r.diag_G_P_d2G_dt2_initial) else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Relative Uncertainty",
-          "type": "timeseries",
-          "description": "Variance ratio Pii / Pii(initial), not standard deviation. A reset starts at 1; later variance need not decrease monotonically. Growth Slope is dG/dt and Growth Curvature is d²G/dt². Non-positive variance is not changed to a small positive value and is flagged in Reset Check. A dash means unavailable; minor log-axis ticks may also show a dash. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 3,
-              "noValue": "Unavailable",
-              "unit": "sci",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "dimensionless",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main innovation T / sqrt\\(S\\)(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Temperature · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^main innovation c / sqrt\\(S\\)(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Concentration · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^G innovation G / sqrt\\(S\\)(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Growth Rate · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 0,
-            "y": 83
-          },
-          "id": 22,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"math\"\nimport \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_main_innovation_T\" or r._field == \"diag_main_S_T\" or r._field == \"diag_main_innovation_c\" or r._field == \"diag_main_S_c\" or r._field == \"diag_G_innovation_G\" or r._field == \"diag_G_S_G\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"main innovation T / sqrt(S)\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_innovation_T and exists r.diag_main_S_T and r.diag_main_S_T > 0.0 then r.diag_main_innovation_T / math.sqrt(x: r.diag_main_S_T) else debug.null(type: \"float\"), \"main innovation c / sqrt(S)\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_innovation_c and exists r.diag_main_S_c and r.diag_main_S_c > 0.0 then r.diag_main_innovation_c / math.sqrt(x: r.diag_main_S_c) else debug.null(type: \"float\"), \"G innovation G / sqrt(S)\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_G_innovation_G and exists r.diag_G_S_G and r.diag_G_S_G > 0.0 then r.diag_G_innovation_G / math.sqrt(x: r.diag_G_S_G) else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Scaled Prediction Error",
-          "type": "timeseries",
-          "description": "Pre-correction innovation / √Sii: measured input minus predicted measurement, scaled by its innovation uncertainty. This is not measured minus final estimate. Reset, paused and non-correction cycles are blank. No unvalidated statistical PASS threshold is implied. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "none",
-              "mappings": [],
-              "custom": {
-                "align": "auto",
-                "cellOptions": {
-                  "type": "auto"
-                },
-                "inspect": false
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Signal"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 220
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "T_KF": {
-                            "text": "Temperature (T)"
-                          },
-                          "dT_KF/dt": {
-                            "text": "Temperature Rate (dT/dt)"
-                          },
-                          "c_KF": {
-                            "text": "Concentration (c)"
-                          },
-                          "dc_KF/dt": {
-                            "text": "Concentration Rate (dc/dt)"
-                          },
-                          "P_T": {
-                            "text": "Variance (T)"
-                          },
-                          "P_dT_dt": {
-                            "text": "Variance (dT/dt)"
-                          },
-                          "P_c": {
-                            "text": "Variance (c)"
-                          },
-                          "P_dc_dt": {
-                            "text": "Variance (dc/dt)"
-                          },
-                          "P_G": {
-                            "text": "Variance (G)"
-                          },
-                          "P_dG_dt": {
-                            "text": "Variance (dG/dt)"
-                          },
-                          "P_d2G_dt2": {
-                            "text": "Variance (d²G/dt²)"
-                          },
-                          "int_e_target_dt": {
-                            "text": "Target Error"
-                          },
-                          "int_e_dT_dt_dt": {
-                            "text": "Temperature-rate Error"
-                          },
-                          "int_e_T_dt": {
-                            "text": "Temperature Error"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Value"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 90
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Reference"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 90
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Unit"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 120
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Filter"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 115
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "main": {
-                            "text": "Process (T, c)"
-                          },
-                          "G": {
-                            "text": "Growth (G)"
-                          },
-                          "Controller": {
-                            "text": "Controller"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Cycle"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 65
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Stage"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 105
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "refresh_init": {
-                            "text": "Reset"
-                          },
-                          "posterior": {
-                            "text": "Updated"
-                          },
-                          "diagnostics_unavailable": {
-                            "text": "Unavailable"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Status"
-                },
-                "properties": [
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "recorded": {
-                            "text": "Recorded"
-                          },
-                          "diagnostics_unavailable": {
-                            "text": "Unavailable"
-                          },
-                          "non-positive covariance": {
-                            "text": "Non-positive variance"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Run ID"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 400
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 12,
-            "y": 83
-          },
-          "id": 23,
-          "options": {
-            "showHeader": true,
-            "cellHeight": "sm",
-            "footer": {
-              "show": false,
-              "countRows": false,
-              "reducer": [
-                "sum"
-              ]
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nrows = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_snapshot_stage\" or r._field == \"diag_refresh_applied\" or r._field == \"diag_main_T_state\" or r._field == \"diag_main_T_measured\" or r._field == \"diag_main_dT_dt_state\" or r._field == \"diag_main_c_state\" or r._field == \"diag_main_c_measured\" or r._field == \"diag_main_dc_dt_state\" or r._field == \"diag_main_P_T\" or r._field == \"diag_main_P_T_initial\" or r._field == \"diag_main_P_dT_dt\" or r._field == \"diag_main_P_dT_dt_initial\" or r._field == \"diag_main_P_c\" or r._field == \"diag_main_P_c_initial\" or r._field == \"diag_main_P_dc_dt\" or r._field == \"diag_main_P_dc_dt_initial\" or r._field == \"diag_G_P_G\" or r._field == \"diag_G_P_G_initial\" or r._field == \"diag_G_P_dG_dt\" or r._field == \"diag_G_P_dG_dt_initial\" or r._field == \"diag_G_P_d2G_dt2\" or r._field == \"diag_G_P_d2G_dt2_initial\")\n  |> map(fn: (r) => ({r with _value: string(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group(columns: [\"run_id\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with tick_seq: if exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\")}))\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> filter(fn: (r) => r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and ((exists r.diag_refresh_applied and r.diag_refresh_applied == \"true\") or (exists r.diag_main_P_T and float(v: r.diag_main_P_T) <= 0.0) or (exists r.diag_main_P_dT_dt and float(v: r.diag_main_P_dT_dt) <= 0.0) or (exists r.diag_main_P_c and float(v: r.diag_main_P_c) <= 0.0) or (exists r.diag_main_P_dc_dt and float(v: r.diag_main_P_dc_dt) <= 0.0) or (exists r.diag_G_P_G and float(v: r.diag_G_P_G) <= 0.0) or (exists r.diag_G_P_dG_dt and float(v: r.diag_G_P_dG_dt) <= 0.0) or (exists r.diag_G_P_d2G_dt2 and float(v: r.diag_G_P_d2G_dt2) <= 0.0)))\n\nunion(tables: [\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"T_KF\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_T_state then float(v: r.diag_main_T_state) - 273.15 else debug.null(type: \"float\"), reference: if exists r.diag_main_T_measured then float(v: r.diag_main_T_measured) - 273.15 else debug.null(type: \"float\"), unit: \"°C\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_T_state then \"recorded\" else \"diagnostics_unavailable\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"dT_KF/dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_dT_dt_state then float(v: r.diag_main_dT_dt_state) else debug.null(type: \"float\"), reference: 0.0, unit: \"K/s\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_dT_dt_state then \"recorded\" else \"diagnostics_unavailable\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"c_KF\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_c_state then float(v: r.diag_main_c_state) else debug.null(type: \"float\"), reference: if exists r.diag_main_c_measured then float(v: r.diag_main_c_measured) else debug.null(type: \"float\"), unit: \"g/gH₂O\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_c_state then \"recorded\" else \"diagnostics_unavailable\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"dc_KF/dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_dc_dt_state then float(v: r.diag_main_dc_dt_state) else debug.null(type: \"float\"), reference: 0.0, unit: \"(g/gH₂O)/s\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_dc_dt_state then \"recorded\" else \"diagnostics_unavailable\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"P_T\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_P_T then float(v: r.diag_main_P_T) else debug.null(type: \"float\"), reference: if exists r.diag_main_P_T_initial then float(v: r.diag_main_P_T_initial) else debug.null(type: \"float\"), unit: \"K²\", condition: if exists r.diag_main_P_T and float(v: r.diag_main_P_T) <= 0.0 then \"non-positive covariance\" else \"recorded\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"P_dT_dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_P_dT_dt then float(v: r.diag_main_P_dT_dt) else debug.null(type: \"float\"), reference: if exists r.diag_main_P_dT_dt_initial then float(v: r.diag_main_P_dT_dt_initial) else debug.null(type: \"float\"), unit: \"(K/s)²\", condition: if exists r.diag_main_P_dT_dt and float(v: r.diag_main_P_dT_dt) <= 0.0 then \"non-positive covariance\" else \"recorded\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"P_c\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_P_c then float(v: r.diag_main_P_c) else debug.null(type: \"float\"), reference: if exists r.diag_main_P_c_initial then float(v: r.diag_main_P_c_initial) else debug.null(type: \"float\"), unit: \"(g/gH₂O)²\", condition: if exists r.diag_main_P_c and float(v: r.diag_main_P_c) <= 0.0 then \"non-positive covariance\" else \"recorded\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"main\", quantity: \"P_dc_dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_main_P_dc_dt then float(v: r.diag_main_P_dc_dt) else debug.null(type: \"float\"), reference: if exists r.diag_main_P_dc_dt_initial then float(v: r.diag_main_P_dc_dt_initial) else debug.null(type: \"float\"), unit: \"((g/gH₂O)/s)²\", condition: if exists r.diag_main_P_dc_dt and float(v: r.diag_main_P_dc_dt) <= 0.0 then \"non-positive covariance\" else \"recorded\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"G\", quantity: \"P_G\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_G_P_G then float(v: r.diag_G_P_G) else debug.null(type: \"float\"), reference: if exists r.diag_G_P_G_initial then float(v: r.diag_G_P_G_initial) else debug.null(type: \"float\"), unit: \"(m/s)²\", condition: if exists r.diag_G_P_G and float(v: r.diag_G_P_G) <= 0.0 then \"non-positive covariance\" else \"recorded\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"G\", quantity: \"P_dG_dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_G_P_dG_dt then float(v: r.diag_G_P_dG_dt) else debug.null(type: \"float\"), reference: if exists r.diag_G_P_dG_dt_initial then float(v: r.diag_G_P_dG_dt_initial) else debug.null(type: \"float\"), unit: \"(m/s²)²\", condition: if exists r.diag_G_P_dG_dt and float(v: r.diag_G_P_dG_dt) <= 0.0 then \"non-positive covariance\" else \"recorded\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"G\", quantity: \"P_d2G_dt2\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_G_P_d2G_dt2 then float(v: r.diag_G_P_d2G_dt2) else debug.null(type: \"float\"), reference: if exists r.diag_G_P_d2G_dt2_initial then float(v: r.diag_G_P_d2G_dt2_initial) else debug.null(type: \"float\"), unit: \"(m/s³)²\", condition: if exists r.diag_G_P_d2G_dt2 and float(v: r.diag_G_P_d2G_dt2) <= 0.0 then \"non-positive covariance\" else \"recorded\"}))] )\n  |> group()\n  |> sort(columns: [\"_time\", \"run_id\", \"tick\", \"filter\", \"quantity\"], desc: true)"
-            }
-          ],
-          "title": "Reset Check",
-          "type": "table",
-          "description": "One row per committed reset state or variance component, plus non-positive variance alerts. Temperature and concentration references are current measurements; their rates have zero references; variance references are constructor values. Full off-diagonal covariance reset correctness requires raw records and regression tests, not this diagonal-only table. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero.",
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {},
-                "indexByName": {
-                  "quantity": 0,
-                  "actual": 1,
-                  "reference": 2,
-                  "unit": 3,
-                  "filter": 4,
-                  "tick": 5,
-                  "snapshot_stage": 6,
-                  "_time": 7,
-                  "simulation_minute": 8,
-                  "run_id": 9,
-                  "condition": 10
-                },
-                "renameByName": {
-                  "quantity": "Signal",
-                  "actual": "Value",
-                  "reference": "Reference",
-                  "unit": "Unit",
-                  "filter": "Filter",
-                  "tick": "Cycle",
-                  "snapshot_stage": "Stage",
-                  "_time": "Time (UTC)",
-                  "simulation_minute": "Sim Time (min)",
-                  "run_id": "Run ID",
-                  "condition": "Status"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "none",
-              "mappings": [],
-              "custom": {
-                "align": "auto",
-                "cellOptions": {
-                  "type": "auto"
-                },
-                "inspect": false
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Signal"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 220
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "T_KF": {
-                            "text": "Temperature (T)"
-                          },
-                          "dT_KF/dt": {
-                            "text": "Temperature Rate (dT/dt)"
-                          },
-                          "c_KF": {
-                            "text": "Concentration (c)"
-                          },
-                          "dc_KF/dt": {
-                            "text": "Concentration Rate (dc/dt)"
-                          },
-                          "P_T": {
-                            "text": "Variance (T)"
-                          },
-                          "P_dT_dt": {
-                            "text": "Variance (dT/dt)"
-                          },
-                          "P_c": {
-                            "text": "Variance (c)"
-                          },
-                          "P_dc_dt": {
-                            "text": "Variance (dc/dt)"
-                          },
-                          "P_G": {
-                            "text": "Variance (G)"
-                          },
-                          "P_dG_dt": {
-                            "text": "Variance (dG/dt)"
-                          },
-                          "P_d2G_dt2": {
-                            "text": "Variance (d²G/dt²)"
-                          },
-                          "int_e_target_dt": {
-                            "text": "Target Error"
-                          },
-                          "int_e_dT_dt_dt": {
-                            "text": "Temperature-rate Error"
-                          },
-                          "int_e_T_dt": {
-                            "text": "Temperature Error"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Value"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 90
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Reference"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 90
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Unit"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 120
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Filter"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 115
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "main": {
-                            "text": "Process (T, c)"
-                          },
-                          "G": {
-                            "text": "Growth (G)"
-                          },
-                          "Controller": {
-                            "text": "Controller"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Cycle"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 65
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Stage"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 105
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "refresh_init": {
-                            "text": "Reset"
-                          },
-                          "posterior": {
-                            "text": "Updated"
-                          },
-                          "diagnostics_unavailable": {
-                            "text": "Unavailable"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Status"
-                },
-                "properties": [
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "recorded": {
-                            "text": "Recorded"
-                          },
-                          "diagnostics_unavailable": {
-                            "text": "Unavailable"
-                          },
-                          "non-positive covariance": {
-                            "text": "Non-positive variance"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "Run ID"
-                },
-                "properties": [
-                  {
-                    "id": "custom.width",
-                    "value": 400
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 0,
-            "y": 93
-          },
-          "id": 24,
-          "options": {
-            "showHeader": true,
-            "cellHeight": "sm",
-            "footer": {
-              "show": false,
-              "countRows": false,
-              "reducer": [
-                "sum"
-              ]
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nrows = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_snapshot_stage\" or r._field == \"diag_refresh_applied\" or r._field == \"diag_int_target\" or r._field == \"diag_int_dT_dt\" or r._field == \"diag_int_T\")\n  |> map(fn: (r) => ({r with _value: string(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group(columns: [\"run_id\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with tick_seq: if exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\")}))\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n\nunion(tables: [\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"Controller\", quantity: \"int_e_target_dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_int_target then float(v: r.diag_int_target) else debug.null(type: \"float\"), reference: 0.0, unit: \"dimensionless·s\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_int_target then \"recorded\" else \"diagnostics_unavailable\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"Controller\", quantity: \"int_e_dT_dt_dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_int_dT_dt then float(v: r.diag_int_dT_dt) else debug.null(type: \"float\"), reference: 0.0, unit: \"K\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_int_dT_dt then \"recorded\" else \"diagnostics_unavailable\"})),\n  rows |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, tick: if exists r.tick_seq then int(v: r.tick_seq) else 0, simulation_minute: if exists r.elapsed_s then float(v: r.elapsed_s) / 60.0 else debug.null(type: \"float\"), snapshot_stage: if exists r.diag_snapshot_stage then r.diag_snapshot_stage else \"diagnostics_unavailable\", filter: \"Controller\", quantity: \"int_e_T_dt\", actual: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_int_T then float(v: r.diag_int_T) else debug.null(type: \"float\"), reference: 0.0, unit: \"K·s\", condition: if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_int_T then \"recorded\" else \"diagnostics_unavailable\"}))] )\n  |> group()\n  |> sort(columns: [\"_time\", \"run_id\", \"tick\", \"filter\", \"quantity\"], desc: true)"
-            }
-          ],
-          "title": "Control Integrals",
-          "type": "table",
-          "description": "Accumulated target, temperature-rate and temperature errors. All three control integrals reset to zero on a full refresh. These are Controller memory, not all Kalman-filter states. Reference is zero; non-reset values need not equal it. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero.",
-          "transformations": [
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {},
-                "indexByName": {
-                  "quantity": 0,
-                  "actual": 1,
-                  "reference": 2,
-                  "unit": 3,
-                  "filter": 4,
-                  "tick": 5,
-                  "snapshot_stage": 6,
-                  "_time": 7,
-                  "simulation_minute": 8,
-                  "run_id": 9,
-                  "condition": 10
-                },
-                "renameByName": {
-                  "quantity": "Signal",
-                  "actual": "Value",
-                  "reference": "Reference",
-                  "unit": "Unit",
-                  "filter": "Filter",
-                  "tick": "Cycle",
-                  "snapshot_stage": "Stage",
-                  "_time": "Time (UTC)",
-                  "simulation_minute": "Sim Time (min)",
-                  "run_id": "Run ID",
-                  "condition": "Status"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "suffix:K/s",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^MPC dT/dt request(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Requested · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Main EKF dT/dt state(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Estimated · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 12,
-            "y": 93
-          },
-          "id": 25,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_dT_dt_request\" or r._field == \"diag_main_dT_dt_state\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"MPC dT/dt request\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_dT_dt_request then float(v: r.diag_dT_dt_request) else debug.null(type: \"float\"), \"Main EKF dT/dt state\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_main_dT_dt_state then float(v: r.diag_main_dT_dt_state) else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Temperature Change Rate",
-          "type": "timeseries",
-          "description": "MPC-requested and estimated reactor temperature change rates. The estimated rate is zero on full-reset initialization. A held cycle with no optimizer call has no fabricated request. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "crystallization-influxdb"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "decimals": 5,
-              "noValue": "Unavailable",
-              "unit": "celsius",
-              "mappings": [],
-              "custom": {
-                "axisCenteredZero": false,
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "lineInterpolation": "linear",
-                "lineWidth": 2,
-                "pointSize": 4,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "always",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Request physical clip(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "none"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "0": {
-                            "text": "No"
-                          },
-                          "1": {
-                            "text": "Yes"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": true,
-                      "tooltip": false,
-                      "viz": false
-                    }
-                  },
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "hidden"
-                  },
-                  {
-                    "id": "custom.lineWidth",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.fillOpacity",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.showPoints",
-                    "value": "never"
-                  },
-                  {
-                    "id": "custom.pointSize",
-                    "value": 0
-                  },
-                  {
-                    "id": "displayName",
-                    "value": "Request Clipped · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Zero-rate physical clip(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "none"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "0": {
-                            "text": "No"
-                          },
-                          "1": {
-                            "text": "Yes"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": true,
-                      "tooltip": false,
-                      "viz": false
-                    }
-                  },
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "hidden"
-                  },
-                  {
-                    "id": "custom.lineWidth",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.fillOpacity",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.showPoints",
-                    "value": "never"
-                  },
-                  {
-                    "id": "custom.pointSize",
-                    "value": 0
-                  },
-                  {
-                    "id": "displayName",
-                    "value": "Zero-rate Clipped · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Any candidate physical clip(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "none"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "0": {
-                            "text": "No"
-                          },
-                          "1": {
-                            "text": "Yes"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": true,
-                      "tooltip": false,
-                      "viz": false
-                    }
-                  },
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "hidden"
-                  },
-                  {
-                    "id": "custom.lineWidth",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.fillOpacity",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.showPoints",
-                    "value": "never"
-                  },
-                  {
-                    "id": "custom.pointSize",
-                    "value": 0
-                  },
-                  {
-                    "id": "displayName",
-                    "value": "Any Clipping · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Non-increasing limit(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "none"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "0": {
-                            "text": "No"
-                          },
-                          "1": {
-                            "text": "Yes"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": true,
-                      "tooltip": false,
-                      "viz": false
-                    }
-                  },
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "hidden"
-                  },
-                  {
-                    "id": "custom.lineWidth",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.fillOpacity",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.showPoints",
-                    "value": "never"
-                  },
-                  {
-                    "id": "custom.pointSize",
-                    "value": 0
-                  },
-                  {
-                    "id": "displayName",
-                    "value": "Rate Limit Applied · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Selected branch(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "none"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 0
-                  },
-                  {
-                    "id": "mappings",
-                    "value": [
-                      {
-                        "type": "value",
-                        "options": {
-                          "1": {
-                            "text": "Request"
-                          },
-                          "2": {
-                            "text": "Zero-rate"
-                          },
-                          "3": {
-                            "text": "Previous Command"
-                          }
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": true,
-                      "tooltip": false,
-                      "viz": false
-                    }
-                  },
-                  {
-                    "id": "custom.axisPlacement",
-                    "value": "hidden"
-                  },
-                  {
-                    "id": "custom.lineWidth",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.fillOpacity",
-                    "value": 0
-                  },
-                  {
-                    "id": "custom.showPoints",
-                    "value": "never"
-                  },
-                  {
-                    "id": "custom.pointSize",
-                    "value": 0
-                  },
-                  {
-                    "id": "displayName",
-                    "value": "Command Source · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Candidate raw(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Request (raw) · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Physical-limit candidate(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Request (limited) · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Zero-rate limit candidate(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Zero-rate (limited) · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Selected command(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Final Command · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Actual jacket(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Actual · ${__field.labels.run_label}"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "^Zero-rate raw candidate(?: .*)?$"
-                },
-                "properties": [
-                  {
-                    "id": "displayName",
-                    "value": "Zero-rate (raw) · ${__field.labels.run_label}"
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 24,
-            "x": 0,
-            "y": 103
-          },
-          "id": 26,
-          "options": {
-            "legend": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.3",
-          "targets": [
-            {
-              "refId": "A",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_T_j_candidate_raw\" or r._field == \"diag_T_j_candidate_bounded\" or r._field == \"diag_T_j_zero_bounded\" or r._field == \"diag_T_j_selected\" or r._field == \"diag_T_j_actual\" or r._field == \"diag_T_j_zero_raw\" or r._field == \"diag_request_physical_limit\" or r._field == \"diag_zero_physical_limit\" or r._field == \"diag_physical_limit\" or r._field == \"diag_non_increasing_limit\")\n  |> map(fn: (r) => ({r with _value: float(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"Candidate raw\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_T_j_candidate_raw then float(v: r.diag_T_j_candidate_raw) - 273.15 else debug.null(type: \"float\"), \"Physical-limit candidate\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_T_j_candidate_bounded then float(v: r.diag_T_j_candidate_bounded) - 273.15 else debug.null(type: \"float\"), \"Zero-rate limit candidate\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_T_j_zero_bounded then float(v: r.diag_T_j_zero_bounded) - 273.15 else debug.null(type: \"float\"), \"Selected command\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_T_j_selected then float(v: r.diag_T_j_selected) - 273.15 else debug.null(type: \"float\"), \"Actual jacket\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_T_j_actual then float(v: r.diag_T_j_actual) - 273.15 else debug.null(type: \"float\"), \"Zero-rate raw candidate\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_T_j_zero_raw then float(v: r.diag_T_j_zero_raw) - 273.15 else debug.null(type: \"float\"), \"Request physical clip\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_request_physical_limit and exists r.diag_T_j_candidate_raw then float(v: r.diag_request_physical_limit) else debug.null(type: \"float\"), \"Zero-rate physical clip\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_zero_physical_limit and exists r.diag_T_j_zero_raw then float(v: r.diag_zero_physical_limit) else debug.null(type: \"float\"), \"Any candidate physical clip\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_physical_limit and (exists r.diag_T_j_candidate_raw or exists r.diag_T_j_zero_raw) and (exists r.diag_request_physical_limit or exists r.diag_zero_physical_limit) then float(v: r.diag_physical_limit) else debug.null(type: \"float\"), \"Non-increasing limit\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == 1.0 and exists r.diag_non_increasing_limit and exists r.diag_T_j_candidate_raw then float(v: r.diag_non_increasing_limit) else debug.null(type: \"float\")}))"
-            },
-            {
-              "refId": "B",
-              "datasource": {
-                "type": "influxdb",
-                "uid": "crystallization-influxdb"
-              },
-              "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_T_j_selected_branch\")\n  |> map(fn: (r) => ({r with _value: string(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with tick_seq: if exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\")}))\n  |> sort(columns: [\"_time\", \"tick_seq\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"Selected branch\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_T_j_selected_branch then (if r.diag_T_j_selected_branch == \"requested\" then 1.0 else if r.diag_T_j_selected_branch == \"zero\" then 2.0 else if r.diag_T_j_selected_branch == \"held\" then 3.0 else debug.null(type: \"float\")) else debug.null(type: \"float\")}))"
-            }
-          ],
-          "title": "Jacket Temperature",
-          "type": "timeseries",
-          "description": "Same-cycle request and zero-rate branches before and after physical limits, final command and actual jacket temperature. Zero-rate targets zero reactor temperature change; it does not mean reusing the previous jacket command. Tooltip flags are separate from the °C curves. Any Clipping is the OR of evaluated candidates, not a selected-branch-only flag. Missing or unevaluated branches remain unavailable, not No. Output limits describe control response, not filter-performance improvement. Native UTC timestamps; no aggregation or zero filling. Missing diagnostics are unavailable, not zero."
+          "query": "import \"internal/debug\"\nimport \"experimental/record\"\nimport \"strings\"\n\nselectedRunIds = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> keep(columns: [\"run_id\"])\n  |> group()\n  |> distinct(column: \"run_id\")\n  |> rename(columns: {_value: \"run_id\"})\n  |> map(fn: (r) => ({run_id: r.run_id, run_short: strings.substring(v: r.run_id, start: if strings.strlen(v: r.run_id) > 8 then strings.strlen(v: r.run_id) - 8 else 0, end: strings.strlen(v: r.run_id))}))\n\nrunCounts = selectedRunIds\n  |> group(columns: [\"run_short\"])\n  |> count(column: \"run_id\")\n  |> rename(columns: {run_id: \"run_count\"})\n  |> group()\n\nrunLabels = join(tables: {ids: selectedRunIds, counts: runCounts}, on: [\"run_short\"])\n  |> map(fn: (r) => ({run_id: r.run_id, run_label: if r.run_count > 1 then r.run_id else r.run_short}))\n  |> group()\n\nseries = from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"controller_measurement\")\n  |> filter(fn: (r) => r.run_id =~ /^${run_id:regex}$/)\n  |> filter(fn: (r) => r._field == \"tick_seq\" or r._field == \"elapsed_s\" or r._field == \"diag_capture_ok\" or r._field == \"diag_snapshot_stage\" or r._field == \"diag_refresh_applied\" or r._field == \"diag_refresh_count\")\n  |> map(fn: (r) => ({r with _value: string(v: r._value), target: record.get(r: r, key: \"target\", default: \"\"), tick_key: record.get(r: r, key: \"acceptance_tick\", default: \"\")}))\n  |> group()\n\njoin(tables: {series: series, labels: runLabels}, on: [\"run_id\"])\n  |> group(columns: [\"run_id\", \"run_label\"])\n  |> pivot(rowKey: [\"_time\", \"target\", \"status\", \"tick_key\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({r with tick_seq: if exists r.tick_seq then float(v: r.tick_seq) else debug.null(type: \"float\")}))\n  |> sort(columns: [\"_time\", \"tick_seq\", \"tick_key\"])\n  |> map(fn: (r) => ({_time: r._time, run_id: r.run_id, run_label: r.run_label, \"Reset\": if r.status == \"calculated\" and exists r.diag_capture_ok and r.diag_capture_ok == \"true\" and exists r.diag_refresh_applied and r.diag_refresh_applied == \"true\" and exists r.diag_snapshot_stage and r.diag_snapshot_stage == \"refresh_init\" and exists r.diag_refresh_count and float(v: r.diag_refresh_count) > 0.0 then 1.0 else debug.null(type: \"float\")}))"
         }
       ],
-      "title": "Controller Filter & Control Diagnostics",
-      "type": "row"
+      "title": "Filter Covariance · Reset Level = 1",
+      "type": "timeseries",
+      "description": "Variance ratio Pii / Pii_initial for the process and growth filters. A reset returns the recorded diagonal ratios to 1, not P to zero; later variance need not decrease monotonically. Orange Reset points mark committed refresh cycles, not input re-anchoring or startup. Check the actual ratios at each marker; a marker alone does not prove reset correctness. Hover for Cycle, Reset Count, raw P and P0 (units shown in their names). G may remain at 1 while paused. Non-positive P or P0 is omitted from the log curves; raw values remain in the tooltip. The dashed Reset Level = 1 reference marks the initial variance. Blank ratio values and Unavailable raw values mean missing, never zero. Full-matrix/off-diagonal correctness and reserve filters require raw records/tests. Native UTC; no averaging or zero filling."
     }
   ],
   "refresh": "10s",

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Gsensor UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260917-runtime-alignment">
+    <link rel="stylesheet" href="/static/styles.css?v=20261102-central-alignment-only">
   </head>
   <body>
     <div class="shell">
@@ -237,40 +237,6 @@
               <button id="refresh-overlay" class="ghost" type="button">Refresh Preview</button>
             </div>
           </div>
-          <section class="alignment-panel" aria-labelledby="alignment-heading">
-            <div class="alignment-control-head">
-              <div>
-                <p class="eyebrow">Image Processing</p>
-                <h3 id="alignment-heading">Image Alignment</h3>
-              </div>
-              <span id="alignment-configuration-status" class="status idle">waiting for experiment</span>
-            </div>
-            <div class="alignment-state-facts">
-              <div>
-                <span>Current Applied Method</span>
-                <strong id="alignment-applied-method">—</strong>
-              </div>
-              <div>
-                <span>Latest Preview Method</span>
-                <strong id="alignment-preview-method">—</strong>
-              </div>
-              <div>
-                <span>Applies After Frame</span>
-                <strong id="alignment-effective-after">—</strong>
-              </div>
-            </div>
-            <div class="alignment-selection">
-              <div class="alignment-field">
-                <label for="alignment-method-select">Method for new frames</label>
-                <select id="alignment-method-select" aria-describedby="alignment-selection-help alignment-action-feedback alignment-capability-notes" disabled>
-                  <option value="none">None — no image alignment</option>
-                </select>
-              </div>
-              <p id="alignment-selection-help" class="muted" role="status" aria-live="polite">Start an experiment in Central. Choose an alignment method during image marking.</p>
-            </div>
-            <p id="alignment-action-feedback" class="save-status muted" role="status" aria-live="polite" hidden></p>
-            <p id="alignment-capability-notes" class="save-status muted" hidden></p>
-          </section>
           <div class="online-measurement-layout">
             <div class="measurement-summary">
               <div class="measurement-facts">
@@ -356,6 +322,6 @@
       <div id="run-parameters-values" class="run-parameters-values"></div>
     </dialog>
 
-    <script src="/static/app.js?v=20260917-runtime-alignment"></script>
+    <script src="/static/app.js?v=20261102-central-alignment-only"></script>
   </body>
 </html>

@@ -175,6 +175,16 @@ class GsensorActivationRequest(BaseModel):
     event_id: str
 
 
+class ProcessRecoveryConfirmationRequest(BaseModel):
+    """Explicit operator confirmation for one unresolved device command."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    run_id: str = Field(min_length=1, max_length=256)
+    command_id: str = Field(min_length=1, max_length=256)
+    confirmation: bool
+
+
 class ExperimentCreateRequest(ExperimentContext):
     label: str | None = Field(default=None, max_length=120)
 
@@ -1603,6 +1613,49 @@ class CentralService:
                 "error": str(exc),
             }
 
+    def confirm_process_recovery(self, payload: ProcessRecoveryConfirmationRequest) -> Dict[str, Any]:
+        """Forward only an explicit confirmation for this run's unresolved write.
+
+        This never sends a setpoint or marks the experiment as resumed. Controller
+        and Writer still verify the command and acquire a fresh recovery baseline.
+        """
+        if payload.confirmation is not True:
+            raise ValueError("Confirm the current device state before continuing this experiment.")
+        run_id, controller = self._require_running_controller("device-state confirmation")
+        manifest = self.experiments.registry.get(run_id)
+        if (payload.run_id != run_id or controller.get("active") is not True
+                or not _same_recovery_timestamp(controller.get("started_at"), manifest.started_at)):
+            raise InvalidExperimentStateError("The confirmation does not match the current running experiment.")
+        process = controller.get("integrations", {}).get("process", {})
+        recovery = process.get("write_recovery") or {}
+        command = recovery.get("command") or {}
+        if (process.get("waiting_for_data") is not True or recovery.get("pending") is not True
+                or recovery.get("manual_confirmation_required") is not True
+                or command.get("run_id") != run_id
+                or command.get("command_id") != payload.command_id
+                or not _same_recovery_timestamp(command.get("run_started_at"), manifest.started_at)):
+            raise InvalidExperimentStateError("This device command no longer requires manual confirmation. Refresh status.")
+        target = self.controller_status_url.rsplit("/", 1)[0] + "/process/recovery/confirm"
+        request = urllib.request.Request(
+            target, data=json.dumps(payload.model_dump(), allow_nan=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Cache-Control": "no-store"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3.0) as response:
+                raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("Controller confirmation response exceeds the bounded read size.")
+            result = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in {400, 409, 422}:
+                raise InvalidExperimentStateError("Controller rejected this confirmation. Refresh status before retrying.") from exc
+            raise RuntimeError("Confirmation delivery is unconfirmed. Refresh Controller status before retrying.") from exc
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            raise RuntimeError("Confirmation delivery is unconfirmed. Refresh Controller status before retrying.") from exc
+        if not isinstance(result, dict) or result.get("accepted") is not True:
+            raise RuntimeError("Controller has not confirmed receipt. Refresh status before retrying.")
+        return result
+
     def gsensor_status(self) -> Dict[str, Any]:
         """Read this participant now; cached AMQP errors never authorize End."""
         url = getattr(self, "gsensor_status_url", None)
@@ -2805,6 +2858,15 @@ def add_seed(payload: ExperimentContext | None = None) -> Dict[str, Any]:
     try:
         with service.ui_action(payload):
             return service.add_seed()
+    except Exception as exc:
+        raise _experiment_http_exception(exc) from exc
+
+
+@web_app.post("/api/process/recovery/confirm")
+def confirm_process_recovery(payload: ProcessRecoveryConfirmationRequest) -> Dict[str, Any]:
+    try:
+        with service.ui_action(ExperimentContext(expected_run_id=payload.run_id)):
+            return service.confirm_process_recovery(payload)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 

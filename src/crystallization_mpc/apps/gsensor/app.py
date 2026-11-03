@@ -99,6 +99,7 @@ from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES, bindings_for
 from crystallization_mpc.messaging.schema import build_envelope, utc_ts
 
 ROLE = "gsensor"
+ALIGNMENT_LOCK_MESSAGE = "Alignment method is locked after experiment start. Create a new experiment to change it."
 UI_DIR = Path(__file__).resolve().parent / "ui"
 GSENSOR_IMGS_DIR = Path(__file__).resolve().parent / "imgs"
 PROJECT_ROOT = UI_DIR.parents[4]
@@ -340,6 +341,7 @@ class GsensorService:
         self.experiment_parameter_version: int | None = None
         self.experiment_params: Dict[str, Any] | None = None
         self.confirmed_alignment_method: str | None = None
+        self.locked_alignment_method: str | None = None
         self.alignment_confirmed_at: str | None = None
         self.alignment_revision = 0
         self.alignment_effective_after_frame_seq = 0
@@ -611,6 +613,7 @@ class GsensorService:
         self.experiment_parameter_version = None
         self.experiment_params = None
         self.confirmed_alignment_method = None
+        self.locked_alignment_method = None
         self.alignment_confirmed_at = None
         self.alignment_revision = 0
         self.alignment_effective_after_frame_seq = 0
@@ -1052,6 +1055,9 @@ class GsensorService:
                 self.experiment_parameter_version = payload.parameter_version
                 self.experiment_params = self.current_params()
                 self.confirmed_alignment_method = None
+                self.locked_alignment_method = parse_alignment_method(
+                    self.experiment_params.get("alignment_method", "none")
+                ).value
                 self.alignment_confirmed_at = None
                 self.alignment_revision = 0
                 self.alignment_effective_after_frame_seq = 0
@@ -2202,8 +2208,11 @@ class GsensorService:
             confirmed = parse_alignment_method(
                 getattr(self.growth_rate_processor, "alignment_method", configured)
             ).value
+        method = self.locked_alignment_method or confirmed or configured
         return {
-            "method": confirmed or configured,
+            "method": method,
+            "locked_method": method if self.experiment_started_at is not None else None,
+            "locked": self.experiment_started_at is not None,
             "configured_method": configured,
             "confirmed": confirmed is not None,
             "confirmed_at": self.alignment_confirmed_at or (self.initialized_at if confirmed else None),
@@ -2212,12 +2221,7 @@ class GsensorService:
             "in_progress": self._alignment_change_pending,
             "last_error": self.alignment_change_error,
             "warmup_pending": bool(getattr(self.growth_rate_processor, "alignment_warmup_pending", False)),
-            "can_select": (
-                self.gsensor_enabled
-                and not self._processing_transition_pending
-                and ((self.experiment_lifecycle_status == GrowthRateStatus.INITIALIZING.value
-                      and not self.initialized) or self._can_switch_alignment_locked())
-            ),
+            "can_select": False,
             "can_switch": self._can_switch_alignment_locked(),
         }
 
@@ -2226,12 +2230,15 @@ class GsensorService:
         return self._reinitialization_pending or self._alignment_change_pending or self._parameter_change_pending
 
     def _can_switch_alignment_locked(self) -> bool:
-        return bool(
-            self.gsensor_enabled and self.initialized and self.growth_rate_processor is not None
-            and not self._processing_transition_pending
-            and self.pending_parameter_event_id is None
-            and self.experiment_lifecycle_status == GrowthRateStatus.MEASURING.value
-        )
+        # Selection belongs to Central's startup draft, never a marking session.
+        return False
+
+    def _require_locked_alignment_method(self, method: str | None) -> str:
+        current = self._alignment_configuration_locked()["method"]
+        selected = current if method is None else parse_alignment_method(method).value
+        if selected != current:
+            raise ValueError(ALIGNMENT_LOCK_MESSAGE)
+        return selected
 
     def handle_parameter_update(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare/commit run-only settings without replacing the experiment.
@@ -2315,7 +2322,8 @@ class GsensorService:
             if not isinstance(changes, dict):
                 raise ValueError("Persisted parameter event changes are missing.")
             expected_values = validate_parameter_changes({section: values for section, values in changes.items()
-                                                         if section in {"shared", "gsensor"} and values})
+                                                         if section in {"shared", "gsensor"} and values},
+                                                         allow_historical_alignment=True)
             if event.get("values") != expected_values:
                 raise ValueError("Persisted parameter acknowledgement values disagree with its request.")
             candidate = event.get("candidate_params")
@@ -2370,8 +2378,7 @@ class GsensorService:
                 raise ValueError("Runtime parameter changes require known section mappings.")
             defaults = parameter_defaults()
             candidate_params = copy.deepcopy(self.experiment_params or self.current_params())
-            if self.confirmed_alignment_method is not None:
-                candidate_params["alignment_method"] = self.confirmed_alignment_method
+            candidate_params["alignment_method"] = self._alignment_configuration_locked()["method"]
             relevant = {section: patch for section, patch in changes.items()
                         if section in {"shared", "gsensor"} and patch}
             current = {section: {key: candidate_params.get(key, value) for key, value in defaults[section].items()}
@@ -2419,6 +2426,7 @@ class GsensorService:
 
     def _build_parameter_processor(self, event: Dict[str, Any]) -> Any:
         """Build a fresh segment from confirmed marks, never from old edges."""
+        self._require_locked_alignment_method(event["candidate_params"].get("alignment_method", "none"))
         session_id = event["session_id"]
         payload = self.initialization.payload(session_id)
         uv_structs, kernel = initialize_DSCGR(self.initialization, session_id=session_id)
@@ -2448,6 +2456,7 @@ class GsensorService:
                 raise ValueError("Runtime parameters were not prepared.")
             if event["phase"] != "prepared":
                 return self._parameter_result(event)
+            self._require_locked_alignment_method(event["candidate_params"].get("alignment_method", "none"))
             if self.pending_parameter_event_id != event_id:
                 raise ValueError("The prepared runtime parameter event is no longer pending.")
             if (event["initialization_generation"] != self.initialization_generation
@@ -2549,7 +2558,7 @@ class GsensorService:
         self, run_id: str, session_id: str, control_revision: int,
         alignment_revision: int, alignment_method: str,
     ) -> Dict[str, Any]:
-        """Switch the live method at a frame boundary, preserving manual marks."""
+        """Reject method changes; retain same-method requests as read-only retries."""
         selected = parse_alignment_method(alignment_method).value
         with self._control_lock:
             with self._publication_lock, self._lock:
@@ -2562,107 +2571,23 @@ class GsensorService:
                     raise ValueError("GSensor activation changed. Refresh before changing alignment.")
                 if type(alignment_revision) is not int or alignment_revision != self.alignment_revision:
                     raise ValueError("The alignment selection changed. Refresh before changing it again.")
-                if not self._can_switch_alignment_locked():
-                    raise ValueError("Enable GSensor and confirm image marking before changing live alignment.")
-                if self.experiments.registry.get(run_id).status in TERMINAL_EXPERIMENT_STATUSES:
-                    raise ValueError("A finished experiment cannot change alignment.")
-                capability = next((item for item in alignment_capabilities() if item.method == selected), None)
-                if capability is None or not capability.available:
-                    reason = capability.reason if capability is not None else "not available"
-                    raise ValueError(f"Alignment method {selected!r} is unavailable: {reason}")
                 if selected == self._alignment_configuration_locked()["method"]:
                     return self.status()
-                # Close publication before draining the scanner. Never wait for
-                # the scanner while holding the lock it needs to finish a frame.
-                self._alignment_change_pending = True
-                self.alignment_change_error = None
-                self.image_discovery_revision += 1
-            try:
-                self._publish_transition_availability()
-                with self._image_scan_lock:
-                    self._replace_alignment_processor(selection, selected)
-            except Exception as exc:
-                with self._lock:
-                    self.alignment_change_error = str(exc)
-                raise
-            finally:
-                with self._lock:
-                    self._alignment_change_pending = False
-                self._publish_transition_availability()
-            return self.status()
-
-    def _replace_alignment_processor(self, selection: Dict[str, Any], selected: str) -> None:
-        session_id = self.initialization.active_session_id
-        payload = self.initialization.payload(session_id)
-        uv_structs, kernel = initialize_DSCGR(self.initialization, session_id=session_id)
-        revision = self.alignment_revision + 1
-        output_directory = self._measurement_output_directory_locked(alignment_revision=revision)
-        processor = self.growth_rate_processor_factory(
-            run_id=selection["run_id"],
-            params=copy.deepcopy(self.experiment_params or self.current_params()),
-            uv_struct_list=uv_structs, kernel=kernel,
-            latest_overlay_path=output_directory / LATEST_OVERLAY_FILENAME,
-            final_overlay_path=output_directory / FINAL_OVERLAY_FILENAME,
-            debug_directory=(output_directory / "hough_debug" if self.hough_debug_enabled else None),
-            initial_image_path=payload["selected_image"], alignment_method=selected,
-        )
-        processor.begin_alignment_segment(
-            frame_seq=self.measurement_step_count,
-            valid_frame_count=self.measurement_valid_frame_count,
-            invalid_frame_count=self.measurement_invalid_frame_count,
-        )
-        processor.prime_alignment_from_baseline()
-        candidate_sidecar = output_directory / "alignment_state.npz"
-        sidecar_existed = candidate_sidecar.exists()
-        # Archive the already committed record. Exporting the old processor
-        # again here could rewrite its sidecar before this transaction commits.
-        checkpoint = self.experiments.load_processing_state(selection["run_id"])
-        if checkpoint is None:
-            raise ValueError("The current processing checkpoint is missing; alignment was not changed.")
-        archive = self.experiments.save_reinitialization_snapshot(
-            selection["run_id"], checkpoint, kind="processing",
-        )
-        changed_at = utc_ts()
-        run_directory = Path(selection["container_image_path"]).parent
-        with self._lock:
-            updates = {
-                "growth_rate_processor": processor, "uv_struct_list": processor.uv_structs,
-                "kernel": kernel, "confirmed_alignment_method": selected,
-                "alignment_confirmed_at": changed_at, "alignment_revision": revision,
-                "alignment_effective_after_frame_seq": self.measurement_step_count,
-                "last_processing_error": None, "final_overlay_path": None,
-                "alignment_changes": [*self.alignment_changes, {
-                    "revision": revision, "session_id": session_id,
-                    "initialization_generation": self.initialization_generation,
-                    "from_method": self._alignment_configuration_locked()["method"],
-                    "method": selected, "changed_at": changed_at,
-                    "effective_after_frame_seq": self.measurement_step_count,
-                    "previous_state_file": archive.relative_to(run_directory).as_posix(),
-                }],
-            }
-            previous = {key: getattr(self, key) for key in updates}
-            try:
-                for key, value in updates.items():
-                    setattr(self, key, value)
-                self._persist_processing_state_locked()
-            except Exception:
-                for key, value in previous.items():
-                    setattr(self, key, value)
-                archive.unlink(missing_ok=True)
-                if not sidecar_existed:
-                    candidate_sidecar.unlink(missing_ok=True)
-                raise
-
+                raise ValueError(ALIGNMENT_LOCK_MESSAGE)
 
     def _restore_alignment_configuration_locked(
         self, configuration: Any, *, has_processor: bool
     ) -> None:
         self.confirmed_alignment_method = None
+        self.locked_alignment_method = None
         self.alignment_confirmed_at = None
         self.alignment_revision = 0
         self.alignment_effective_after_frame_seq = 0
         if configuration is None:
             # Older runs used the Start-time method and have no separate choice.
+            self.locked_alignment_method = parse_alignment_method(
+                (self.experiment_params or {}).get("alignment_method", "none")
+            ).value
             if has_processor:
                 self.confirmed_alignment_method = parse_alignment_method(
                     (self.experiment_params or {}).get("alignment_method", "none")
@@ -2674,6 +2599,13 @@ class GsensorService:
         ):
             raise ValueError("Persisted alignment configuration is invalid.")
         method = parse_alignment_method(configuration.get("method")).value
+        # Old snapshots may contain an already committed runtime selection.
+        # Freeze that method instead of reverting an existing run to its draft.
+        self.locked_alignment_method = parse_alignment_method(
+            configuration.get("locked_method") or method
+        ).value
+        if self.locked_alignment_method != method:
+            raise ValueError("Persisted alignment method disagrees with its locked method.")
         revision = configuration.get("revision", 0)
         effective_after = configuration.get("effective_after_frame_seq", 0)
         if type(revision) is not int or revision < 0 or type(effective_after) is not int or effective_after < 0:
@@ -3299,10 +3231,8 @@ class GsensorService:
                 raise ValueError(
                     "Preview and select a 3D candidate before confirming initialization."
                 )
+            selected_method = self._require_locked_alignment_method(alignment_method)
             configured = self._alignment_configuration_locked()["configured_method"]
-            selected_method = parse_alignment_method(
-                configured if alignment_method is None else alignment_method
-            ).value
             capability = next(
                 (item for item in alignment_capabilities() if item.method == selected_method),
                 None,
@@ -3350,6 +3280,8 @@ class GsensorService:
             processor.invalid_frame_count = self.measurement_invalid_frame_count
             configuration = {
                 "method": selected_method,
+                "locked_method": selected_method,
+                "locked": True,
                 "configured_method": configured,
                 "confirmed": True,
                 "confirmed_at": completed_at,

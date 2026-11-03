@@ -509,13 +509,13 @@ docker compose exec gsensor python -c "from pathlib import Path; p=Path('/data/e
 
 操作顺序：
 
-1. Central 已 `Start Experiment`，再点击单独的 `Enable GSensor`；Start 本身不自动启用 GSensor。
+1. 在 Central 参数栏选择对齐方法并 `Save Parameters`，然后 `Start Experiment`，再点击单独的 `Enable GSensor`。对齐方法从 Start 起在本场实验内锁定；Start 本身不自动启用 GSensor。
 2. 确认最新、已写完的图片到达正确 run 的目录。
-3. 打开 GSensor 页面，先选晶体 Full mode Yes/No，依次按 Step 指示标注 u/v 边上的 t/e/o 点及对应的 opposite/w 边，再按提示标 kernel corner/outer point，选 corner A/B/C 与 3D candidate，核对预览和 Image Alignment，最后点击 `Confirm selected candidate`。具体步骤随 Full mode 分支变化，以当前提示为准。基线图片在初始化期间冻结；不要把页面显示旧基线误认为相机停止。
+3. 打开 GSensor 页面，先选晶体 Full mode Yes/No，依次按 Step 指示标注 u/v 边上的 t/e/o 点及对应的 opposite/w 边，再按提示标 kernel corner/outer point，选 corner A/B/C 与 3D candidate，核对预览，最后点击 `Confirm selected candidate`。对齐方法沿用 Central 启动前保存的值；GSensor 不再提供单独的 Image Alignment 配置区块。具体步骤随 Full mode 分支变化，以当前提示为准。基线图片在初始化期间冻结；不要把页面显示旧基线误认为相机停止。
 4. 保持相机继续产出图片，确认 GSensor 转入测量状态，并出现新的有效帧。
 5. Central 和 Controller 的 GSensor 状态、run、版本及 `growth_input.available` 要相互对应，再考虑 G 目标或适应。
 
-首日对齐方式优先使用现场已验证的配置。`none` 不需要 LoFTR，但不意味着所有图像条件都满足测量要求。确认后的对齐切换、重新标注可能重建测量段；不要在闭环首次联调时同时改变多项条件。
+首日对齐方式优先使用现场已验证的配置。`none` 不需要 LoFTR，但不意味着所有图像条件都满足测量要求。对齐方法统一在 Central 参数栏设置，GSensor 的测量结果仍可显示实际预览诊断；标注确认、重新标注、停用后再启用或服务恢复都不能更换方法。需要更换时，结束旧实验并在新实验启动前设置。重新标注及其他图像参数更新仍可能重建测量段；不要在闭环首次联调时同时改变多项条件。
 
 图像相关常见故障：目录不一致、相机写入上一场 run、文件尚未写完、文件名/序号不符合解析规则、时间或序号重置、图片无法解码、标定比例不对、晶体不完整或检测不可靠。检查 GSensor `image_scan` 和页面具体提示，再决定是否确认序号重置或重新初始化；不要只改文件名来掩盖旧帧问题。
 

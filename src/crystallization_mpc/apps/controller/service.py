@@ -31,6 +31,7 @@ from crystallization_mpc.apps.controller.process import (
     OpcUaNodeConfig,
     ProcessAdapter,
     ProcessMeasurementPending,
+    ProcessWritePending,
     ProcessState,
     ProcessWriteResult,
 )
@@ -179,6 +180,7 @@ class ControllerService(OnlineParametersMixin):
         self.last_process_state: dict[str, Any] | None = None
         self.last_process_write: dict[str, Any] | None = None
         self.process_wait: dict[str, Any] | None = None
+        self.process_write_wait: dict[str, Any] | None = None
         self.process_wait_count = 0
         self.process_activation_pending = False
         self.last_control_output: dict[str, Any] | None = None
@@ -403,6 +405,7 @@ class ControllerService(OnlineParametersMixin):
                 "last_state": copy.deepcopy(self.last_process_state),
                 "last_write": copy.deepcopy(self.last_process_write),
                 "waiting": copy.deepcopy(self.process_wait),
+                "write_wait": copy.deepcopy(self.process_write_wait),
                 "wait_count": self.process_wait_count,
                 "activation_pending": self.process_activation_pending,
             },
@@ -561,7 +564,7 @@ class ControllerService(OnlineParametersMixin):
             method = gsensor.get("alignment_method")
             if method is not None:
                 from crystallization_mpc.messaging.parameter_policy import validate_parameter_changes
-                validate_parameter_changes({"gsensor": {"alignment_method": method}})
+                validate_parameter_changes({"gsensor": {"alignment_method": method}}, allow_historical_alignment=True)
             self.gsensor_alignment_method = method
             self.gsensor_sample_floor_frame_seq = max(
                 sample_floor,
@@ -647,6 +650,7 @@ class ControllerService(OnlineParametersMixin):
                 if (not isinstance(waiting, dict)
                         or waiting.get("reason") not in {
                             "negative_concentration", "process_data_timeout",
+                            "process_transport_wait", "process_write_unconfirmed",
                         }):
                     raise ValueError("Controller process waiting metadata is invalid.")
                 if waiting["reason"] == "negative_concentration":
@@ -663,6 +667,23 @@ class ControllerService(OnlineParametersMixin):
                         _timestamp_value(waiting["last_valid_read_at"], "process waiting last_valid_read_at")
                 _timestamp_value(waiting.get("waiting_since"), "process waiting waiting_since")
             self.process_wait = copy.deepcopy(waiting)
+            write_wait = process_io.get("write_wait")
+            if write_wait is not None:
+                if not isinstance(write_wait, dict):
+                    raise ValueError("Controller write waiting metadata is invalid.")
+                command = write_wait.get("command")
+                if (not isinstance(command, dict) or command.get("run_id") != self.current_run_id
+                        or not isinstance(command.get("command_id"), str)
+                        or type(command.get("tick_seq")) is not int):
+                    raise ValueError("Controller unresolved write belongs to another experiment.")
+                from crystallization_mpc.apps.opcua_writer.commands import WriteCommand
+                from crystallization_mpc.messaging.schema import build_envelope
+                WriteCommand.from_envelope(build_envelope(
+                    src="controller", dst="opcua_writer", msg_type="command",
+                    name="process.setpoint.write", seq=command["tick_seq"], payload=command,
+                    correlation_id=command["command_id"]))
+            # A real process restart still requires End; never resume writes here.
+            self.process_write_wait = copy.deepcopy(write_wait)
             wait_count = process_io.get("wait_count", 0)
             activation_pending = process_io.get("activation_pending", False)
             if type(wait_count) is not int or wait_count < 0 or type(activation_pending) is not bool:
@@ -843,7 +864,7 @@ class ControllerService(OnlineParametersMixin):
                 if not isinstance(events, dict):
                     raise ValueError("Invalid runtime event journal.")
                 for event_id, entry in events.items():
-                    event = parse_runtime_command(entry["command"])
+                    event = parse_runtime_command(entry["command"], allow_historical_alignment=True)
                     if event_id != event.event_id or event.run_id != self.current_run_id:
                         raise ValueError("Runtime event journal belongs to another run.")
                     if not isinstance(entry.get("result"), dict):
@@ -1302,6 +1323,7 @@ class ControllerService(OnlineParametersMixin):
             self.last_process_state = None
             self.last_process_write = None
             self.process_wait = None
+            self.process_write_wait = None
             self.process_wait_count = 0
             self.process_activation_pending = False
             self.influx_write_success_count = 0
@@ -1424,9 +1446,11 @@ class ControllerService(OnlineParametersMixin):
                         self.state = ControllerState.RECOVERY_REQUIRED
                     raise RuntimeError(f"Controller process disconnect failed: {exc}") from exc
             previous_process_wait = self.process_wait
+            previous_process_write_wait = self.process_write_wait
             previous_activation_pending = self.process_activation_pending
             self.state = ControllerState.STOPPED
             self.process_wait = None
+            self.process_write_wait = None
             self.process_activation_pending = False
             if confirming_interruption:
                 self.recovery_status = "restored"
@@ -1450,6 +1474,7 @@ class ControllerService(OnlineParametersMixin):
                 # turn this failed End into permission to control again.
                 self.state = ControllerState.RECOVERY_REQUIRED if confirming_recovery else ControllerState.ERROR
                 self.process_wait = previous_process_wait
+                self.process_write_wait = previous_process_write_wait
                 self.process_activation_pending = previous_activation_pending
                 self.stopped_at = previous_stopped_at
                 self.recovery_status = "confirmation_required" if confirming_recovery else "persistence_error"
@@ -2218,17 +2243,97 @@ class ControllerService(OnlineParametersMixin):
                 "tick_seq": self.control_tick_count, "output_generated": executed,
                 "process_write_attempted": False}
 
+    def _rollback_uncommitted_write_patch_locked(self, tick: ControllerTickInput) -> None:
+        """Keep an uncommitted edit Pending without replaying a completed tick."""
+        if tick.runtime_update is None:
+            return
+        event_id = tick.runtime_update["event_id"]
+        if (self.runtime_pending is None
+                and (self.run_parameter_pending is None
+                     or self.run_parameter_pending.get("controller_applied"))):
+            return
+        if not self.adapter.rollback_runtime_refresh(event_id):
+            raise RuntimeError("Could not roll back the staged edit after write timeout.")
+        if dict(self.adapter.runtime_configuration() or {}) != self.runtime_configuration_current:
+            raise RuntimeError("Staged edit rollback did not restore the active configuration.")
+        refresh = self.adapter.refresh_status() or {}
+        if (refresh.get("count", 0) != self.runtime_refresh["count"]
+                or refresh.get("segment_id", 0) != self.runtime_refresh["segment_id"]):
+            raise RuntimeError("Staged edit rollback did not restore refresh counters.")
+
+    def _wait_for_write_locked(self, snapshot: Mapping[str, Any], *, now: float,
+                               executed: bool = False) -> dict[str, Any]:
+        previous = self.process_write_wait or {}
+        self.process_write_wait = {**previous, **copy.deepcopy(dict(snapshot))}
+        if self.process_wait is None:
+            self.process_wait = {
+                "reason": "process_write_unconfirmed",
+                "waiting_since": _utc_timestamp(self._wall_clock()),
+            }
+            self._audit_process_wait_locked("write_wait", self.process_wait)
+        self.process_wait_count += 1
+        self.last_error = None
+        self.last_process_error = None
+        self._next_tick_monotonic = now + min(float(self._active_parameter("dt", 5.0)), 1.0)
+        if not self._try_persist_state_locked():
+            self.state = ControllerState.ERROR
+            self._next_tick_monotonic = None
+            self.last_error = "Could not persist Controller write waiting state."
+            raise RuntimeError(self.last_error)
+        return {"executed": executed, "reason": "waiting_process_write",
+                "waiting_for_data": True, "tick_seq": self.control_tick_count,
+                "process_write_attempted": bool(executed and snapshot.get("command_sent", snapshot.get("sent", False))),
+                "process_write_succeeded": None}
+
+    def confirm_process_recovery(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Operator attestation only; the Writer must confirm before resuming."""
+        with self._lock:
+            if (self.state != ControllerState.RUNNING or payload.get("run_id") != self.current_run_id
+                    or payload.get("confirmation") is not True):
+                raise ValueError("Confirm the current running experiment and device state first.")
+            waiting = self.process_write_wait or {}
+            command = waiting.get("command") or {}
+            if (not waiting.get("pending", True) or not waiting.get("manual_confirmation_required")
+                    or payload.get("command_id") != command.get("command_id")):
+                raise ValueError("This experiment has no matching write awaiting manual confirmation.")
+            snapshot = self.process_adapter.confirm_write_recovery()
+            self.process_write_wait = {**waiting, **copy.deepcopy(dict(snapshot))}
+            if not self._try_persist_state_locked():
+                self.state = ControllerState.ERROR
+                self._next_tick_monotonic = None
+                raise RuntimeError("Could not persist the device-state confirmation request.")
+            self._control_wakeup.set()
+            return {"accepted": True, "pending": True, "run_id": self.current_run_id,
+                    "command_id": command["command_id"]}
+
     def _control_tick_once(self, *, now: float | None = None) -> dict[str, Any]:
         """Execute one scheduler tick; exposed for deterministic integration tests."""
 
         with self._lock:
             if self.state != ControllerState.RUNNING:
                 return {"executed": False, "reason": "not_running"}
+            now_value = self._monotonic_clock() if now is None else float(now)
+            if self.process_write_wait is not None:
+                try:
+                    snapshot = self.process_adapter.write_recovery_status()
+                    if not isinstance(snapshot, Mapping):
+                        raise TypeError("Write recovery status must be an object.")
+                    self.process_write_wait.update(copy.deepcopy(dict(snapshot)))
+                    if snapshot.get("pending", True):
+                        return self._wait_for_write_locked(snapshot, now=now_value)
+                    if not self.process_write_wait.get("reconciled"):
+                        self.process_write_wait["reconciled"] = True
+                        self._audit_process_wait_locked("write_reconciled", self.process_wait or {})
+                except Exception as exc:
+                    self.state = ControllerState.ERROR
+                    self._next_tick_monotonic = None
+                    self.last_error = f"Controller write reconciliation failed: {exc}"
+                    self._try_persist_state_locked()
+                    raise RuntimeError(self.last_error) from exc
             if self._check_growth_timeout_locked(now=now):
                 return self._wait_for_growth_locked(now=now)
             self._last_committed_diagnostics = None
             self._last_diagnostics_capture_error = None
-            now_value = self._monotonic_clock() if now is None else float(now)
             dt = float(self._active_parameter("dt", 5.0))
             if not math.isfinite(dt) or dt <= 0:
                 self._reject_pending_runtime_locked("Controller parameter dt is invalid.")
@@ -2326,10 +2431,15 @@ class ControllerService(OnlineParametersMixin):
                     raise TypeError(
                         "Controller adapter step() must return ControllerStepResult or None."
                     )
+                if recovering_input and (output is None or not output.valid):
+                    raise RuntimeError("Recovery baseline did not produce a valid measured result.")
                 if recovering_process:
                     recovered_wait = self.process_wait
                     self.process_wait = None
                     self._audit_process_wait_locked("measurement_resumed", recovered_wait)
+                    if self.process_write_wait is not None:
+                        self.process_adapter.clear_write_recovery()
+                        self.process_write_wait = None
                 if recovering_growth:
                     self._growth_recovery_pending = False
             except Exception as exc:
@@ -2371,6 +2481,26 @@ class ControllerService(OnlineParametersMixin):
                         process_write = self.process_adapter.write_jacket_setpoint(
                             output.T_j_set
                         )
+                    except ProcessWritePending as exc:
+                        # The numerical attempt is recorded once. Only an
+                        # uncommitted parameter transaction is rolled back;
+                        # it retains its event ID and Pending receipt.
+                        try:
+                            self._rollback_uncommitted_write_patch_locked(tick)
+                            snapshot = exc.to_dict()
+                            self.process_write_wait = copy.deepcopy(snapshot)
+                            self.process_write_wait["computed_tick"] = tick.tick_seq
+                            self.process_write_wait["computation_completed"] = True
+                            self.process_write_wait["runtime_patch_rolled_back"] = tick.runtime_update is not None
+                            self._record_control_output_locked(
+                                tick, output, process_state=process_state,
+                                process_write_attempted=bool(snapshot.get("command_sent", snapshot.get("sent", True))),
+                                process_write_error=str(exc),
+                            )
+                        except Exception as commit_exc:
+                            self._record_failed_tick_locked(tick, str(commit_exc), process_state=process_state)
+                            raise RuntimeError(str(commit_exc)) from commit_exc
+                        return self._wait_for_write_locked(self.process_write_wait, now=now_value, executed=True)
                     except ProcessMeasurementPending as exc:
                         # The adapter guarantees this type means no command
                         # was published. Keep the completed numerical tick and
@@ -2658,7 +2788,8 @@ class ControllerService(OnlineParametersMixin):
         process = integrations["process"]
         process.update(copy.deepcopy(dict(self.process_adapter.status())))
         waiting = self.state == ControllerState.RUNNING and (
-            self.process_wait is not None or process.get("waiting_for_data") is True
+            self.process_wait is not None or self.process_write_wait is not None
+            or process.get("waiting_for_data") is True
         )
         wait_metadata = self.process_wait or process.get("last_invalid_state") or {}
         process.update(
@@ -2678,6 +2809,7 @@ class ControllerService(OnlineParametersMixin):
                 "last_invalid_state": copy.deepcopy(wait_metadata) if wait_metadata else None,
                 "wait_count": self.process_wait_count,
                 "activation_pending": self.process_activation_pending,
+                "write_recovery": copy.deepcopy(self.process_write_wait),
             }
         )
         influx = integrations["influxdb"]

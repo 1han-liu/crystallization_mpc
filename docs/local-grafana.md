@@ -17,8 +17,8 @@
 目标图，下面 **Process Measurements & Diagnostics** 展示其余 10 张过程图。
 实验和时间筛选共用。
 只进行 sigma 控制时，G 目标图可以没有数据；没有真实设备时 Count 图可以没有数据。
-`Samples / completed fits / failures` 仍在 Central 的拟合状态行；新采集诊断的
-实验另在下方默认折叠诊断分组中显示本段样本、最低样本要求和刷新次数。
+`Samples / completed fits / failures` 仍在 Central 的拟合状态行；过程分组末尾的
+**Filter Covariance** 是唯一保留的滤波诊断图，刷新次数可在其悬停详情中查看。
 真实拟合参数变化可查看 Growth parameters。
 
 2026-10-13：默认仪表盘的说明、无数据提示及实验筛选标签已统一为英文；
@@ -72,12 +72,46 @@ aggregateWindow 平均值掩盖快速运行的配置切换；缺测不补零，s
 `verified-review.md`。完整本地回归：119 passed、7 subtests passed（含 30 项
 只读本机 Flux 检查）。MATLAB 源文件摘要不变；无 GSensor 修改，无 Git push。
 
-## Controller 滤波刷新与控制诊断（2026-10-11）
+## 当前滤波诊断图：Filter Covariance（2026-11-01）
 
-同一默认 UID `crystallization-mpc-analysis` 的底部追加默认折叠的
-**Controller Filter & Control Diagnostics**。展开后有 11 个新增面板，原有
-12 张过程/控制图、编号、查询、位置及实验/时间筛选不变。此功能只增加观察，
-不调整 Q/R、初始化 P、拟合方法、控制约束或物理边界，不刷新 GSensor。
+保持默认 UID `crystallization-mpc-analysis`、实验筛选、UTC 时间筛选和原有
+12 张过程/控制图的编号、位置及查询不变。移除 **Controller Filter & Control
+Diagnostics** 整个分组及其余 10 个面板，只迁移原相对协方差面板（id 21），
+改名 **Filter Covariance**，全宽放在 **Process Measurements & Diagnostics**
+末尾。运行时仪表盘生成脚本读取同一源 JSON，重新生成也保持这一布局。
+
+同一张图绘制七条 `Pii / Pii_initial`：主 EKF 的 Temperature、Temperature
+Rate、Concentration、Concentration Rate，以及 G 滤波器的 Growth Rate、Growth
+Slope、Growth Curvature。后三条对应 G、dG/dt、d²G/dt²，不是三个动力学参数滤波器。
+三个预留参数滤波器不增加恒定曲线。G 的三条曲线使用虚线。
+
+纵轴为正值对数刻度，标题标注 **Reset Level = 1**，亮灰虚线 `y=1` 仅代表构造初值。
+轴名简写为 `P / P₀`，刻度使用自动精度科学计数法（如 `1e-3`）；隐藏水平背景网格及
+次刻度空值占位，突出重置基准线。原始 P/P0 的悬停详情继续保留三位小数的科学计数法。
+刷新后这些对角项应回到 1，
+不是 P 清零，也不要求后续协方差一直下降。只有 `calculated`、诊断采集有效、
+`diag_refresh_applied=true`、`diag_snapshot_stage=refresh_init` 且刷新次数大于零的
+原生周期才画橙色 **Reset** 点。启动、普通周期、G 输入重锚和无效周期不画此点。
+它标记程序记录的已完成刷新，必须结合该点的实际比例核对；不宣称完整矩阵或
+滤波性能通过验收。G 暂停时可一直为 1，不能仅凭数值为 1 判定发生重置。
+
+悬停详情包括 Cycle、Reset Count、Control Time (min)，以及七个实际 P 和 P0；
+原始协方差单位标在名称中。原始值和元数据使用独立的隐藏线性轴、不绘制线和点，
+保留在 tooltip，避免改变比例图的纵轴。对数曲线遇到缺失、零或负 P/P0 时留空，
+不补零或改成小正数；有记录的原始值仍可在悬停详情中核对。比例缺失显示空白，
+原始值及周期详情缺失显示 `Unavailable`，均不代表零。
+
+曲线保留真实 UTC 和原始周期点，不平均聚合、不跨 null 连线；同时间戳不同
+`acceptance_tick` 的点不合并。完整 run_id 始终用于筛选、分组；短编号冲突时显示
+完整编号。没有诊断的旧实验不会补造曲线。历史诊断字段和原始记录继续保留，
+不删除数据库数据，不改变 Controller、滤波、控制或遥测采集算法。
+
+## 历史诊断字段与旧面板说明（2026-10-11）
+
+旧版曾在默认仪表盘底部提供 **Controller Filter & Control Diagnostics** 分组
+和 11 个面板。2026-11-01 起已采用上节的单张协方差图布局。以下旧面板名称、
+核对方式和字段目录仅用于解释历史截图与原始记录，不表示当前仍显示这些面板。
+采集字段继续保留；不调整 Q/R、初始化 P、拟合方法或控制边界，不刷新 GSensor。
 
 | 面板 | 主要证据与单位 |
 |---|---|

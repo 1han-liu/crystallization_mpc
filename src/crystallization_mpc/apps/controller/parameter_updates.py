@@ -130,10 +130,10 @@ class OnlineParametersMixin:
                           and item.get("result", {}).get("controller_applied") is True),
                          key=lambda item: item["result"]["revision"])
         for entry in entries:
-            event = RunParametersUpdatePayload.from_mapping(entry["command"])
+            event = RunParametersUpdatePayload.from_mapping(entry["command"], allow_historical_alignment=True)
             if event.run_id != self.current_run_id or event.experiment_started_at != self.started_at:
                 raise ValueError("Run parameter journal belongs to another experiment.")
-            applied_changes = validate_parameter_changes(entry["result"].get("parameter_changes", {}))
+            applied_changes = validate_parameter_changes(entry["result"].get("parameter_changes", {}), allow_historical_alignment=True)
             if not applied_changes or any(
                     key not in event.changes.get(section, {}) or event.changes[section][key] != value
                     for section, changes in applied_changes.items() for key, value in changes.items()):
@@ -153,7 +153,7 @@ class OnlineParametersMixin:
         self.measurement_parameter_revision = revision
         expected_measurement_revision = max(
             (entry["result"]["revision"] for entry in entries
-             if measurement_parameter_changes(entry["result"].get("parameter_changes", {}))), default=0)
+             if measurement_parameter_changes(entry["result"].get("parameter_changes", {}), allow_historical_alignment=True)), default=0)
         if revision != expected_measurement_revision:
             raise ValueError("Measurement parameter revision disagrees with its committed journal.")
         elapsed = saved.get("elapsed_s", 0.0)
@@ -180,7 +180,7 @@ class OnlineParametersMixin:
                 raise ValueError("Accumulated control time disagrees with the algorithm checkpoint.")
         pending = self.run_parameter_pending
         if pending is not None:
-            event = RunParametersUpdatePayload.from_mapping(pending["command"])
+            event = RunParametersUpdatePayload.from_mapping(pending["command"], allow_historical_alignment=True)
             entry = document["runtime_controls"]["events"].get(event.event_id)
             if (entry is None or entry["command"] != event.to_dict()
                     or entry["result"].get("status") != "pending"
@@ -191,8 +191,8 @@ class OnlineParametersMixin:
                     or pending["controller_applied"] != (pending["phase"] == "confirming")
                     or event.expected_revision + int(pending["controller_applied"]) != self.runtime_revision
                     or bool(pending.get("requires_gsensor")) != bool(
-                        measurement_parameter_changes(pending["changes"]) or pending["changes"].get("gsensor"))
-                    or pending.get("measurement_changed") != bool(measurement_parameter_changes(pending["changes"]))):
+                        measurement_parameter_changes(pending["changes"], allow_historical_alignment=True) or pending["changes"].get("gsensor"))
+                    or pending.get("measurement_changed") != bool(measurement_parameter_changes(pending["changes"], allow_historical_alignment=True))):
                 raise ValueError("Pending parameter decision disagrees with its journal.")
             if (not pending["changes"] or any(
                     key not in event.changes.get(section, {}) or event.changes[section][key] != value

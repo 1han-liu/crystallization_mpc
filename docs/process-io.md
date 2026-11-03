@@ -40,7 +40,7 @@ OPC UA ←─ opcua-writer   ←─ controller.to.opcua_writer ←─ Controller
 
 示例只展示一个节点，`Quality` 文本取自固定版本容器的实际输出；交付一个 `ProcessState` 必须集齐同设备、同纳秒时间戳的五个节点。完整轮次可以跨多条消息到达，一条消息也可包含多个轮次。时间戳应由实际采集生成，不能复制示例时间。不要把纳秒整数通过 JavaScript `Number` 中转，否则可能丢失精度。
 
-采集时间使用 `time_source="collection_start"`，是同一次 Telegraf 采集的标签，不代表设备上的原子快照。错误质量、错误节点映射、非有限数值或缺字段不会形成新状态。默认五秒后旧状态过期；启动后的首份有效采样默认以十秒为超时判定。这些采样时间用于判断数据是否超时，不再作为自动结束实验的等待上限；RabbitMQ 连接本身的失败仍按故障处理。重连后必须取得连接建立之后的新完整轮次。检查点仅保留历史诊断，不恢复为新测量。
+采集时间使用 `time_source="collection_start"`，是同一次 Telegraf 采集的标签，不代表设备上的原子快照。错误质量、错误节点映射、非有限数值或缺字段不会形成新状态。默认五秒后旧状态过期；启动后的首份有效采样默认以十秒为超时判定。这些采样时间用于判断数据是否超时，不是自动结束实验的等待上限；RabbitMQ 暂时断连也保留当前实验并后台重连。重连后必须取得连接建立之后的新完整轮次。检查点仅保留历史诊断，不恢复为新测量。
 
 当同一轮五项数据齐全、质量良好、时间新鲜，且除 `c < 0` 外均通过接口校验时，Controller 将负浓度作为可恢复的测量等待：保持当前实验与采集连接，暂停算法计算和设备写入，不推进算法周期或控制时间，也不把负浓度替换为零或继续使用旧浓度。启动时遇到这种情况也保留同一实验，等待有效初值。收到新的、五项全部有效且 `c >= 0` 的采样后，同一实验自动初始化或继续控制，无须 End 后重建实验。恢复后的首个有效周期用于更新测量基线，设备写入继续暂停；后续有效周期才可按原有写入开关发送命令。此行为不改变等待期间设备本身最后一次设定值，现场控制软件继续运行。
 
@@ -48,7 +48,7 @@ OPC UA ←─ opcua-writer   ←─ controller.to.opcua_writer ←─ Controller
 
 等待期间，`integrations.process.waiting_for_data=true`，并提供 `wait_reason`、`waiting_since` 和 `last_invalid_state`。负浓度的原因是 `negative_concentration`，`last_invalid_state.raw_c` 保留原始负值；网页显示 **Waiting for valid process data**。通信等待的原因是 `process_data_timeout`，网页显示 **Waiting for fresh process data. Communication timed out.**；它没有浓度数值时不补零。提示均说明算法与设备写入暂停。Telegraf 能采集时继续保留原始 `crystallizer_raw`；没有新算法计算时不会生成新的 `controller_measurement` 曲线点。
 
-等待不放宽安全校验。新收到的数据若明确出现坏质量、错误 NodeId、非有限值、负计数、绝对温度无效或消息格式错误，仍按故障处理。Controller 与 RabbitMQ 的连接失败、停止或中断，以及已发送写命令但回执未知、算法异常和持久化失败也仍是故障。真正故障停止后的实验需要 End Experiment，不会自动恢复；容器重启后也不会因保存了等待状态而自动启动设备控制。
+等待不放宽安全校验。能明确分类为通信中断的坏质量丢弃并等待；其他坏质量、错误 NodeId、非有限值、负计数、绝对温度无效或消息格式错误仍按故障处理。通信断连与写回执超时保留当前实验，分别进入重连或旧指令核实等待；算法异常、持久化失败等独立故障仍需人工处理。真正故障停止后的实验需要 End Experiment，不会自动恢复；Controller 进程重启也不会因保存了等待状态而自动启动设备控制。
 
 启用实时 GSensor 后，Controller 也会等待新鲜有效的 G 测量。默认 `dt_G=15s`，G 新鲜度上限为 `2 × dt_G=30s`；这只是判断测量是否陈旧的阈值，不再是终止实验的时限。首次测量尚未准备好或既有 G 超过新鲜度上限时，同一实验保持 `running`，暂停控制计算、适应和设备写入，持续等待，不补造 G 或沿用过期值。该等待同样适用于 σ 目标；明确关闭 GSensor 时仍走原有的非相机输入逻辑。
 
@@ -66,9 +66,17 @@ G 等待状态见 Controller `growth_input.growth_wait`：原因是 `growth_data
 
 时间字段采用带时区的 ISO 8601。`tick_seq` 是 Controller 周期序号。`status` 为 `success`、`failed` 或 `unknown`。成功的 `write_result` 包含 `setpoint_K, setpoint_C, written_at, verified, readback_K`。Controller 只有收到身份匹配、读回验证通过的结果才记录成功；发布到 RabbitMQ 不代表设备已写入。
 
-默认命令有效期与等待回执时间均为五秒。超时为结果未知并进入 Controller 现有错误状态，不生成新命令自动补发。`opcua-writer` 的 SQLite 日志在写前记录 `executing`，写后记录结果；重复命令返回持久化结果。重启遇到未完成记录时返回 `unknown`，禁止猜测并重新写设备。这并不承诺物理动作“恰好一次”。消息消费 ACK 必须晚于结果发布确认。
+默认命令有效期与等待回执时间均为五秒。等待回执超时保留当前实验，暂停新的优化、积分、拟合和设备指令，不生成新命令自动补发。Controller 保存原命令身份，通过 `process.setpoint.status` 查询 Writer 的已保存结果；查询不执行设备写入。Writer 尚未收到该命令时，查询会保存取消记录，阻止该旧命令随后到达时执行。迟到回执可核实恢复条件，但不会把原超时周期改报为成功。
+
+`opcua-writer` 的 SQLite 日志在写前记录 `executing`，写后记录结果；重复命令返回持久化结果。重启遇到未完成记录时保留 `unknown`，禁止猜测并重新写设备。这并不承诺物理动作“恰好一次”。消息消费 ACK 必须晚于结果发布确认。
+
+结果无法自动核实时，Central 显示 **Confirming previous command** 及 **Confirm device state and resume**。操作员必须先核实设备当前状态，并确认旧指令不会继续执行，再明确确认；按钮只转发该 run/command 的确认，不发送夹套设定值。Writer 单独保存核实记录，不覆盖历史 `unknown`。确认送达也不等于已恢复：需要 Writer 对应确认和恢复边界之后的完整有效测量，首个恢复周期只建立测量基线、不写设备，下一正常周期才恢复控制。无法核实时继续保留当前实验等待，操作员仍可 End Experiment。
+
+运行状态与 `integrations.process.write_recovery` 可查看等待原因、原命令及是否需要人工确认。网页分别显示 **Reconnecting**、**Waiting for process data**、**Confirming previous command**；等待没有自动结束实验的时长上限。已经提交的参数和滤波刷新不重复执行；未提交更新保留原事件身份和 Pending，恢复基线不应用参数，后续有效周期只应用一次。Controller 真正重启、状态损坏、算法故障等不属于通信重连自动续跑。
 
 ## 配置迁移与生产启动
+
+通信恢复协议需要 Controller、`opcua-writer` 和 Central 使用同一版本；部署时在实验结束后一起更新这三个服务。旧 Writer 不支持 `process.setpoint.status` / `process.setpoint.confirm`，只更新 Controller 不能完成写入超时恢复。状态查询使用独立 `query_id` 作为消息关联标识，并回显恢复代次；原写入仍以 `command_id` 去重。
 
 已有 `.env` 不会被自动修改。参考 `.env.example` 手工迁移；旧 `CONTROLLER_OPCUA_*` 不再启用设备直连。
 
@@ -160,7 +168,7 @@ $controllerStatus.last_control_output | ConvertTo-Json -Depth 8
 
 完成观察后在 Central 停止实验，确认模拟器保持最后写入的设定值。停止实验会断开 Controller 的过程连接，因此停止后的 `connected=false` 或 `sample_valid=false` 不代表此前的读写周期失败；已完成周期的输入和写回结果保留在 `last_control_output` 中。
 
-联调时记录 endpoint、节点映射、服务版本、实验 `run_id`、测量变化、匹配命令/回执和独立读回值。组员模拟器和真实硬件应分别验收，不能把模拟器上的结果当作现场设备验收。故障恢复检查应确认过期数据不再用于新周期，恢复后新实验必须取得新完整测量；不要复制历史消息或重放历史控制命令来模拟恢复。
+联调时记录 endpoint、节点映射、服务版本、实验 `run_id`、测量变化、匹配命令/回执和独立读回值。组员模拟器和真实硬件应分别验收，不能把模拟器上的结果当作现场设备验收。通信恢复检查应确认仍为同一个 run、过期数据不再用于新周期，恢复后取得新完整测量；不要复制历史消息或重放历史控制命令来模拟恢复。人工 End 后的迟到回执不能恢复该实验。
 
 ## Telegraf 固定版本运行约束
 

@@ -70,6 +70,43 @@ class ProcessDataTimeoutPending(ProcessMeasurementPending):
         return metadata
 
 
+class ProcessTransportPending(ProcessMeasurementPending):
+    """A temporarily unavailable bus; no new device command was submitted."""
+
+    reason = "process_transport_wait"
+
+    def __init__(self, *, waiting_since: str, detail: str = "Reconnecting to the process message bus.") -> None:
+        self.waiting_since = waiting_since
+        self.detail = detail
+        self.read_at = None
+        self.raw_c = None
+        ProcessSafetyError.__init__(self, detail)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"reason": self.reason, "waiting_since": self.waiting_since, "detail": self.detail}
+
+
+class ProcessWritePending(ProcessAdapterError):
+    """A completed numerical cycle has an unresolved device-write outcome.
+
+    This deliberately does not inherit ProcessMeasurementPending: the write may
+    already have reached the device and must never be blindly repeated.
+    """
+
+    reason = "process_write_confirmation_pending"
+
+    def __init__(self, snapshot: Mapping[str, Any]) -> None:
+        import copy
+
+        self.snapshot = copy.deepcopy(dict(snapshot))
+        super().__init__(str(snapshot.get("detail") or "Waiting to confirm the previous device command."))
+
+    def to_dict(self) -> dict[str, Any]:
+        import copy
+
+        return copy.deepcopy(self.snapshot)
+
+
 @dataclass(frozen=True)
 class ProcessState:
     """One real-equipment snapshot using the Controller contract units.
