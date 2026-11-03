@@ -249,12 +249,15 @@ function renderProcessSource() {
   const source = state.processSource;
   const elapsed = Math.max(0, (Date.now() - state.processSourceReceivedAt) / 1000);
   const age = typeof source?.sample_age_s === "number" ? source.sample_age_s + elapsed : null;
+  const fresh = age !== null && age >= 0 && source.sample_max_age_s > 0
+    && age <= source.sample_max_age_s;
   let kind = source?.status || "unavailable";
   // A hanging HTTP request must not leave the last green card on screen.
-  if (kind === "ready" && (source.ready !== true || source.connected !== true
-      || age === null || age < 0 || !(source.sample_max_age_s > 0)
-      || age > source.sample_max_age_s)) kind = "stale";
+  if (kind === "ready" && (source.ready !== true || source.connected !== true || !fresh)) kind = "stale";
   const ready = kind === "ready";
+  const showingRaw = kind === "invalid" && source.connected === true && fresh
+    && typeof source.raw_values?.c === "number";
+  const values = ready ? source.values : showingRaw ? source.raw_values : null;
   const labels = {
     ready: "Receiving normally", waiting: "Waiting for data", invalid: "Invalid data",
     stale: "Data expired", disconnected: "Disconnected", disabled: "Monitoring disabled",
@@ -277,15 +280,17 @@ function renderProcessSource() {
   if (kind === "waiting" && source?.missing_fields?.length) {
     message += ` Missing: ${source.missing_fields.join(", ")}.`;
   }
+  if (showingRaw) message += " Showing raw readings. This sample cannot be used for control.";
   document.querySelector("#process-source-message").textContent = message;
   for (const name of ["T", "T_j", "c", "count_middle", "T_j_set"]) {
-    const value = ready ? source.values?.[name] : null;
+    const value = values?.[name];
     document.querySelector(`#process-source-${name}`).textContent = typeof value === "number" && Number.isFinite(value)
       ? `${value.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 })}${name.startsWith("T") ? " °C" : ""}` : "—";
   }
   const collected = source?.collected_at ? formatExperimentTime(source.collected_at) : null;
+  const sampleLabel = showingRaw ? "Latest complete raw sample" : "Latest complete sample";
   document.querySelector("#process-source-sample").textContent = collected
-    ? `Latest complete sample: ${collected} · age ${Math.max(0, age ?? 0).toFixed(1)} s · freshness limit ${source.sample_max_age_s} s`
+    ? `${sampleLabel}: ${collected} · age ${Math.max(0, age ?? 0).toFixed(1)} s · freshness limit ${source.sample_max_age_s} s`
     : "No complete sample received.";
   const controller = state.controllerStatus;
   const process = controller?.integrations?.process;

@@ -21,6 +21,9 @@ from crystallization_mpc.apps.controller.rabbit_process import (
 )
 
 
+NEGATIVE_CONCENTRATION = "Process value is outside its valid range: c."
+
+
 class ProcessSourceMonitor:
     def __init__(self, config: RabbitProcessConfig, *, enabled=True,
                  clock_ns=time.time_ns, connection_factory=None):
@@ -135,6 +138,11 @@ class ProcessSourceMonitor:
         if len(self._invalid_rounds) > 128:
             self._invalid_rounds = set(sorted(self._invalid_rounds)[-128:])
         self._rounds.pop(stamp, None)
+        if stamp == self._sample_ns and self._sample and self._sample["c"] < 0:
+            self._sample = None
+        self._record_problem(stamp, message)
+
+    def _record_problem(self, stamp, message):
         if stamp >= self._problem_ns:
             self._problem_ns = stamp
             self._problem = message
@@ -196,7 +204,7 @@ class ProcessSourceMonitor:
                     self._reject(stamp, f"Invalid numeric value for {name}.")
                     continue
                 value = float(value)
-                if ((name in ("c", "count_middle") and value < 0)
+                if ((name == "count_middle" and value < 0)
                         or (name in ("T", "T_j", "T_j_set") and value <= -CELSIUS_TO_KELVIN)):
                     self._reject(stamp, f"Process value is outside its valid range: {name}.")
                     continue
@@ -204,6 +212,9 @@ class ProcessSourceMonitor:
                 if name in values and values[name] != value:
                     self._reject(stamp, f"Conflicting process values for {name}.")
                     continue
+                if name == "c" and value < 0:
+                    # Assemble the raw round for display while keeping it invalid for control.
+                    self._record_problem(stamp, NEGATIVE_CONCENTRATION)
                 values[name] = value
                 if len(values) == len(FIELDS) and stamp >= self._sample_ns:
                     self._sample = dict(values)
@@ -214,6 +225,7 @@ class ProcessSourceMonitor:
     def status(self):
         with self._lock:
             age = (self._clock_ns() - self._sample_ns) / 1e9 if self._sample is not None else None
+            fresh = age is not None and 0 <= age <= self.config.sample_max_age_s
             problem = self._problem if self._problem_ns >= self._sample_ns else None
             if not self.enabled:
                 state = "disabled"
@@ -223,11 +235,13 @@ class ProcessSourceMonitor:
                 state = "invalid"
             elif age is None:
                 state = "waiting"
-            elif not 0 <= age <= self.config.sample_max_age_s:
+            elif not fresh:
                 state = "stale"
             else:
                 state = "ready"
             values = dict(self._sample) if state == "ready" else {}
+            raw_values = (dict(self._sample) if state == "invalid" and fresh
+                          and problem == NEGATIVE_CONCENTRATION and self._sample["c"] < 0 else {})
             collected_at = (datetime.fromtimestamp(self._sample_ns / 1e9, timezone.utc).isoformat()
                             if self._sample is not None else None)
             newest = self._rounds.get(self._newest_ns, {})
@@ -236,6 +250,7 @@ class ProcessSourceMonitor:
                 "device_id": self.config.device_id,
                 "sample_age_s": age, "sample_max_age_s": self.config.sample_max_age_s,
                 "collected_at": collected_at, "values": values,
+                "raw_values": raw_values,
                 "missing_fields": [] if state == "ready" else [name for name in FIELDS if name not in newest],
                 "error": self._connection_error if not self._connected else problem,
                 "read_only": True,
