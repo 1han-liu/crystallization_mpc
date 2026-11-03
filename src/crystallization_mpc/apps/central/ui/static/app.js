@@ -245,6 +245,21 @@ function configureServiceLinks(links = {}) {
   }
 }
 
+function formatProcessSourceValue(value, name) {
+  const symbol = value && typeof value === "object" && Object.keys(value).length === 1
+    ? value.__mpcrystal_float__
+    : typeof value === "string" && value.startsWith("@mpcrystal:float:")
+      ? value.slice("@mpcrystal:float:".length) : null;
+  const number = typeof value === "number" ? value : null;
+  const text = ["NaN", "+Inf", "-Inf"].includes(symbol) ? symbol
+    : number === null ? "—"
+      : Number.isNaN(number) ? "NaN"
+        : number === Infinity ? "+Inf"
+          : number === -Infinity ? "-Inf"
+            : number.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 });
+  return text === "—" ? text : `${text}${name.startsWith("T") ? " °C" : ""}`;
+}
+
 function renderProcessSource() {
   const source = state.processSource;
   const elapsed = Math.max(0, (Date.now() - state.processSourceReceivedAt) / 1000);
@@ -255,9 +270,7 @@ function renderProcessSource() {
   // A hanging HTTP request must not leave the last green card on screen.
   if (kind === "ready" && (source.ready !== true || source.connected !== true || !fresh)) kind = "stale";
   const ready = kind === "ready";
-  const showingRaw = kind === "invalid" && source.connected === true && fresh
-    && typeof source.raw_values?.c === "number";
-  const values = ready ? source.values : showingRaw ? source.raw_values : null;
+  const values = ready ? source.values : null;
   const labels = {
     ready: "Receiving normally", waiting: "Waiting for data", invalid: "Invalid data",
     stale: "Data expired", disconnected: "Disconnected", disabled: "Monitoring disabled",
@@ -280,17 +293,14 @@ function renderProcessSource() {
   if (kind === "waiting" && source?.missing_fields?.length) {
     message += ` Missing: ${source.missing_fields.join(", ")}.`;
   }
-  if (showingRaw) message += " Showing raw readings. This sample cannot be used for control.";
   document.querySelector("#process-source-message").textContent = message;
   for (const name of ["T", "T_j", "c", "count_middle", "T_j_set"]) {
     const value = values?.[name];
-    document.querySelector(`#process-source-${name}`).textContent = typeof value === "number" && Number.isFinite(value)
-      ? `${value.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 })}${name.startsWith("T") ? " °C" : ""}` : "—";
+    document.querySelector(`#process-source-${name}`).textContent = formatProcessSourceValue(value, name);
   }
   const collected = source?.collected_at ? formatExperimentTime(source.collected_at) : null;
-  const sampleLabel = showingRaw ? "Latest complete raw sample" : "Latest complete sample";
   document.querySelector("#process-source-sample").textContent = collected
-    ? `${sampleLabel}: ${collected} · age ${Math.max(0, age ?? 0).toFixed(1)} s · freshness limit ${source.sample_max_age_s} s`
+    ? `Latest complete sample: ${collected} · age ${Math.max(0, age ?? 0).toFixed(1)} s · freshness limit ${source.sample_max_age_s} s`
     : "No complete sample received.";
   const controller = state.controllerStatus;
   const process = controller?.integrations?.process;

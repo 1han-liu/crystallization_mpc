@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -16,8 +15,9 @@ def _freeze(value: Any) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("Diagnostics must contain finite numbers.")
+        # Diagnostics preserve actual IEEE state/covariance/innovation values.
+        # The JSON and Influx boundaries encode non-finites explicitly; this
+        # observational copy must not replace a numeric result with missing.
         return value
     raise TypeError(f"Unsupported diagnostic value: {type(value).__name__}")
 

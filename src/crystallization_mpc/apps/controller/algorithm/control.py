@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import time
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -15,9 +14,6 @@ from .thermodynamics import calc_G, calc_relative_sigma
 
 class OptimizationError(RuntimeError):
     """Expected numerical optimizer failure."""
-
-
-MPC_OPTIMIZER_TIMEOUT_S = 4.0
 
 
 def _observe_control(
@@ -83,7 +79,7 @@ def calc_e_dT_dt(
 
 
 def _signed_root(value: float, order: float) -> float:
-    return math.copysign(abs(float(value)) ** (1.0 / float(order)), float(value))
+    return float(np.sign(value) * np.power(np.abs(np.float64(value)), 1.0 / float(order)))
 
 
 def calc_e_target(
@@ -94,11 +90,10 @@ def calc_e_target(
         target_value = sigma
     elif target == "G":
         growth = float(calc_G(params, c, T, is_model=False))
-        k_T = float(params["k_0"]) * math.exp(
-            -float(params["E_A"]) / float(params["R"]) / float(T)
-        )
-        target_value = _signed_root(growth / k_T, float(params["n"]))
-        target_set = _signed_root(float(target_set) / k_T, float(params["n"]))
+        k_T = np.float64(params["k_0"]) * np.exp(
+            np.divide(-np.float64(params["E_A"]) / float(params["R"]), np.float64(T)))
+        target_value = _signed_root(np.divide(growth, k_T), float(params["n"]))
+        target_set = _signed_root(np.divide(float(target_set), k_T), float(params["n"]))
     else:
         raise ValueError("target must be sigma or G.")
     return target_value - float(target_set)
@@ -122,8 +117,8 @@ def objective_function(
     error = calc_e_target(params, target, target_set, c_next, T_next)
     weight = float(params["w_sigma"] if target == "sigma" else params["w_G"])
     return float(
-        weight * error**2
-        + float(params["w_dT_dt"]) * (float(dT_dt_set) - dT_dt) ** 2
+        weight * np.square(np.float64(error))
+        + float(params["w_dT_dt"]) * np.square(float(dT_dt_set) - dT_dt)
     )
 
 
@@ -146,25 +141,9 @@ def calc_dT_dt_set(
         upper = float(dT_dt_max)
         if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
             raise OptimizationError("MPC optimization bounds are infeasible.")
-        started = time.monotonic()
-
-        def bounded_objective(value: float) -> float:
-            if time.monotonic() - started >= MPC_OPTIMIZER_TIMEOUT_S:
-                raise OptimizationError(
-                    f"MPC optimization timed out after {MPC_OPTIMIZER_TIMEOUT_S:g} s."
-                )
-            objective = objective_function(
-                params, state, target, float(value), target_set, dt
-            )
-            if time.monotonic() - started >= MPC_OPTIMIZER_TIMEOUT_S:
-                raise OptimizationError(
-                    f"MPC optimization timed out after {MPC_OPTIMIZER_TIMEOUT_S:g} s."
-                )
-            return objective
-
         try:
             result = minimize_scalar(
-                bounded_objective,
+                lambda value: objective_function(params, state, target, float(value), target_set, dt),
                 bounds=(lower, upper),
                 method="bounded",
                 options={"xatol": 1e-4},
@@ -173,12 +152,9 @@ def calc_dT_dt_set(
             raise
         except (RuntimeError, ValueError) as exc:
             raise OptimizationError(f"MPC optimization failed: {exc}") from exc
-        if time.monotonic() - started >= MPC_OPTIMIZER_TIMEOUT_S:
-            raise OptimizationError(
-                f"MPC optimization timed out after {MPC_OPTIMIZER_TIMEOUT_S:g} s."
-            )
-        if not result.success or not math.isfinite(float(result.x)):
-            raise OptimizationError(f"MPC optimization failed: {result.message}")
+        # MATLAB fminbnd's default FunValCheck is off, and this caller does not
+        # request/check exitflag. A returned iterate is not rejected merely
+        # because the objective contains NaN/Inf or convergence was not flagged.
         value = float(result.x)
     elif mode == "PI":
         value = clip(
@@ -361,7 +337,6 @@ def update_T_j(
 
 
 __all__ = [
-    "MPC_OPTIMIZER_TIMEOUT_S",
     "OptimizationError",
     "add_to_int_X_dt",
     "calc_T_j",

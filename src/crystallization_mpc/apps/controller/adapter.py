@@ -32,13 +32,32 @@ class ControllerAdapter(ABC):
         """
         return None
 
-    def resume_process_state(self, process_state: ProcessState) -> None:
-        """Prepare a fresh measurement baseline after an input-data pause.
+    def record_activation_read_failure(self, error: Exception) -> None:
+        """Retain a failed fresh activation without inventing initial values."""
+        return None
 
-        The service suppresses actuator writes for the recovery warm-up tick.
-        Stateful implementations may recenter measurement estimates without
-        restarting the experiment or resetting its accumulated physical state.
+    def resume_process_state(self, process_state: ProcessState) -> None:
+        """Prepare a baseline after independently confirmed actuator recovery.
+
+        This hook belongs only to the separate write-receipt recovery flow.
+        Measurement read errors continue the next ordinary loop without it.
         """
+        return None
+
+    def record_read_failure(self, tick: ControllerTickInput, error: Exception | None = None) -> None:
+        """Record a failed read attempt without executing a numerical step.
+
+        MATLAB increments ii before process measurement. This hook maps that
+        attempt identity without manufacturing a successful measurement.
+        """
+        return None
+
+    def initialization_pending(self) -> bool:
+        """Whether MATLAB's startup refresh flag still awaits construction."""
+        return False
+
+    def retry_initialization(self) -> None:
+        """Retry the cached startup constructor before allocating another ii."""
         return None
 
     @abstractmethod

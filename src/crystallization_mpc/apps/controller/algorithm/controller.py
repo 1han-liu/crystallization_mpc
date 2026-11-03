@@ -5,14 +5,16 @@ from __future__ import annotations
 import copy
 import math
 import logging
+from dataclasses import replace
 from typing import Any, Mapping
 
 import numpy as np
 
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.diagnostics import ControllerDiagnosticsSnapshot
-from crystallization_mpc.apps.controller.process import ProcessState
-from crystallization_mpc.apps.controller.tick import ControllerTickInput
+from crystallization_mpc.apps.controller.process import ControllerReadError, ProcessState
+from crystallization_mpc.apps.controller.tick import ControllerGrowthMeasurementError, ControllerInputValueError, ControllerTickInput
+from crystallization_mpc.infra.numeric import decode_nonfinite
 from crystallization_mpc.messaging.controller_runtime import validate_runtime_changes
 from crystallization_mpc.messaging.parameter_policy import (
     parameter_defaults, parameter_policies, derived_parameter_policies, validate_parameter_changes,
@@ -38,6 +40,7 @@ from .ekf import (
     restore_EKF,
     smooth_EKF,
     smooth_EKF_general,
+    measurement_function,
 )
 from .mass_balance import calc_next_crystallization_mass_balance, create_size_list
 from .parameters import (build_parameters, merge_runtime_parameters, parameter_digest,
@@ -64,8 +67,6 @@ def _json_value(value: Any) -> Any:
         return _json_value(value.tolist())
     if isinstance(value, np.generic):
         return _json_value(value.item())
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
     if isinstance(value, list):
         return [_json_value(item) for item in value]
     if isinstance(value, dict):
@@ -106,6 +107,7 @@ class CrystallizationController:
         self.frame_index = 0
         self.elapsed_s = 0.0
         self._history_tick_seq: list[int] = []
+        self._read_failures: list[dict[str, Any]] = []
         self._runtime_parameter_ledger: list[dict[str, Any]] = []
         self._last_parameter_event: dict[str, Any] | None = None
         self._seed_population: dict[str, Any] = {"initial_count": 0, "base_seeded": False, "additions": []}
@@ -120,14 +122,19 @@ class CrystallizationController:
         self.mark_seed = False
         self.size_list_seed = np.empty(0, dtype=float)
         self.size_list = np.empty(0, dtype=float)
+        self._seed_generation_completed = False
         self.simulation_state: dict[str, float] | None = None
         self.control_T_j_reference_K: float | None = None
-        # A transient, same-tick handoff from the service's process-data wait.
-        # It is consumed before that tick can be committed/checkpointed. A
-        # process restart independently enters the existing confirmation hold.
+        self._pending_initialization_state: ProcessState | None = None
+        self._initialization_error: str | None = None
+        self._activation_read_failure: dict[str, Any] | None = None
+        # A transient handoff for the separate Writer outcome protocol.
+        # Read/numeric exceptions never request a recovery baseline. A process
+        # restart independently enters the existing confirmation hold.
         self._process_resume_pending = False
-        # Only contiguous, eligible measurements feed growth derivatives.
-        # Display/audit history is independent from the active fitting segment.
+        # Numerical indexed views reproduce the source derivative window,
+        # including unassigned slots. Display history and fitting segments
+        # retain their separate identities.
         self.fitting_G_measure_history: list[float] = []
         self.fitting_segment: dict[str, list[Any]] = {
             "G": [], "sigma": [], "T": [], "ticks": [],
@@ -362,6 +369,14 @@ class CrystallizationController:
             "c": initial_c,
             "count_middle": 0.0,
         }
+        if self.params["run_type"] == "simulation":
+            self._initialize_seed_population()
+            self._initialize_filters(initial_T, initial_c)
+            self.control_T_j_reference_K = float(self.params["T_j_init"])
+        self.running = True
+
+    def _initialize_seed_population(self) -> None:
+        """The source generates seeds only after all initial reads return."""
         if self._fixture_seed_sizes is not None:
             if (
                 self._fixture_seed_sizes.size == 0
@@ -380,10 +395,7 @@ class CrystallizationController:
             )
         self.size_list = np.zeros_like(self.size_list_seed)
         self._seed_population["initial_count"] = len(self.size_list_seed)
-        if self.params["run_type"] == "simulation":
-            self._initialize_filters(initial_T, initial_c)
-            self.control_T_j_reference_K = float(self.params["T_j_init"])
-        self.running = True
+        self._seed_generation_completed = True
 
     def initialize_process_state(self, process_state: ProcessState) -> None:
         """Latch MATLAB's activation scalar separately from dynamic T_j.
@@ -393,19 +405,64 @@ class CrystallizationController:
         """
         if not self.running or self.params["run_type"] != "experiment":
             raise RuntimeError("Process initialization requires a started Experiment.")
-        if self.frame_index != 0 or self.control_T_j_reference_K is not None:
+        if (self.frame_index != 0 or self.control_T_j_reference_K is not None
+                or self._activation_read_failure is not None):
             raise RuntimeError("Process state has already been initialized; start a new experiment.")
         if not isinstance(process_state, ProcessState):
             raise TypeError("Activation requires a validated ProcessState.")
         process_state.__post_init__()
-        self._initialize_filters(float(process_state.T), float(process_state.c))
         self.control_T_j_reference_K = float(process_state.T_j)
+        self._initialize_seed_population()
+        self._pending_initialization_state = process_state
+        self.retry_initialization()
+
+    def record_activation_read_failure(self, error: Exception) -> None:
+        """Preserve initialize_controller's failed fresh-read prefix.
+
+        The GUI has already marked activation handled, but never sets its
+        refresh request after this exception. Later loops read their ordinary
+        process histories and fail at the still-undefined EKF, without retrying
+        initialization or constructing a filter from later values.
+        """
+        if (not self.running or self.params["run_type"] != "experiment"
+                or self.frame_index != 0 or self.ekf is not None
+                or self._pending_initialization_state is not None):
+            raise RuntimeError("Activation read failure requires a fresh started Experiment.")
+        partial = copy.deepcopy(dict(getattr(error, "partial_process_values", {})))
+        self._activation_read_failure = {
+            "pending": False, "read_failed": True, "error": str(error),
+            "partial_process_values": partial,
+        }
+        # A missing key remains undefined metadata; do not substitute an
+        # initial setting, a zero or NaN for a scalar that was never read.
+        self.control_T_j_reference_K = partial.get("T_j")
+
+    def initialization_pending(self) -> bool:
+        return self._pending_initialization_state is not None
+
+    def retry_initialization(self) -> None:
+        """Mirror the retained refresh request using cached activation values.
+
+        A failed constructor never reaches record_controller_time or another
+        device read in controller_for_gui. New producer data does not overwrite
+        these cached T/c variables while the refresh flag remains set.
+        """
+        state = self._pending_initialization_state
+        if state is None:
+            return
+        try:
+            self._initialize_filters(float(state.T), float(state.c))
+        except ControllerInputValueError as exc:
+            self._initialization_error = str(exc)
+            raise
+        self._pending_initialization_state = None
+        self._initialization_error = None
 
     def _initialize_filters(self, T: float, c: float) -> None:
         dt = float(self.params["dt"])
         self.ekf = construct_EKF(np.array([T, 0.0, c, 0.0]), self.params, dt)
         self.ekf.transition = lambda value: state_transition_function(self.params, value, dt)
-        self.ekf.measurement = lambda value: np.array([value[0], value[2]])
+        self.ekf.measurement = lambda value: measurement_function(self.params, value)
         self.ekf_G_measure = create_EKF_general(
             dt, float(self.params["q2_G_measure"]), self.params["r_diag_G_measure"], np.zeros(3)
         )
@@ -425,12 +482,12 @@ class CrystallizationController:
             self._diagnostic_capture_failed = True
 
     def resume_process_state(self, process_state: ProcessState) -> None:
-        """Mark one measurement-only warm-up after a paused real-data stream.
+        """Mark a warm-up after separately confirmed actuator-write recovery.
 
         Do not call start()/initialize_process_state() again: the run, control
         reference, integral terms, parameters and crystal population still own
-        their existing state. The next step rebases only the main measurement
-        filter and deliberately does not interpret a cross-gap change as dt.
+        their existing state. Measurement read errors never use this hook;
+        their next ordinary iteration retains the original estimator state.
         """
         if (not self.running or self.params.get("run_type") != "experiment"
                 or self.control_T_j_reference_K is None or self.ekf is None):
@@ -483,7 +540,7 @@ class CrystallizationController:
 
     def _growth_values(
         self, tick: ControllerTickInput, c_KF: float, T_KF: float
-    ) -> tuple[tuple[float, float, float, float] | None, bool, str | None]:
+    ) -> tuple[tuple[float | None, float | None, float | None, float | None] | None, bool, str | None]:
         if self.params["growth_rate_source"] == "simulated":
             model = float(calc_G(self.params, c_KF, T_KF, is_model=True))
             index = self.frame_index - 1
@@ -497,18 +554,92 @@ class CrystallizationController:
         sample = tick.growth_sample
         if sample is None:
             return None, False, "no_growth_sample"
-        if not sample.valid:
-            return None, False, "invalid_growth_sample"
-        optional_values = (sample.G_u, sample.G_u_KF, sample.G_v, sample.G_v_KF)
+        if isinstance(sample, Mapping):
+            # A successful MATLAB G-map read can lack an individual key. This
+            # local read value is distinct from the stricter AMQP sample schema.
+            optional_values = tuple(sample.get(key) for key in ("G_u", "G_u_KF", "G_v", "G_v_KF"))
+        else:
+            # valid describes the producer's observation; it is not part of
+            # MATLAB's map read and must not replace supplied numeric fields.
+            optional_values = (sample.G_u, sample.G_u_KF, sample.G_v, sample.G_v_KF)
         if any(value is None for value in optional_values):
-            return None, False, "incomplete_growth_sample"
+            measured = tuple(float("nan") if value is None else float(value) for value in optional_values)
+            return measured, True, "incomplete_growth_sample"
         values = tuple(float(value) for value in optional_values)  # type: ignore[arg-type]
-        if (
-            tick.growth_sample_age_s is not None
-            and tick.growth_sample_age_s > 2.0 * float(self.params["dt_G"])
-        ):
-            return None, False, "stale_growth_sample"
         return values, True, None
+
+    def record_read_failure(self, tick: ControllerTickInput, error: Exception | None = None,
+                            *, stage: str = "process_read") -> None:
+        """Retain MATLAB's attempted ii/time without inventing measured values."""
+        if not self.running or tick.tick_seq not in {self.frame_index, self.frame_index + 1}:
+            raise ValueError("Read failure does not belong to the next/current Controller attempt.")
+        stage = getattr(error, "stage", stage)
+        if stage not in {"process_read", "growth_read", "growth_filter", "main_filter", "main_predict", "filter_initialization", "adaptation"}:
+            raise ValueError("Unsupported Controller read failure stage.")
+        if tick.tick_seq == self.frame_index and any(item["tick_seq"] == tick.tick_seq for item in self._read_failures):
+            return
+        self.frame_index = tick.tick_seq
+        self.elapsed_s = float(tick.elapsed_s)
+        if stage == "process_read" and self.params["run_type"] == "experiment" and self.pending_seed:
+            # measure_controller_data handles the seed request before any
+            # process read, so even a failed first read consumes that request.
+            self.pending_seed = False
+            self.mark_seed = True
+        event = {"tick_seq": tick.tick_seq, "elapsed_s": self.elapsed_s, "stage": stage}
+        partial = getattr(error, "partial_process_values", None)
+        if partial:
+            event["partial_process_values"] = copy.deepcopy(dict(partial))
+        self._read_failures.append(event)
+        self._diagnostic_snapshot = None
+        self._diagnostic_tick_data = None
+
+    def _pad_unexecuted_growth_history(self) -> None:
+        """Represent earlier unexecuted display cells as null, never as samples."""
+        length = len(self.history["t"])
+        failed = {item["tick_seq"]: item["stage"] for item in self._read_failures}
+        measured_prefix = {"t", "T", "T_j", "c", "count_middle", "dT_dt", "dc_dt"}
+        growth_suffix = {"G_u", "G_u_KF", "G_v", "G_v_KF", "G_measure", "G_measure_KF", "to_adapt", "n", "k_0", "E_A"}
+        for key in self.history:
+            while len(self.history[key]) < length:
+                index = len(self.history[key])
+                stage = failed.get(self._history_tick_seq[index])
+                unexecuted = ((stage in {"main_filter", "main_predict"} and key not in measured_prefix)
+                              or (stage == "growth_read" and key in growth_suffix)
+                              or (stage == "growth_filter" and key in {"G_measure_KF", "to_adapt", "n", "k_0", "E_A"})
+                              or (stage == "adaptation" and key in {"n", "k_0", "E_A"}))
+                if not unexecuted:
+                    break
+                self.history[key].append(False if key == "to_adapt" else None)
+
+    def _measurement_derivative(self, field: str, dt: float) -> float:
+        for failure in reversed(self._read_failures):
+            if failure["tick_seq"] < self.frame_index - 1:
+                break
+            partial = failure.get("partial_process_values", {})
+            if (failure["tick_seq"] == self.frame_index - 1
+                    and failure["stage"] == "process_read"):
+                # MATLAB assigns field_list(ii) before differencing. If the
+                # previous read never assigned field_list(ii-1), that later
+                # indexed assignment expands the numeric array with a zero.
+                # This is a numerical view of MATLAB's array semantics, never
+                # a replacement measurement or a successful read record.
+                previous = float(partial[field]) if field in partial else 0.0
+                return (float(self.history[field][-1]) - previous) / dt
+        return calc_dT_dt(self.history[field][self.segment_history_start :], dt)
+
+    def _indexed_G_measurement_view(self, current: float) -> list[float]:
+        """The last three numeric slots after MATLAB G_measure_list(ii)=... ."""
+        indices = {tick: index for index, tick in enumerate(self._history_tick_seq)}
+        failed = {item["tick_seq"]: item["stage"] for item in self._read_failures}
+        values = []
+        for tick in range(max(1, self.frame_index - 2), self.frame_index):
+            index = indices.get(tick)
+            assigned = (index is not None and (
+                (index < len(self.history["to_adapt"]) and self.history["to_adapt"][index])
+                or failed.get(tick) == "growth_filter"))
+            values.append(float(self.history["G_measure"][index]) if assigned else 0.0)
+        values.append(current)
+        return values
 
     def _snapshot_numeric_state(self) -> dict[str, Any]:
         filters = {}
@@ -520,7 +651,7 @@ class CrystallizationController:
             "E_A": self.ekf_E_A,
         }.items():
             filters[name] = (
-                (filter_, filter_.state.copy(), filter_.covariance.copy())
+                (filter_, filter_.state.copy(), filter_.covariance.copy(), filter_.to_dict()["sqrt_covariance"])
                 if filter_ is not None
                 else None
             )
@@ -586,7 +717,7 @@ class CrystallizationController:
                 filter_ = saved[0]
                 setattr(self, attribute, filter_)
                 filter_.state = saved[1].copy()
-                filter_.covariance = saved[2].copy()
+                filter_.restore_covariance(saved[2], np.asarray(saved[3], dtype=float))
 
     def _refresh_at_measurement(
         self, update: Mapping[str, Any], T: float, c: float
@@ -710,15 +841,36 @@ class CrystallizationController:
             panel = (tick_input.runtime_update.get("parameter_changes") or {}).get("controller", {})
             if any(key in legacy and key in panel and legacy[key] != panel[key] for key in ("sigma_set", "G_set")):
                 raise ValueError("Runtime controls and panel target values conflict.")
-        if self.control_T_j_reference_K is None or self.ekf is None:
+        if (self._activation_read_failure is None
+                and (self.control_T_j_reference_K is None or self.ekf is None)):
             return ControllerStepResult(
                 valid=False, error="Experiment activation ProcessState has not been initialized."
             )
+        self._pad_unexecuted_growth_history()
         simulation_tick_index = self.frame_index
         self.frame_index = tick_input.tick_seq
         self.elapsed_s = float(tick_input.elapsed_s)
+        if self._activation_read_failure is not None:
+            if tick_input.process_state is None:
+                raise RuntimeError("An activation-read failure cycle requires its actual process read.")
+            if self.pending_seed:
+                self.pending_seed = False
+                self.mark_seed = True
+            state = tick_input.process_state
+            for key, value in (("t", self.elapsed_s), ("T", state.T), ("T_j", state.T_j),
+                               ("c", state.c), ("count_middle", state.count_middle)):
+                self.history[key].append(float(value))
+            self._history_tick_seq.append(self.frame_index)
+            self.history["dT_dt"].append(self._measurement_derivative("T", dt))
+            self.history["dc_dt"].append(self._measurement_derivative("c", dt))
+            failure = ControllerInputValueError(
+                "Unrecognized function or variable 'EKF'.", stage="main_filter",
+                reference_identifier="MATLAB:UndefinedFunction")
+            self.record_read_failure(tick_input, failure)
+            raise failure
         process_resuming = self._process_resume_pending
         rollback_state: dict[str, Any] | None = None
+        candidate_result: ControllerStepResult | None = None
         try:
             if self.params["run_type"] == "simulation":
                 state = self._advance_simulation(simulation_tick_index, dt)
@@ -732,12 +884,6 @@ class CrystallizationController:
             T, T_j, c = float(state["T"]), float(state["T_j"]), float(state["c"])
             count_middle = float(state["count_middle"])
             current_T_j_set = float(state["T_j_set"])
-            values = (T, T_j, c, count_middle, current_T_j_set)
-            if not all(math.isfinite(value) for value in values):
-                return ControllerStepResult(valid=False, error="Process input is non-finite.")
-            if T <= 0 or T_j <= 0 or current_T_j_set <= 0 or c < 0 or count_middle < 0:
-                return ControllerStepResult(valid=False, error="Process input violates physical bounds.")
-
             rollback_state = self._snapshot_numeric_state()
             if process_resuming:
                 # No propagation of an old state across an unmeasured physical
@@ -745,7 +891,7 @@ class CrystallizationController:
                 # Preserve the adaptation filters themselves; only their active
                 # derivative/fitting windows must not bridge the missing data.
                 self.ekf = construct_EKF(np.array([T, 0.0, c, 0.0]), self.params, dt)
-                self.ekf.measurement = lambda value: np.array([value[0], value[2]])
+                self.ekf.measurement = lambda value: measurement_function(self.params, value)
                 self.num_adapt = 0
                 self.fitting_G_measure_history = []
                 self.fitting_segment = {key: [] for key in self.fitting_segment}
@@ -766,9 +912,9 @@ class CrystallizationController:
                 self.history[key].append(value)
             self._history_tick_seq.append(self.frame_index)
             dT_dt = (0.0 if process_resuming else
-                     calc_dT_dt(self.history["T"][self.segment_history_start :], dt))
+                     self._measurement_derivative("T", dt))
             dc_dt = (0.0 if process_resuming else
-                     calc_dc_dt(self.history["c"][self.segment_history_start :], dt))
+                     self._measurement_derivative("c", dt))
             self.history["dT_dt"].append(dT_dt)
             self.history["dc_dt"].append(dc_dt)
             if self.ekf is None:
@@ -800,18 +946,13 @@ class CrystallizationController:
                 self.history[f"target_{name}_set"].append(target_set if active else None)
                 self.history[f"abs_e_target_{name}"].append(absolute_error if active else None)
 
-            growth_values, adaptation_allowed, pause_reason = self._growth_values(
-                tick_input, c_KF, T_KF
-            )
-            hold_growth_control = target == "G" and not adaptation_allowed
             requested_hold = getattr(tick_input, "control_hold_reason", None)
             parameter_hold = ((requested_hold or "process_data_recovery")
                               if process_resuming else requested_hold)
             self.last_control_hold_reason = (
                 parameter_hold if process_resuming else
                 "controller_refresh" if refreshed else
-                parameter_hold or ((pause_reason or "growth_measurement_unavailable")
-                                   if hold_growth_control else None)
+                parameter_hold
             )
 
             lag_percentage = calc_t_lag_perc(
@@ -823,10 +964,7 @@ class CrystallizationController:
             self.history["t_lag"].append(lag)
             projected = filtered + np.array([filtered[1], 0.0, filtered[3], 0.0]) * lag
             dT_dt_request: float | None = None
-            if refreshed or hold_growth_control or parameter_hold:
-                # A live G target is undefined without a fresh measurement.
-                # Re-assert the equipment's current jacket setpoint and leave
-                # every control integral untouched until a valid sample arrives.
+            if refreshed or parameter_hold:
                 dT_dt_set = 0.0
                 T_j_set = current_T_j_set
                 self._capture_control_diagnostics({"hold_reason": self.last_control_hold_reason or ""})
@@ -869,34 +1007,59 @@ class CrystallizationController:
                 self.history[f"objective_{name}"].append(objective if target == name else None)
             if self.params["run_type"] == "simulation" and self.simulation_state is not None:
                 self.simulation_state["T_j_set"] = T_j_set
+            candidate_result = ControllerStepResult(
+                T=T, T_j=T_j, c=c, dT_dt=dT_dt, dc_dt=dc_dt, T_KF=T_KF,
+                dT_dt_KF=dT_dt_KF, c_KF=c_KF, dc_dt_KF=dc_dt_KF, sigma=sigma,
+                G_model=G_model, G_measure=None, G_measure_KF=None,
+                target_value=target_value, target_set=target_set,
+                target_error_abs=absolute_error, dT_dt_set=dT_dt_set,
+                T_j_set=T_j_set, objective=objective, E_A=float(self.params["E_A"]),
+                k_0=float(self.params["k_0"]), n=float(self.params["n"]),
+                t_lag=lag, t_lag_perc=lag_percentage,
+            )
 
+            # controller_for_gui computes its control request before reading G.
+            # A whole-read exception must leave that already completed prefix
+            # intact and skip fitting, later recording and the device write.
+            growth_read_performed = tick_input.growth_reader is not None or tick_input.growth_sample is not None
+            if tick_input.growth_reader is not None:
+                try:
+                    sample = tick_input.growth_reader()
+                except (ControllerReadError, TimeoutError, ConnectionError) as exc:
+                    read_error = exc if isinstance(exc, ControllerReadError) else ControllerReadError(
+                        str(exc), stage="growth_read")
+                    read_error.stage = "growth_read"
+                    read_error.partial_result = candidate_result
+                    if read_error is exc:
+                        raise
+                    raise read_error from exc
+                tick_input = replace(tick_input, growth_sample=sample, growth_sample_age_s=None,
+                                     growth_reader=None)
+            growth_values, adaptation_allowed, pause_reason = self._growth_values(
+                tick_input, c_KF, T_KF
+            )
             G_measure: float | None = None
             G_measure_KF: float | None = None
             if growth_values is not None:
                 for key, value in zip(("G_u", "G_u_KF", "G_v", "G_v_KF"), growth_values):
                     self.history[key].append(value)
-                G_measure = 0.5 * (growth_values[1] + growth_values[3])
+                if growth_values[1] is not None and growth_values[3] is not None:
+                    G_measure = 0.5 * (growth_values[1] + growth_values[3])
             else:
                 for key in ("G_u", "G_u_KF", "G_v", "G_v_KF"):
                     self.history[key].append(None)
             self.history["G_measure"].append(G_measure)
             should_adapt = (
-                not refreshed and not parameter_hold and self.adaptation_enabled and adaptation_allowed
-                and G_measure is not None
+                not refreshed and not parameter_hold and self.adaptation_enabled
+                and (adaptation_allowed or growth_read_performed)
             )
             self.last_adaptation_pause_reason = "controller_refresh" if refreshed else parameter_hold
             growth_reanchored = False
             if should_adapt:
                 if self.ekf_G_measure is None:
                     raise RuntimeError("Growth measurement EKF is missing.")
-                if self.fitting_last_tick != self.frame_index - 1:
-                    # Missing/ineligible periods are not zero growth samples.
-                    # Begin derivatives afresh and reanchor the growth estimate.
-                    self.fitting_G_measure_history = []
-                    self.ekf_G_measure.state = np.array([G_measure, 0.0, 0.0])
-                    growth_reanchored = True
-                self.fitting_G_measure_history.append(float(G_measure))
-                self.fitting_G_measure_history = self.fitting_G_measure_history[-3:]
+                self.fitting_G_measure_history = self._indexed_G_measurement_view(
+                    float("nan") if G_measure is None else float(G_measure))
                 self.fitting_last_tick = self.frame_index
                 G_measure_KF = smooth_EKF_general(self.fitting_G_measure_history, self.ekf_G_measure, dt)
                 self.history["G_measure_KF"].append(G_measure_KF)
@@ -919,7 +1082,7 @@ class CrystallizationController:
                 if fitted:
                     self.adaptation_diagnostics["fit_count"] += 1
                 self.ekf.transition = lambda value: state_transition_function(self.params, value, dt)
-                self.ekf.measurement = lambda value: np.array([value[0], value[2]])
+                self.ekf.measurement = lambda value: measurement_function(self.params, value)
             else:
                 self.history["G_measure_KF"].append(None)
                 self.history["to_adapt"].append(False)
@@ -935,19 +1098,12 @@ class CrystallizationController:
                 # MATLAB indexed assignment fills intervening unassigned
                 # elements with zero after failed adaptation cycles. Do not
                 # invent a parameter record during a failed cycle itself.
-                self.history[key].extend([0.0] * (len(self.history["t"]) - 1 - len(self.history[key])))
+                failed_growth_reads = {item["tick_seq"] for item in self._read_failures
+                                       if item["stage"] in {"growth_read", "growth_filter"}}
+                for index in range(len(self.history[key]), len(self.history["t"]) - 1):
+                    self.history[key].append(None if self._history_tick_seq[index] in failed_growth_reads else 0.0)
                 self.history[key].append(float(self.params[key]))
 
-            numerical = (T_j_set, sigma, G_model, objective, self.params["n"],
-                         self.params["k_0"], self.params["E_A"])
-            if not all(math.isfinite(float(value)) for value in numerical):
-                if self._runtime_refresh_transaction is not None:
-                    self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
-                return ControllerStepResult(valid=False, error="Controller calculation produced a non-finite value.")
-            if not float(self.params["T_j_min"]) <= T_j_set <= float(self.params["T_j_max"]):
-                if self._runtime_refresh_transaction is not None:
-                    self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
-                return ControllerStepResult(valid=False, error="Controller setpoint violates jacket bounds.")
             try:
                 self._finish_diagnostics(
                     T=T, c=c, T_j=T_j, G_measure=G_measure, refreshed=refreshed,
@@ -967,9 +1123,22 @@ class CrystallizationController:
                 k_0=float(self.params["k_0"]), n=float(self.params["n"]),
                 t_lag=lag, t_lag_perc=lag_percentage,
             )
+        except ControllerGrowthMeasurementError as exc:
+            exc.partial_result = (replace(candidate_result, G_measure=G_measure)
+                                  if candidate_result is not None else None)
+            self.record_read_failure(tick_input, exc)
+            raise
+        except ControllerReadError as exc:
+            self.record_read_failure(tick_input, exc, stage="growth_read")
+            # No rollback, refresh, baseline or synthetic valid output. The
+            # service records a warning and starts the following loop normally.
+            raise
+        except ControllerInputValueError as exc:
+            # This is the source toolbox's numeric-input exception at its
+            # actual computation boundary, not an early process-value filter.
+            self.record_read_failure(tick_input, exc)
+            raise
         except AdaptationError as exc:
-            if tick_input.runtime_update is not None:
-                self.rollback_runtime_refresh(tick_input.runtime_update["event_id"])
             # controller_for_gui's outer catch does not undo earlier control,
             # history, integral or EKF changes. Failed function output assignment
             # leaves caller params/num_adapt unchanged, and skips later recording
@@ -982,7 +1151,12 @@ class CrystallizationController:
             self.adaptation_diagnostics["failure_count"] += 1
             self.adaptation_diagnostics["last_failure_reason"] = str(exc)
             logger.warning("Parameter adaptation failed at tick %s: %s", self.frame_index, exc)
-            return ControllerStepResult(valid=False, error=str(exc))
+            failure = ControllerInputValueError(str(exc), stage="adaptation")
+            failure.reference_identifier = exc.reference_identifier
+            failure.partial_result = (replace(candidate_result, G_measure=G_measure, G_measure_KF=G_measure_KF)
+                                      if candidate_result is not None else None)
+            self.record_read_failure(tick_input, failure)
+            raise failure from exc
         except (OptimizationError, FloatingPointError) as exc:
             if rollback_state is not None:
                 self._restore_numeric_state(rollback_state)
@@ -1140,8 +1314,15 @@ class CrystallizationController:
             "params_digest": self.params_digest, "running": self.running,
             "frame_index": self.frame_index, "elapsed_s": self.elapsed_s,
             "control_T_j_reference_K": self.control_T_j_reference_K,
+            **({"initialization": {"pending": True,
+                                    "process_state": self._pending_initialization_state.to_dict(),
+                                    "error": self._initialization_error}}
+               if self._pending_initialization_state is not None else {}),
+            **({"initialization": copy.deepcopy(self._activation_read_failure)}
+               if self._activation_read_failure is not None else {}),
             "params": self.params, "history": self.history,
             "history_tick_seq": list(self._history_tick_seq),
+            **({"read_failures": copy.deepcopy(self._read_failures)} if self._read_failures else {}),
             "runtime_parameter_updates": copy.deepcopy(self._runtime_parameter_ledger),
             "integrals": {"int_e_target_dt": self.int_e_target_dt,
                           "int_e_dT_dt_dt": self.int_e_dT_dt_dt,
@@ -1150,6 +1331,8 @@ class CrystallizationController:
                            "size_list_seed": self.size_list_seed,
                            "size_list": self.size_list, "pending_seed": self.pending_seed,
                            "mark_seed": self.mark_seed,
+                           **({"seed_generation_completed": False}
+                              if not self._seed_generation_completed else {}),
                            "seed_population": copy.deepcopy(self._seed_population)},
             "filters": filters,
             "refresh": {"count": self.refresh_count, "segment_id": self.segment_id,
@@ -1174,6 +1357,7 @@ class CrystallizationController:
         try:
             if not isinstance(state, Mapping):
                 return False
+            state = decode_nonfinite(dict(state))
             if state.get("baseline_commit") != BASELINE_COMMIT or state.get("run_id") != run_id:
                 return False
             configured = build_parameters(params)
@@ -1182,9 +1366,8 @@ class CrystallizationController:
             validate_checkpoint(state, configured, HISTORY_KEYS)
             self.configure(params, run_id)
             self.start()
-            reference = float(state["control_T_j_reference_K"])
-            if not math.isfinite(reference) or reference <= 0:
-                raise ValueError("Recovery activation jacket reference is invalid.")
+            reference = state["control_T_j_reference_K"]
+            reference = None if reference is None else float(reference)
             self.control_T_j_reference_K = reference
             saved_params = state.get("params")
             if not isinstance(saved_params, Mapping):
@@ -1192,18 +1375,16 @@ class CrystallizationController:
             self.params = copy.deepcopy(dict(saved_params))
             self._runtime_parameter_ledger = copy.deepcopy(state.get("runtime_parameter_updates", []))
             self._last_parameter_event = copy.deepcopy(self._runtime_parameter_ledger[-1]) if self._runtime_parameter_ledger else None
+            initialization = state.get("initialization")
             history = state.get("history")
             if not isinstance(history, Mapping) or set(history) != set(HISTORY_KEYS):
                 raise ValueError("Recovery history is incompatible.")
             frame_index = int(state["frame_index"])
             restored = {key: list(history[key]) for key in HISTORY_KEYS}
-            history_lengths = {len(values) for key, values in restored.items() if key not in {"n", "k_0", "E_A"}}
-            parameter_lengths = {len(restored[key]) for key in ("n", "k_0", "E_A")}
-            if (len(history_lengths) != 1 or next(iter(history_lengths)) > frame_index
-                    or len(parameter_lengths) != 1
-                    or next(iter(parameter_lengths)) > next(iter(history_lengths))):
-                raise ValueError("Recovery history lengths are incompatible.")
+            # validate_checkpoint has already checked recorded read failures and
+            # the genuinely unexecuted suffix of a partial G-read cycle.
             self.history = restored
+            self._read_failures = copy.deepcopy(state.get("read_failures", []))
             self._history_tick_seq = list(state.get("history_tick_seq", []))
             if not self._history_tick_seq:
                 self._history_tick_seq = [int(round(value / float(configured["dt"]))) for value in restored["t"]]
@@ -1220,6 +1401,7 @@ class CrystallizationController:
                                      if simulation.get("state") is not None else None)
             self.size_list_seed = np.asarray(simulation["size_list_seed"], dtype=float)
             self.size_list = np.asarray(simulation["size_list"], dtype=float)
+            self._seed_generation_completed = bool(simulation.get("seed_generation_completed", True))
             self.pending_seed = bool(simulation["pending_seed"])
             self.mark_seed = bool(simulation["mark_seed"])
             self._seed_population = copy.deepcopy(simulation.get("seed_population", {
@@ -1230,7 +1412,7 @@ class CrystallizationController:
             fitting_history = adaptation["fitting_G_measure_history"]
             if not isinstance(fitting_history, list):
                 raise ValueError("Recovery fitting history is missing.")
-            self.fitting_G_measure_history = [float(value) for value in fitting_history]
+            self.fitting_G_measure_history = [float("nan") if value is None else float(value) for value in fitting_history]
             self.fitting_segment = copy.deepcopy(dict(adaptation["fitting_segment"]))
             self.fitting_last_tick = adaptation["fitting_last_tick"]
             refresh = state["refresh"]
@@ -1253,18 +1435,21 @@ class CrystallizationController:
                     if type(diagnostics.get(key)) is not int or diagnostics[key] < 0:
                         raise ValueError("Invalid adaptation diagnostic count.")
                 self.adaptation_diagnostics = copy.deepcopy(diagnostics)
+            if initialization is not None:
+                if initialization.get("read_failed") is True:
+                    self._activation_read_failure = copy.deepcopy(dict(initialization))
+                else:
+                    self._pending_initialization_state = ProcessState(**initialization["process_state"])
+                    self._initialization_error = initialization["error"]
+                self.running = bool(state["running"])
+                return True
             # Rebuild closures after restoring possibly adapted E_A/k_0/n;
             # then restore the numerical state and covariance below.
-            initial_T = (
-                float(self.history["T"][-1])
-                if self.history["T"]
-                else float(self.params["T_init"])
-            )
-            initial_c = (
-                float(self.history["c"][-1])
-                if self.history["c"]
-                else float(self.params["c_init"])
-            )
+            # Rebuild closures with the configured constructor values, then
+            # restore the actual saved internal state. Latest raw measurements
+            # can legitimately be NaN/Inf after a rejected correct(z) call.
+            initial_T = float(self.params["T_init"])
+            initial_c = float(self.params["c_init"])
             self._initialize_filters(initial_T, initial_c)
             filters = state["filters"]
             for filter_, name in ((self.ekf, "controller"), (self.ekf_G_measure, "G_measure"),

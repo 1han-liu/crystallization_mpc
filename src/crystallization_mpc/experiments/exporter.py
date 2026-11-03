@@ -11,7 +11,6 @@ from __future__ import annotations
 import calendar
 import csv
 import json
-import math
 import os
 import re
 import threading
@@ -20,12 +19,16 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from numbers import Real
 from typing import Any, Protocol
 from uuid import uuid4
 
 import yaml
 
 from crystallization_mpc.infra.influxdb.client import InfluxSettings, create_influx_client
+from crystallization_mpc.infra.numeric import (
+    decode_nonfinite, encode_nonfinite, nonfinite_symbol, restore_influx_numeric_fields,
+)
 
 CSV_FILENAMES = (
     "parameters.csv", "process_data.csv", "controller_data.csv",
@@ -132,7 +135,7 @@ class InfluxExportSource:
         client = self._client_factory(self.settings)
         try:
             for record in client.query_api().query_stream(query=query, org=self.settings.org):
-                yield dict(record.values)
+                yield restore_influx_numeric_fields(dict(record.values))
         finally:
             client.close()
 
@@ -265,6 +268,7 @@ def _records(records, run_id):
     result = []
     seen = set()
     for record in records:
+        record = restore_influx_numeric_fields(decode_nonfinite(dict(record)))
         if record.get("run_id") != run_id:
             continue  # Defensive isolation, also applied to injected sources.
         row = {key: value for key, value in record.items()
@@ -433,6 +437,7 @@ def _process_data(run_id, manifest, capture, source):
         raise ValueError("Telemetry interval must be at least one nanosecond.")
     groups: dict[int, list[dict]] = {}
     for record in source.fetch("crystallizer_raw", device=device, start_ns=start, end_ns=end):
+        record = restore_influx_numeric_fields(decode_nonfinite(dict(record)))
         if record.get("device") != device:
             continue
         stamp = _record_time(record)
@@ -471,21 +476,18 @@ def _process_data(run_id, manifest, capture, source):
                                                 "time_ns", "time_utc", "_measurement", "device"}})
             for name in selected:
                 value, quality, node = record[name], record.get("Quality"), record.get("id")
-                if name in row and (row[name] != value or row[f"{name}_node_id"] != node
+                same_value = row.get(name) == value or (
+                    nonfinite_symbol(row.get(name)) == nonfinite_symbol(value) == "NaN")
+                if name in row and (not same_value or row[f"{name}_node_id"] != node
                                     or row[f"{name}_quality"] != quality):
                     invalid.add(name)
                 else:
                     row[name], row[f"{name}_quality"], row[f"{name}_node_id"] = value, quality, node
                 good_quality = (type(quality) is int and quality == 0) or (isinstance(quality, str) and quality in GOOD_QUALITY)
-                try:
-                    finite = type(value) in (int, float) and math.isfinite(value)
-                except OverflowError:
-                    finite = False
-                if (len(selected) != 1 or name in ambiguous_fields or not good_quality or not finite
+                numeric = isinstance(value, Real) and not isinstance(value, bool)
+                if (len(selected) != 1 or name in ambiguous_fields or not good_quality or not numeric
                         or not isinstance(node, str) or not node
                         or (node_ids.get(name) and node != node_ids[name])):
-                    invalid.add(name)
-                elif (name in {"c", "count_middle"} and value < 0) or (name in {"T", "T_j", "T_j_set"} and value <= -273.15):
                     invalid.add(name)
         missing = [name for name in PROCESS_FIELDS if name not in row]
         row.update(missing_fields=";".join(missing), invalid_fields=";".join(sorted(invalid)),
@@ -644,7 +646,7 @@ def _runtime_history_events(run_id, root, stored_events):
 
 
 def _mapping_value(value):
-    return json.loads(value) if isinstance(value, str) else value
+    return decode_nonfinite(json.loads(value) if isinstance(value, str) else value)
 
 
 def _flatten_parameters(value, prefix=""):
@@ -752,7 +754,7 @@ def _parameter_event_changes(event):
 def _read_optional_json(path):
     if not path.exists():
         return None
-    result = json.loads(path.read_text(encoding="utf-8"))
+    result = decode_nonfinite(json.loads(path.read_text(encoding="utf-8")))
     if not isinstance(result, dict):
         raise ValueError("Experiment capture metadata must be an object.")
     return result
@@ -763,12 +765,16 @@ def _json_safe(value):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        return str(value)
+    if nonfinite_symbol(value) is not None:
+        return encode_nonfinite(value)
     return value
 
 
 def _csv_value(value):
+    value = decode_nonfinite(value)
+    symbol = nonfinite_symbol(value)
+    if symbol is not None:
+        return symbol
     if value is None:
         return ""
     if isinstance(value, (dict, list, tuple)):
@@ -798,7 +804,7 @@ def _atomic_json(path, document):
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         with temporary.open("x", encoding="utf-8") as stream:
-            json.dump(document, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            json.dump(_json_safe(document), stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())

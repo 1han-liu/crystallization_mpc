@@ -34,8 +34,20 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def initialize_process_state(self, process_state: ProcessState) -> None:
         self.controller.initialize_process_state(process_state)
 
+    def record_activation_read_failure(self, error: Exception) -> None:
+        self.controller.record_activation_read_failure(error)
+
     def resume_process_state(self, process_state: ProcessState) -> None:
         self.controller.resume_process_state(process_state)
+
+    def record_read_failure(self, tick: ControllerTickInput, error: Exception | None = None) -> None:
+        self.controller.record_read_failure(tick, error)
+
+    def initialization_pending(self) -> bool:
+        return self.controller.initialization_pending()
+
+    def retry_initialization(self) -> None:
+        self.controller.retry_initialization()
 
     def step(
         self,

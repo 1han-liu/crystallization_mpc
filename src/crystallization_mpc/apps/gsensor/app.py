@@ -1446,16 +1446,18 @@ class GsensorService:
 
     def _sample_payload(self, result: GrowthRateFrameResult) -> GrowthRateSamplePayload:
         captured_at = result.captured_at or result.detected_at or result.processed_at
+        # Validity remains observation metadata. Preserve every actual edge
+        # value independently; an invalid frame or a missing opposite edge
+        # must not erase numerical results that were actually produced.
+        values = {
+            "G_u": result.u.G if result.u is not None else None,
+            "G_u_KF": result.u.G_KF if result.u is not None else None,
+            "G_v": result.v.G if result.v is not None else None,
+            "G_v_KF": result.v.G_KF if result.v is not None else None,
+        }
         if result.valid and result.u is not None and result.v is not None:
-            values = {
-                "G_u": result.u.G,
-                "G_u_KF": result.u.G_KF,
-                "G_v": result.v.G,
-                "G_v_KF": result.v.G_KF,
-            }
             error = None
         else:
-            values = {"G_u": None, "G_u_KF": None, "G_v": None, "G_v_KF": None}
             error = result.error or "growth-rate frame is invalid"
         return GrowthRateSamplePayload(
             run_id=result.run_id,

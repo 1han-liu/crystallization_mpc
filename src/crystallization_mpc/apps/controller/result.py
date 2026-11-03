@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Any, ClassVar, Mapping
 
+from crystallization_mpc.infra.numeric import decode_numeric
+
 
 @dataclass(frozen=True)
 class ControllerStepResult:
@@ -89,8 +91,6 @@ class ControllerStepResult:
                 continue
             if isinstance(value, bool) or not isinstance(value, Real):
                 raise ValueError(f"Controller result {name} must be a number or null.")
-            if not math.isfinite(float(value)):
-                raise ValueError(f"Controller result {name} must be finite.")
             has_numeric = True
         if self.valid:
             if self.error is not None:
@@ -139,7 +139,7 @@ class ControllerStepResult:
                 f"Unknown Controller result field(s): {', '.join(unknown)}."
             )
         numeric = {
-            name: value.get(name)
+            name: decode_numeric(value[name], name) if value.get(name) is not None else None
             for name in cls.NUMERIC_FIELDS
         }
         return cls(

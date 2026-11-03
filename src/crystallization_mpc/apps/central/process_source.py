@@ -11,17 +11,14 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from numbers import Real
 
 import pika
 
-from crystallization_mpc.apps.controller.process import CELSIUS_TO_KELVIN, OpcUaNodeConfig
+from crystallization_mpc.apps.controller.process import OpcUaNodeConfig
 from crystallization_mpc.apps.controller.rabbit_process import (
     FIELDS, GOOD_QUALITY_STRINGS, TELEMETRY_ROUTE, RabbitProcessConfig,
 )
-
-
-NEGATIVE_CONCENTRATION = "Process value is outside its valid range: c."
+from crystallization_mpc.infra.numeric import decode_numeric, encode_nonfinite
 
 
 class ProcessSourceMonitor:
@@ -138,8 +135,6 @@ class ProcessSourceMonitor:
         if len(self._invalid_rounds) > 128:
             self._invalid_rounds = set(sorted(self._invalid_rounds)[-128:])
         self._rounds.pop(stamp, None)
-        if stamp == self._sample_ns and self._sample and self._sample["c"] < 0:
-            self._sample = None
         self._record_problem(stamp, message)
 
     def _record_problem(self, stamp, message):
@@ -195,26 +190,19 @@ class ProcessSourceMonitor:
                         or (isinstance(quality, str) and quality in GOOD_QUALITY_STRINGS)):
                     self._reject(stamp, f"OPC UA quality is not Good for {name}.")
                     continue
-                value = fields[name]
                 try:
-                    valid = not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value)
-                except OverflowError:
-                    valid = False
-                if not valid:
+                    # This card observes delivered measurements. Real numeric
+                    # values, including NaN/Inf and negatives, are not a
+                    # physical-input policy or a reason to report no data.
+                    value = decode_numeric(fields[name], name)
+                except (ValueError, TypeError, OverflowError):
                     self._reject(stamp, f"Invalid numeric value for {name}.")
                     continue
-                value = float(value)
-                if ((name == "count_middle" and value < 0)
-                        or (name in ("T", "T_j", "T_j_set") and value <= -CELSIUS_TO_KELVIN)):
-                    self._reject(stamp, f"Process value is outside its valid range: {name}.")
-                    continue
                 values = self._rounds.setdefault(stamp, {})
-                if name in values and values[name] != value:
+                if (name in values and values[name] != value
+                        and not (math.isnan(values[name]) and math.isnan(value))):
                     self._reject(stamp, f"Conflicting process values for {name}.")
                     continue
-                if name == "c" and value < 0:
-                    # Assemble the raw round for display while keeping it invalid for control.
-                    self._record_problem(stamp, NEGATIVE_CONCENTRATION)
                 values[name] = value
                 if len(values) == len(FIELDS) and stamp >= self._sample_ns:
                     self._sample = dict(values)
@@ -240,8 +228,6 @@ class ProcessSourceMonitor:
             else:
                 state = "ready"
             values = dict(self._sample) if state == "ready" else {}
-            raw_values = (dict(self._sample) if state == "invalid" and fresh
-                          and problem == NEGATIVE_CONCENTRATION and self._sample["c"] < 0 else {})
             collected_at = (datetime.fromtimestamp(self._sample_ns / 1e9, timezone.utc).isoformat()
                             if self._sample is not None else None)
             newest = self._rounds.get(self._newest_ns, {})
@@ -249,8 +235,8 @@ class ProcessSourceMonitor:
                 "status": state, "ready": state == "ready", "connected": self._connected,
                 "device_id": self.config.device_id,
                 "sample_age_s": age, "sample_max_age_s": self.config.sample_max_age_s,
-                "collected_at": collected_at, "values": values,
-                "raw_values": raw_values,
+                "collected_at": collected_at, "values": encode_nonfinite(values),
+                "raw_values": {},
                 "missing_fields": [] if state == "ready" else [name for name in FIELDS if name not in newest],
                 "error": self._connection_error if not self._connected else problem,
                 "read_only": True,

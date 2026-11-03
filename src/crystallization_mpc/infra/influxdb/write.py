@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .client import InfluxSettings, create_influx_client, load_influx_settings
+from crystallization_mpc.infra.numeric import encode_nonfinite, influx_numeric_fields
 
 try:
     from influxdb_client import Point, WritePrecision
@@ -26,7 +27,7 @@ def _field_value(value: Any) -> Any:
         return value
     if isinstance(value, (int, float, str)):
         return value
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(encode_nonfinite(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
 
 def build_tagged_point(
@@ -46,7 +47,7 @@ def build_tagged_point(
     for key, value in (tags or {}).items():
         if value is not None:
             point = point.tag(key, str(value))
-    for key, value in fields.items():
+    for key, value in influx_numeric_fields(fields).items():
         if value is not None:
             point = point.field(key, _field_value(value))
     return point

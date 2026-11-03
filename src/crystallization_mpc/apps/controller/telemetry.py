@@ -14,6 +14,7 @@ from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.process import ProcessState, ProcessWriteResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
+from crystallization_mpc.infra.numeric import encode_nonfinite
 
 CONTROLLER_MEASUREMENT = "controller_measurement"
 CONTROLLER_SERVICE_TAG = "controller"
@@ -142,19 +143,20 @@ def validate_controller_diagnostics(
         raise ValueError("invalid_snapshot")
     for name, value in values.items():
         expected_type = DIAGNOSTIC_FIELD_TYPES.get(name) if isinstance(name, str) else None
-        if (expected_type is None or type(value) is not expected_type
-                or (expected_type in (int, float) and not math.isfinite(value))):
+        if expected_type is None or type(value) is not expected_type:
             raise ValueError("invalid_snapshot")
     raw = snapshot.to_dict()
     if (not isinstance(raw, dict) or raw.get("run_id") != run_id
             or raw.get("tick_seq") != tick.tick_seq
             or raw.get("elapsed_s") != snapshot.elapsed_s
-            or raw.get("fields") != values or not isinstance(raw.get("raw"), dict)):
+            or encode_nonfinite(raw.get("fields")) != encode_nonfinite(values)
+            or not isinstance(raw.get("raw"), dict)):
         raise ValueError("invalid_snapshot")
     _validate_raw_diagnostics(raw["raw"])
-    # Complete initialization matrices are retained in acceptance JSONL. This
-    # check also catches non-finite values hidden outside the plotted scalars.
-    json.dumps(raw, allow_nan=False)
+    # Complete matrices remain lossless in strict JSON even when the actual
+    # calculation produced NaN/Inf. Shape and identity remain independently
+    # validated; the codec is representation, not a numerical-input policy.
+    json.dumps(encode_nonfinite(raw), allow_nan=False)
     return values
 
 
@@ -203,8 +205,9 @@ class ControllerMeasurementRecord:
     def __post_init__(self) -> None:
         if not str(self.run_id).strip():
             raise ValueError("run_id is required.")
-        if self.tick.growth_sample is not None and not self.tick.growth_sample.valid:
-            raise ValueError("Controller measurement cannot use an invalid Gsensor sample.")
+        # A successfully received missing-G payload is distinct from a read
+        # exception. MATLAB still completes control when adaptation is off;
+        # retain the missing fields instead of rejecting its real output.
         if not str(self.computed_at).strip():
             raise ValueError("computed_at is required.")
         if not isinstance(self.adaptation_enabled, bool):
@@ -253,12 +256,14 @@ class ControllerMeasurementRecord:
                     "growth_sample_dt_s": float(sample.dt_s),
                     "image_name": sample.image_name,
                     "sample_processed_at": sample.processed_at,
-                    "input_G_u": float(sample.G_u),
-                    "input_G_u_KF": float(sample.G_u_KF),
-                    "input_G_v": float(sample.G_v),
-                    "input_G_v_KF": float(sample.G_v_KF),
                 }
             )
+            for name in ("G_u", "G_u_KF", "G_v", "G_v_KF"):
+                value = getattr(sample, name)
+                if value is not None:
+                    fields[f"input_{name}"] = float(value)
+            if not sample.valid:
+                fields["growth_sample_valid"] = False
             if sample.parameter_revision is not None:
                 fields["input_parameter_revision"] = sample.parameter_revision
         fields.update(self.result.fields())

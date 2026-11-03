@@ -9,11 +9,17 @@ import math
 from typing import Any, Mapping
 
 
-def _number(value: Any, name: str, *, minimum: float | None = None) -> float:
+def _same_number(left: Any, right: Any) -> bool:
+    return left == right or (isinstance(left, (int, float)) and isinstance(right, (int, float))
+                             and math.isnan(left) and math.isnan(right))
+
+
+def _number(value: Any, name: str, *, minimum: float | None = None,
+            allow_nonfinite: bool = False) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"Checkpoint {name} must be a number.")
     number = float(value)
-    if not math.isfinite(number) or (minimum is not None and number < minimum):
+    if (not allow_nonfinite and not math.isfinite(number)) or (minimum is not None and number < minimum):
         raise ValueError(f"Checkpoint {name} is outside its valid range.")
     return number
 
@@ -35,11 +41,12 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
-def _vector(value: Any, name: str, *, minimum: float | None = None) -> list:
+def _vector(value: Any, name: str, *, minimum: float | None = None,
+            allow_nonfinite: bool = False) -> list:
     if not isinstance(value, list):
         raise ValueError(f"Checkpoint {name} must be an array.")
     for item in value:
-        _number(item, name, minimum=minimum)
+        _number(item, name, minimum=minimum, allow_nonfinite=allow_nonfinite)
     return value
 
 
@@ -72,8 +79,11 @@ def validate_checkpoint(
     if frame == 0 and elapsed != 0:
         raise ValueError("Checkpoint initial elapsed time must be zero.")
     _boolean(state["running"], "running")
-    if _number(state["control_T_j_reference_K"], "activation reference") <= 0:
-        raise ValueError("Checkpoint activation temperature must be positive.")
+    initialization = state.get("initialization")
+    activation_read_failed = (isinstance(initialization, Mapping)
+                              and initialization.get("read_failed") is True)
+    if state["control_T_j_reference_K"] is not None or not activation_read_failed:
+        _number(state["control_T_j_reference_K"], "activation reference", allow_nonfinite=True)
 
     params = _mapping(state["params"], "params")
     for key, template in configured.items():
@@ -156,6 +166,42 @@ def validate_checkpoint(
     history = _mapping(state["history"], "history")
     if set(history) != set(history_keys):
         raise ValueError("Checkpoint history fields are incompatible.")
+    read_failures = state.get("read_failures", [])
+    if not isinstance(read_failures, list):
+        raise ValueError("Checkpoint read failures must be an array.")
+    failure_ticks: dict[int, Mapping[str, Any]] = {}
+    failure_tick, failure_time = 0, -1.0
+    for failure in read_failures:
+        failure = _mapping(failure, "read failure")
+        tick = _integer(failure["tick_seq"], "read failure tick")
+        event_time = _number(failure["elapsed_s"], "read failure time", minimum=0)
+        if (not failure_tick < tick <= frame or not failure_time < event_time <= elapsed
+                or failure.get("stage") not in {"process_read", "growth_read", "growth_filter", "main_filter", "main_predict", "filter_initialization", "adaptation"}):
+            raise ValueError("Checkpoint read failure identity is inconsistent.")
+        partial = _mapping(failure.get("partial_process_values", {}), "partial process values")
+        if set(partial) - {"T", "T_j", "c", "count_middle", "T_j_set"}:
+            raise ValueError("Checkpoint partial process fields are invalid.")
+        for key, value in partial.items():
+            _number(value, f"partial process {key}", allow_nonfinite=True)
+        if partial and failure["stage"] != "process_read":
+            raise ValueError("Checkpoint G read cannot carry a process prefix.")
+        failure_ticks[tick] = failure
+        failure_tick, failure_time = tick, event_time
+    recorded_ticks = state.get("history_tick_seq")
+    if recorded_ticks is None:
+        recorded_ticks = [int(round(value / float(configured["dt"]))) for value in history["t"]]
+    if not isinstance(recorded_ticks, list):
+        raise ValueError("Checkpoint history ticks must be an array.")
+    growth_failure_indices = {index for index, tick in enumerate(recorded_ticks)
+                              if failure_ticks.get(tick, {}).get("stage") in {"growth_read", "growth_filter", "main_filter", "main_predict", "adaptation"}}
+    measured_prefix = {"t", "T", "T_j", "c", "count_middle", "dT_dt", "dc_dt"}
+    unexecuted_after = {
+        "growth_read": {"G_u", "G_u_KF", "G_v", "G_v_KF", "G_measure", "G_measure_KF", "to_adapt", "n", "k_0", "E_A"},
+        "growth_filter": {"G_measure_KF", "to_adapt", "n", "k_0", "E_A"},
+        "main_filter": set(history_keys) - measured_prefix,
+        "main_predict": set(history_keys) - measured_prefix,
+        "adaptation": {"n", "k_0", "E_A"},
+    }
     # None is intentional for inactive targets, unavailable growth, and warm-up.
     nullable = {"dT_dt_set", "T_j_set", "objective", "target_sigma", "target_sigma_set",
                 "abs_e_target_sigma", "objective_sigma", "target_G", "target_G_set",
@@ -164,14 +210,20 @@ def validate_checkpoint(
     for key, values in history.items():
         if not isinstance(values, list):
             raise ValueError(f"Checkpoint history {key} must be an array.")
-        for value in values:
+        for index, value in enumerate(values):
             if key == "to_adapt":
                 _boolean(value, key)
-            elif value is not None or key not in nullable:
-                _number(value, key)
+            elif value is not None or (key not in nullable and not (
+                    index in growth_failure_indices and key in unexecuted_after[
+                        failure_ticks[recorded_ticks[index]]["stage"]])):
+                _number(value, key, allow_nonfinite=key != "t")
     length = len(history["t"])
-    if length > frame or any(len(history[key]) != length for key in history_keys
-                             if key not in {"n", "k_0", "E_A"}):
+    growth_suffix = {"G_u", "G_u_KF", "G_v", "G_v_KF", "G_measure", "G_measure_KF", "to_adapt"}
+    partial_suffix = (unexecuted_after.get(failure_ticks.get(recorded_ticks[-1], {}).get("stage"), set())
+                      if length else set())
+    if length > frame or any(
+            len(history[key]) not in ({length - 1, length} if key in partial_suffix else {length})
+            for key in history_keys if key not in {"n", "k_0", "E_A"}):
         raise ValueError("Checkpoint history lengths are inconsistent.")
     if len({len(history[key]) for key in ("n", "k_0", "E_A")}) != 1 or len(history["n"]) > length:
         raise ValueError("Checkpoint parameter history lengths are inconsistent.")
@@ -181,21 +233,25 @@ def validate_checkpoint(
 
     integrals = _mapping(state["integrals"], "integrals")
     for key in ("int_e_target_dt", "int_e_dT_dt_dt", "int_e_T_dt"):
-        _number(integrals[key], key)
+        _number(integrals[key], key, allow_nonfinite=True)
     simulation = _mapping(state["simulation"], "simulation")
     process = _mapping(simulation["state"], "simulation.state")
     for key in ("T", "T_j", "T_j_set", "c", "count_middle"):
-        number = _number(process[key], key, minimum=0)
-        if key in {"T", "T_j", "T_j_set"} and number == 0:
-            raise ValueError("Checkpoint process temperature must be positive.")
+        _number(process[key], key, allow_nonfinite=True)
     seeds = _vector(simulation["size_list_seed"], "size_list_seed", minimum=0)
     sizes = _vector(simulation["size_list"], "size_list", minimum=0)
-    if not seeds or not sizes or any(value == 0 for value in seeds):
+    seed_generation_completed = simulation.get("seed_generation_completed", True)
+    _boolean(seed_generation_completed, "seed_generation_completed")
+    if not seed_generation_completed and (not activation_read_failed or seeds or sizes):
+        raise ValueError("Checkpoint unexecuted seed generation is not an activation-read prefix.")
+    if seed_generation_completed and (not seeds or not sizes or any(value == 0 for value in seeds)):
         raise ValueError("Checkpoint crystal size arrays are incompatible.")
     for key in ("pending_seed", "mark_seed"):
         _boolean(simulation[key], key)
     population = simulation.get("seed_population")
     if population is None:
+        if not seed_generation_completed:
+            raise ValueError("Checkpoint unexecuted seed generation requires explicit metadata.")
         # Historical archives have exactly one seed population.  Do not turn
         # backwards compatibility into blanket permission for arbitrary sizes.
         if len(seeds) != len(sizes):
@@ -205,8 +261,10 @@ def validate_checkpoint(
         initial_count = _integer(population["initial_count"], "initial seed count")
         _boolean(population["base_seeded"], "base_seeded")
         additions = population["additions"]
-        if initial_count == 0 or not isinstance(additions, list):
+        if (seed_generation_completed and initial_count == 0) or not isinstance(additions, list):
             raise ValueError("Checkpoint seed population metadata is invalid.")
+        if not seed_generation_completed and (initial_count or additions or population["base_seeded"]):
+            raise ValueError("Checkpoint unexecuted seed generation contains fabricated seeds.")
         seed_keys = {"m_seed", "d_mean_seed", "d_std_seed", "rho_solute"}
         seed_params = dict(configured)
 
@@ -298,7 +356,7 @@ def validate_checkpoint(
     if set(segment) != {"G", "sigma", "T", "ticks"}:
         raise ValueError("Checkpoint fitting segment fields are incompatible.")
     for key in ("G", "sigma", "T"):
-        _vector(segment[key], f"fitting_segment.{key}")
+        _vector(segment[key], f"fitting_segment.{key}", allow_nonfinite=True)
     ticks = segment["ticks"]
     if not isinstance(ticks, list) or any(_integer(tick, "fitting tick") <= start_tick or tick > frame for tick in ticks):
         raise ValueError("Checkpoint fitting samples cross a refresh boundary.")
@@ -308,15 +366,26 @@ def validate_checkpoint(
         raise ValueError("Checkpoint fitting segment lengths are inconsistent.")
     if count > len(ticks):
         raise ValueError("Checkpoint adaptation count exceeds its segment/window.")
-    recorded_ticks = state.get("history_tick_seq")
-    if recorded_ticks is None:
-        # Archives without an explicit tick map predate online dt changes.
-        recorded_ticks = [int(round(value / float(configured["dt"]))) for value in history["t"]]
     if (not isinstance(recorded_ticks, list) or len(recorded_ticks) != length
             or any(_integer(tick, "history tick") < 1 or tick > frame for tick in recorded_ticks)
             or any(b <= a for a, b in zip(recorded_ticks, recorded_ticks[1:]))):
         raise ValueError("Checkpoint history tick identities are inconsistent.")
     history_by_tick = {tick: index for index, tick in enumerate(recorded_ticks)}
+    for tick, failure in failure_ticks.items():
+        index = history_by_tick.get(tick)
+        if failure["stage"] in {"growth_read", "growth_filter", "main_filter", "main_predict", "adaptation"} and (index is None or history["t"][index] != failure["elapsed_s"]):
+            raise ValueError("Checkpoint G read failure lost its completed process/control prefix.")
+        if failure["stage"] == "process_read" and index is not None:
+            raise ValueError("Checkpoint failed process read cannot be a complete measurement row.")
+    for index in growth_failure_indices:
+        for key in unexecuted_after[failure_ticks[recorded_ticks[index]]["stage"]]:
+            if index < len(history[key]) and history[key][index] != (False if key == "to_adapt" else None):
+                raise ValueError("Checkpoint unexecuted G-read suffix contains fabricated values.")
+    for index, tick in enumerate(recorded_ticks):
+        for key in ("T", "c", "dT_dt", "dc_dt"):
+            if (not math.isfinite(history[key][index])
+                    and failure_ticks.get(tick, {}).get("stage") not in {"main_filter", "main_predict"}):
+                raise ValueError("Checkpoint non-finite main measurement lacks its source correction exception.")
     for event in ledger:
         index = history_by_tick.get(event["effective_tick"])
         if index is None or history["t"][index] != event["elapsed_s"]:
@@ -329,9 +398,12 @@ def validate_checkpoint(
     period, accumulated = float(configured["dt"]), 0.0
     for tick in range(1, frame + 1):
         accumulated += period
-        if tick in history_by_tick and not math.isclose(history["t"][history_by_tick[tick]], accumulated,
+        if configured["run_type"] == "simulation" and tick in history_by_tick and not math.isclose(history["t"][history_by_tick[tick]], accumulated,
                                                        rel_tol=1e-10, abs_tol=1e-8):
             raise ValueError("Checkpoint time axis disagrees with its period-change ledger.")
+        if configured["run_type"] == "simulation" and tick in failure_ticks and not math.isclose(
+                failure_ticks[tick]["elapsed_s"], accumulated, rel_tol=1e-10, abs_tol=1e-8):
+            raise ValueError("Checkpoint failed read time disagrees with its period-change ledger.")
         if tick in dt_updates:
             period = float(dt_updates[tick])
     for position, tick in enumerate(ticks):
@@ -339,19 +411,44 @@ def validate_checkpoint(
         if index is None or not history["to_adapt"][index]:
             raise ValueError("Checkpoint fitting sample has no eligible recorded tick.")
         for key, historical in (("G", "G_measure_KF"), ("sigma", "sigma"), ("T", "T")):
-            if segment[key][position] != history[historical][index]:
+            if not _same_number(segment[key][position], history[historical][index]):
                 raise ValueError("Checkpoint fitting segment disagrees with history.")
-    fitting = _vector(adaptation["fitting_G_measure_history"], "fitting history")
+    fitting = adaptation["fitting_G_measure_history"]
+    if not isinstance(fitting, list):
+        raise ValueError("Checkpoint fitting history must be an array.")
+    for value in fitting:
+        if value is not None:
+            _number(value, "fitting history", allow_nonfinite=True)
     last_tick = adaptation["fitting_last_tick"]
     if last_tick is None:
         if fitting or ticks:
             raise ValueError("Checkpoint fitting derivatives lack a last tick.")
     else:
-        if not ticks or _integer(last_tick, "fitting_last_tick") != ticks[-1] or not 1 <= len(fitting) <= 3:
+        last_tick = _integer(last_tick, "fitting_last_tick")
+        if (last_tick > frame or not 1 <= len(fitting) <= 3
+                or not ((ticks and last_tick == ticks[-1])
+                        or failure_ticks.get(last_tick, {}).get("stage") == "growth_filter")):
             raise ValueError("Checkpoint fitting derivative boundary is inconsistent.")
         for offset, value in enumerate(reversed(fitting)):
-            index = history_by_tick.get(last_tick - offset)
-            if index is None or not history["to_adapt"][index] or value != history["G_measure"][index]:
+            tick = last_tick - offset
+            if tick <= 0:
+                raise ValueError("Checkpoint fitting derivative history precedes the experiment.")
+            if tick in failure_ticks and failure_ticks[tick]["stage"] in {"process_read", "growth_read", "main_filter", "main_predict", "filter_initialization"}:
+                if value != 0.0:
+                    raise ValueError("Checkpoint failed-read indexed derivative slot is not MATLAB's implicit zero.")
+                continue
+            index = history_by_tick.get(tick)
+            if failure_ticks.get(tick, {}).get("stage") == "growth_filter":
+                if index is None or not _same_number(value, history["G_measure"][index]):
+                    raise ValueError("Checkpoint missing G-filter input disagrees with its recorded value.")
+                continue
+            if (index is not None and value == 0.0 and index < len(history["to_adapt"])
+                    and not history["to_adapt"][index]):
+                # A first indexed adaptation assignment can also expand slots
+                # that were never assigned while adaptation was disabled.
+                continue
+            if (index is None or index >= len(history["to_adapt"])
+                    or not history["to_adapt"][index] or not _same_number(value, history["G_measure"][index])):
                 raise ValueError("Checkpoint fitting derivative history crosses a gap.")
     for key in ("pause_reason", "control_hold_reason"):
         if adaptation[key] is not None and not isinstance(adaptation[key], str):
@@ -368,12 +465,61 @@ def validate_checkpoint(
         raise ValueError("Checkpoint fitting mode is invalid.")
 
     filters = _mapping(state["filters"], "filters")
+    initialization = state.get("initialization")
+    if initialization is not None:
+        initialization = _mapping(initialization, "initialization")
+        if activation_read_failed:
+            if (configured["run_type"] != "experiment" or initialization.get("pending") is not False
+                    or ledger or refresh_count or count or fitting or ticks
+                    or any(value is not None for value in filters.values())
+                    or not isinstance(initialization.get("error"), str) or not initialization["error"]
+                    or any(failure["stage"] not in {"process_read", "main_filter"} for failure in read_failures)
+                    or any(failure_ticks.get(tick, {}).get("stage") != "main_filter" for tick in recorded_ticks)
+                    or set(failure_ticks) != set(range(1, frame + 1))):
+                raise ValueError("Checkpoint failed activation is not the source fresh-read prefix.")
+            partial = _mapping(initialization["partial_process_values"], "activation read prefix")
+            if set(partial) - {"T", "T_j", "T_j_set", "c", "count_middle"}:
+                raise ValueError("Checkpoint activation prefix fields are invalid.")
+            for key, value in partial.items():
+                _number(value, f"activation read {key}", allow_nonfinite=True)
+            reference = partial.get("T_j")
+            if not _same_number(state["control_T_j_reference_K"], reference):
+                raise ValueError("Checkpoint failed activation changed an initial scalar.")
+            if any(integrals[key] != 0 for key in ("int_e_target_dt", "int_e_dT_dt_dt", "int_e_T_dt")):
+                raise ValueError("Checkpoint undefined EKF cannot have executed a control integral.")
+            return
+        if (configured["run_type"] != "experiment" or initialization.get("pending") is not True
+                or frame != 0 or elapsed != 0 or length or ledger or read_failures
+                or refresh_count or any(value is not None for value in filters.values())
+                or not isinstance(initialization.get("error"), str) or not initialization["error"]):
+            raise ValueError("Checkpoint pending initialization is not the source startup prefix.")
+        raw = _mapping(initialization["process_state"], "initialization process state")
+        for key in ("T", "T_j", "c", "count_middle", "T_j_set"):
+            _number(raw[key], f"initialization {key}", allow_nonfinite=True)
+        if math.isfinite(raw["T"]) and math.isfinite(raw["c"]):
+            raise ValueError("Checkpoint pending State constructor lacks its non-finite initial T/c.")
+        if not _same_number(state["control_T_j_reference_K"], raw["T_j"]):
+            raise ValueError("Checkpoint pending initialization changed the cached jacket reference.")
+        return
     for key, dimension in (("controller", 4), ("G_measure", 3), ("n", 3), ("k_0", 3), ("E_A", 3)):
         filter_state = _mapping(filters[key], f"filters.{key}")
-        vector = _vector(filter_state["state"], f"{key}.state")
+        vector = _vector(filter_state["state"], f"{key}.state", allow_nonfinite=True)
         covariance = filter_state["covariance"]
         if len(vector) != dimension or not isinstance(covariance, list) or len(covariance) != dimension:
             raise ValueError("Checkpoint filter dimensions are incompatible.")
         for row in covariance:
-            if len(_vector(row, f"{key}.covariance")) != dimension:
+            if len(_vector(row, f"{key}.covariance", allow_nonfinite=True)) != dimension:
                 raise ValueError("Checkpoint covariance dimensions are incompatible.")
+        root = filter_state.get("sqrt_covariance")
+        if root is not None:
+            if not isinstance(root, list) or len(root) != dimension:
+                raise ValueError("Checkpoint square-root covariance dimensions are incompatible.")
+            for row in root:
+                if len(_vector(row, f"{key}.sqrt_covariance", allow_nonfinite=True)) != dimension:
+                    raise ValueError("Checkpoint square-root covariance dimensions are incompatible.")
+            for i in range(dimension):
+                for j in range(dimension):
+                    projected = sum(root[i][k] * root[j][k] for k in range(dimension))
+                    actual = covariance[i][j]
+                    if not (_same_number(projected, actual) or math.isclose(projected, actual, rel_tol=1e-9, abs_tol=1e-12)):
+                        raise ValueError("Checkpoint square-root covariance disagrees with P.")

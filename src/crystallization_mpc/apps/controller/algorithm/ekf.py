@@ -6,11 +6,27 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 import numpy as np
+from scipy.linalg import solve_triangular
 
+from crystallization_mpc.apps.controller.tick import ControllerGrowthMeasurementError, ControllerInputValueError
 from .dynamics import state_transition_function
 
 
 ArrayFunction = Callable[[np.ndarray], np.ndarray]
+
+
+def _chol_psd(matrix: np.ndarray) -> np.ndarray:
+    """Same positive-definite Cholesky / PSD SVD factor as the source filter."""
+    try:
+        return np.linalg.cholesky(matrix)
+    except np.linalg.LinAlgError:
+        _left, singular, right = np.linalg.svd(matrix)
+        return right.T @ np.diag(np.sqrt(singular))
+
+
+def _qr_factor(matrix: np.ndarray, root: np.ndarray, noise_root: np.ndarray) -> np.ndarray:
+    augmented = np.vstack((root.T @ matrix.T, noise_root.T))
+    return np.linalg.qr(augmented, mode="reduced")[1].T
 
 
 def calc_Q(params: Mapping[str, Any], dt: float) -> np.ndarray:
@@ -51,7 +67,9 @@ def _forward_jacobian(function: ArrayFunction, state: np.ndarray) -> np.ndarray:
     state = np.asarray(state, dtype=float)
     base = np.asarray(function(state), dtype=float)
     jacobian = np.empty((base.size, state.size), dtype=float)
-    steps = np.sqrt(np.finfo(float).eps) * np.maximum(1.0, np.abs(state))
+    delta = np.sqrt(np.finfo(float).eps)
+    # Source max(delta,delta*abs(x(j))) omits NaN rather than propagating it.
+    steps = np.fmax(delta, delta * np.abs(state))
     for index, step in enumerate(steps):
         shifted = state.copy()
         shifted[index] += step
@@ -74,8 +92,18 @@ class ExtendedKalmanFilter:
         default=None, init=False, repr=False, compare=False
     )
     diagnostic_capture_failed: bool = field(default=False, init=False, repr=False, compare=False)
+    _sqrt_covariance: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _covariance_snapshot: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # The source extendedKalmanFilter State setter validates real, finite
+        # initial state. It does not impose positive temperature/concentration.
+        if np.iscomplexobj(self.state) or not np.isfinite(self.state).all():
+            raise ControllerInputValueError("Initial filter State must be real and finite.",
+                                            stage="filter_initialization",
+                                            reference_identifier="MATLAB:ExtendedKalmanFilter:expectedFinite")
+        self._sqrt_covariance = _chol_psd(self.covariance)
+        self._covariance_snapshot = self.covariance.copy()
         # Observational only: constructor P remains unchanged and this copy is
         # deliberately absent from the recovery wire format.
         try:
@@ -94,27 +122,57 @@ class ExtendedKalmanFilter:
             # A chart must never turn a valid numerical cycle into a failure.
             self.diagnostic_capture_failed = True
 
+    def _synchronize_covariance(self) -> None:
+        if (self._sqrt_covariance is None or self._covariance_snapshot is None
+                or not np.array_equal(self.covariance, self._covariance_snapshot, equal_nan=True)):
+            self._sqrt_covariance = _chol_psd(self.covariance)
+            self._covariance_snapshot = self.covariance.copy()
+
+    def restore_covariance(self, covariance: np.ndarray, root: np.ndarray | None = None) -> None:
+        self.covariance = covariance.copy()
+        self._sqrt_covariance = _chol_psd(covariance) if root is None else root.copy()
+        self._covariance_snapshot = covariance.copy()
+
     def predict(self) -> np.ndarray:
+        self._synchronize_covariance()
         prior = self.state.copy()
         F = _forward_jacobian(self.transition, prior)
-        self.state = np.asarray(self.transition(prior), dtype=float)
-        self.covariance = F @ self.covariance @ F.T + self.process_noise
+        predicted = np.asarray(self.transition(prior), dtype=float)
+        predicted_root = _qr_factor(F, self._sqrt_covariance, _chol_psd(self.process_noise))
+        predicted_covariance = predicted_root @ predicted_root.T
+        self.state = predicted
+        self.covariance = predicted_covariance
+        self._sqrt_covariance = predicted_root
+        self._covariance_snapshot = predicted_covariance.copy()
         self._observe("prior", state=self.state, covariance=self.covariance)
         return self.state.copy()
 
     def correct(self, observed: np.ndarray) -> np.ndarray:
+        # Source correct(z) checks z before its internal correction can mutate
+        # pState/P. A preceding predict is deliberately not undone on failure.
+        if np.iscomplexobj(observed) or not np.isfinite(np.asarray(observed)).all():
+            raise ControllerInputValueError("Filter correction measurement z must be real and finite.",
+                                            reference_identifier="MATLAB:ExtendedKalmanFilter:expectedFinite")
+        self._synchronize_covariance()
         observed_array = np.asarray(observed, dtype=float).reshape(-1)
         H = _forward_jacobian(self.measurement, self.state)
         expected = np.asarray(self.measurement(self.state), dtype=float).reshape(-1)
-        innovation_covariance = H @ self.covariance @ H.T + self.measurement_noise
-        gain = np.linalg.solve(
-            innovation_covariance.T, (self.covariance @ H.T).T
-        ).T
-        self.state = self.state + gain @ (observed_array - expected)
-        self.covariance = (np.eye(self.state.size) - gain @ H) @ self.covariance
-        self.covariance = (self.covariance + self.covariance.T) / 2.0
-        if not np.isfinite(self.state).all() or not np.isfinite(self.covariance).all():
-            raise FloatingPointError("EKF produced non-finite state or covariance.")
+        noise_root = _chol_psd(self.measurement_noise)
+        innovation_root = _qr_factor(H, self._sqrt_covariance, noise_root)
+        cross_covariance = (self._sqrt_covariance @ self._sqrt_covariance.T) @ H.T
+        gain = solve_triangular(innovation_root.T,
+                                solve_triangular(innovation_root, cross_covariance.T, lower=True, check_finite=False),
+                                lower=False, check_finite=False).T
+        corrected = self.state + gain @ (observed_array - expected)
+        correction = -gain @ H
+        for index in range(self.state.size):
+            correction[index, index] += 1.0
+        corrected_root = _qr_factor(correction, self._sqrt_covariance, gain @ noise_root)
+        self.state = corrected
+        self._sqrt_covariance = corrected_root
+        self.covariance = corrected_root @ corrected_root.T
+        self._covariance_snapshot = self.covariance.copy()
+        innovation_covariance = innovation_root @ innovation_root.T
         self._observe(
             "posterior", state=self.state, covariance=self.covariance,
             innovation=observed_array - expected,
@@ -123,9 +181,11 @@ class ExtendedKalmanFilter:
         return self.state.copy()
 
     def to_dict(self) -> dict[str, Any]:
+        self._synchronize_covariance()
         return {
             "state": self.state.tolist(),
             "covariance": self.covariance.tolist(),
+            "sqrt_covariance": self._sqrt_covariance.tolist(),
         }
 
 
@@ -194,7 +254,10 @@ def smooth_EKF_general(
         measurement[1] = (array[-1] - array[-2]) / float(dt)
     if array.size > 2:
         measurement[2] = (array[-1] + array[-3] - 2.0 * array[-2]) / float(dt) ** 2
-    return float(filter_.correct(measurement)[0])
+    try:
+        return float(filter_.correct(measurement)[0])
+    except ControllerInputValueError as exc:
+        raise ControllerGrowthMeasurementError(str(exc)) from exc
 
 
 def restore_EKF(
@@ -204,10 +267,12 @@ def restore_EKF(
     covariance = np.asarray(state.get("covariance"), dtype=float)
     if vector.shape != filter_.state.shape or covariance.shape != filter_.covariance.shape:
         raise ValueError("EKF recovery state has an incompatible shape.")
-    if not np.isfinite(vector).all() or not np.isfinite(covariance).all():
-        raise ValueError("EKF recovery state must be finite.")
+    # This restores the saved internal object fields, like MATLAB loadobj;
+    # it is not a new State-property constructor assignment. The checkpoint
+    # validator supplies the corresponding recorded computation provenance.
     filter_.state = vector.copy()
-    filter_.covariance = covariance.copy()
+    root = state.get("sqrt_covariance")
+    filter_.restore_covariance(covariance, np.asarray(root, dtype=float) if root is not None else None)
     return filter_
 
 

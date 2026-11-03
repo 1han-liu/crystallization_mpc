@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Query, HTTPException, Body
 
 from crystallization_mpc.apps.controller.service import ControllerService
+from crystallization_mpc.infra.numeric import encode_nonfinite
 
 
 service = ControllerService()
@@ -35,7 +36,7 @@ def index() -> dict[str, str]:
 
 @web_app.get("/api/status")
 def get_status() -> dict[str, Any]:
-    return service.status()
+    return encode_nonfinite(service.status())
 
 
 @web_app.get("/api/runtime-history")

@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 from scipy.integrate import solve_ivp
 
+from ._ode45_ieee import ode45_final_ieee
 from .thermodynamics import calc_c_sat, calc_dc_sat_dT, calc_relative_sigma
 
 
@@ -81,27 +82,10 @@ def state_transition_function(
 ) -> np.ndarray:
     initial = np.asarray(x, dtype=float).reshape(4)
 
-    def derivative(_time: float, state: np.ndarray) -> np.ndarray:
+    def rhs(_time: float, state: np.ndarray) -> np.ndarray:
         return state_transition_ode(params, state, dt)[0]
 
-    result = solve_ivp(
-        derivative,
-        (0.0, float(dt)),
-        initial,
-        method="RK45",
-        rtol=rtol,
-        atol=atol,
-        # MATLAB ode45 defaults MaxStep to one tenth of the tspan interval.
-        # SciPy's unlimited default can cross the sigma=0.001 model branch
-        # differently; matching only RelTol/AbsTol is insufficient here.
-        max_step=abs(float(dt)) / 10.0,
-    )
-    if not result.success or result.y.shape[1] == 0:
-        raise RuntimeError(f"Controller state RK45 failed: {result.message}")
-    state = result.y[:, -1]
-    if not np.isfinite(state).all():
-        raise FloatingPointError("Controller state RK45 produced non-finite state.")
-    return state
+    return ode45_final_ieee(rhs, initial, dt, rtol=rtol, atol=atol)
 
 
 def state_transition_ode_T(params: Mapping[str, Any], T: float, T_j: float) -> float:

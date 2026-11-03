@@ -61,8 +61,6 @@ def _bounded_minimum(function, lower: float, upper: float, *, initial: float) ->
         result = bounded_scalar(real_objective, float(lower), float(upper), initial=float(initial))
     except ValueError as exc:
         raise AdaptationError(f"Growth adaptation failed: {exc}") from exc
-    if not math.isfinite(float(result.x)) or not math.isfinite(float(result.fun)):
-        raise AdaptationError(f"Growth adaptation failed: {result.message}")
     # The MATLAB caller requests b_min only, not exitflag. Do not add an
     # independent success-flag gate for a finite returned iterate.
     return float(result.x)
