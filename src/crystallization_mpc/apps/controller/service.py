@@ -189,6 +189,10 @@ class ControllerService(OnlineParametersMixin):
         self.process_wait_count = 0
         self.process_activation_pending = False
         self.activation_client_unassigned = False
+        self.initialization_status: dict[str, Any] = {
+            "state": "not_started", "attempts": 0, "stage": None,
+            "last_error": None, "completed_at": None,
+        }
         self.last_control_output: dict[str, Any] | None = None
         # Observational, current-tick only. Never checkpointed or exposed through
         # the status/command API; acceptance can retain the full raw snapshot.
@@ -422,6 +426,7 @@ class ControllerService(OnlineParametersMixin):
                 "wait_count": self.process_wait_count,
                 "activation_pending": self.process_activation_pending,
                 "activation_client_unassigned": self.activation_client_unassigned,
+                "initialization": copy.deepcopy(self.initialization_status),
             },
             "scheduler": {
                 "last_growth_sample_age_s": self.last_growth_sample_age_s,
@@ -693,6 +698,9 @@ class ControllerService(OnlineParametersMixin):
             self.adapter.configure(defaults, self.current_run_id or 'gui-workspace')
             self._adapter_configured = True
             self.controller_active = self.controller_active_old = False
+            self.process_activation_pending = False
+            if self.initialization_status["state"] == "pending":
+                self.initialization_status.update(state="stopped", stage=None)
         else:
             self.adapter.apply_modified(workspace)
         self._sync_workspace()
@@ -748,6 +756,7 @@ class ControllerService(OnlineParametersMixin):
             if command.run_id != self.current_run_id:
                 raise ValueError('Stop belongs to another experiment.')
             self.controller_active = self.controller_active_old = False
+            self._cancel_initialization()
             self.adapter.apply_modified({'controller_active': False})
             self.adapter.stop()
             self.state = ControllerState.STOPPED
@@ -932,6 +941,7 @@ class ControllerService(OnlineParametersMixin):
             kernel = getattr(self.adapter,'controller',None)
             try:
                 self._receive_modified()
+                before_refresh = getattr(kernel, 'refresh_count', 0)
                 stage = 'activation'
                 from .algorithm._logical import source_if, source_not
                 changed = source_if(np.not_equal(self.controller_active, self.controller_active_old))
@@ -943,12 +953,17 @@ class ControllerService(OnlineParametersMixin):
                     if activate:
                         self._activate()
                     else:
+                        self._cancel_initialization()
                         self.adapter.stop()
                 else:
                     source_if(source_not(self.controller_active))
+                    if source_if(self.controller_active) and self.process_activation_pending:
+                        self._complete_activation()
                 self._observe_controller_state()
+                if (not source_if(self.controller_active == 1)
+                        and self.initialization_status["state"] == "stopped"):
+                    return {'executed': False, 'reason': 'controller_inactive'}
                 stage = 'refresh'
-                before_refresh = getattr(kernel, 'refresh_count', 0)
                 self.adapter.prepare_iteration()
                 self._sync_workspace()
                 if getattr(kernel, 'refresh_count', 0) > before_refresh:
@@ -1254,6 +1269,7 @@ class ControllerService(OnlineParametersMixin):
                 "wait_count": self.process_wait_count,
                 "activation_pending": self.process_activation_pending,
                 "activation_client_unassigned": self.activation_client_unassigned,
+                "initialization": copy.deepcopy(self.initialization_status),
                 "write_recovery": copy.deepcopy(self.process_write_wait),
             }
         )
@@ -1594,26 +1610,66 @@ class ControllerService(OnlineParametersMixin):
 
 
     def _activate(self):
+        # The run is started exactly once. A failed initial read is retried by
+        # _complete_activation without clearing history or restarting its clock.
+        self.process_activation_pending = True
+        self.initialization_status = {
+            "state": "pending", "attempts": 0, "stage": "start",
+            "last_error": None, "completed_at": None,
+        }
         self.adapter.start()
         self._run_started_monotonic = self._monotonic_clock()
         self._activation_wall_time = self._wall_clock()
         self._run_elapsed_s = 0.0
         self.control_tick_count = 0
-        if self.parameters.get('run_type') == 'experiment':
-            self.process_adapter.connect()
-            reader = getattr(self.process_adapter, 'read_initial_field', None)
-            if callable(reader):
-                for name in ('T','T_j','T_j_set','c','count_middle'):
-                    self.adapter.assign_initial_scalar(name, reader(name), raw_units=True)
-            else:
-                # Legacy third-party adapters expose only one snapshot. This is
-                # an interface limitation, never evidence of sequential OPC UA I/O.
-                state = self.process_adapter.read_state()
-                for name in ('T','T_j','T_j_set','c','count_middle'):
-                    self.adapter.assign_initial_scalar(name, getattr(state,name), raw_units=False)
-                self.last_process_state = state.to_dict()
-        self.adapter.complete_initialization()
-        self.adapter.request_refresh()
+        self._complete_activation()
+
+
+    def _cancel_initialization(self):
+        if not self.process_activation_pending:
+            return
+        # A failed constructor may have left the startup refresh flag set.
+        # Stop cancels that unfinished attempt rather than rebuilding while
+        # inactive or applying its refresh receipt during a future run.
+        self.adapter.apply_modified({'controller_refresh_request': False})
+        self.process_activation_pending = False
+        self._refresh_receipt_event_id = None
+        self.initialization_status.update(state="stopped", stage=None)
+
+
+    def _complete_activation(self):
+        """Retry unfinished initialization in the same active experiment."""
+        if not self.process_activation_pending:
+            return
+        self.initialization_status["attempts"] += 1
+        try:
+            if self.parameters.get('run_type') == 'experiment':
+                self.initialization_status["stage"] = "connect"
+                self.process_adapter.connect()
+                reader = getattr(self.process_adapter, 'read_initial_field', None)
+                if callable(reader):
+                    for name in ('T','T_j','T_j_set','c','count_middle'):
+                        self.initialization_status["stage"] = f"read_initial_{name}"
+                        self.adapter.assign_initial_scalar(name, reader(name), raw_units=True)
+                else:
+                    # Legacy third-party adapters expose only one snapshot.
+                    self.initialization_status["stage"] = "read_initial_state"
+                    state = self.process_adapter.read_state()
+                    for name in ('T','T_j','T_j_set','c','count_middle'):
+                        self.adapter.assign_initial_scalar(name, getattr(state,name), raw_units=False)
+                    self.last_process_state = state.to_dict()
+            self.initialization_status["stage"] = "seed_template"
+            self.adapter.complete_initialization()
+            self.initialization_status["stage"] = "filter_initialization"
+            self.adapter.request_refresh()
+            self.adapter.prepare_iteration()
+        except Exception as exc:
+            self.initialization_status.update(state="pending", last_error=str(exc))
+            raise
+        self.process_activation_pending = False
+        self.initialization_status.update(
+            state="completed", stage=None, last_error=None, completed_at=utc_ts(),
+        )
 
 
     def _observe_controller_state(self):

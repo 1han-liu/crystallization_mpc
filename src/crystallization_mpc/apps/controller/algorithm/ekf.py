@@ -182,6 +182,19 @@ class ExtendedKalmanFilter:
         self._sqrt_covariance = _chol_psd(covariance) if root is None else root.copy()
         self._covariance_snapshot = covariance.copy()
 
+    def numerical_snapshot(self) -> dict[str, Any]:
+        """Copy computational memory without a constructor or factorization."""
+        names = ("state", "covariance", "process_noise", "measurement_noise",
+                 "_sqrt_covariance", "_covariance_snapshot", "_sqrt_process_noise",
+                 "_sqrt_measurement_noise", "_diagnostic_initial_covariance")
+        return {**{name: copy.deepcopy(getattr(self, name)) for name in names},
+                "transition": self.transition, "measurement": self.measurement}
+
+    def restore_numerical_snapshot(self, snapshot: Mapping[str, Any]) -> None:
+        """Restore only an interrupted module; retain the filter identity."""
+        for name, value in snapshot.items():
+            setattr(self, name, value if name in {"transition", "measurement"} else copy.deepcopy(value))
+
     def predict(self) -> np.ndarray:
         self._synchronize_covariance()
         prior = self.state.copy()
