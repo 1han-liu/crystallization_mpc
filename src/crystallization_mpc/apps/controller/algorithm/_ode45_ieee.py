@@ -13,31 +13,37 @@ from typing import Callable
 
 import numpy as np
 
+from ._fdlibm import real_power
+
 
 def ode45_final_ieee(function: Callable[[float, np.ndarray], np.ndarray],
                      initial: np.ndarray, duration: float, *, rtol: float,
                      atol: float, first_derivative: np.ndarray | None = None) -> np.ndarray:
     y = np.asarray(initial, dtype=float).copy()
     finish = float(duration)
+    direction = -1.0 if finish < 0.0 else 1.0
+    if finish == 0.0:
+        raise ValueError("The integration interval must have distinct endpoints.")
     t = 0.0
     threshold = float(atol) / float(rtol)
-    maximum_step = abs(finish) / 10.0
+    maximum_step = max(0.1 * abs(finish), 16.0 * np.finfo(float).eps * abs(finish))
     f = np.asarray(function(t, y) if first_derivative is None else first_derivative, dtype=float)
     with np.errstate(all="ignore"):
-        relative = np.linalg.norm(f / np.fmax(np.abs(y), threshold), np.inf) / (.8 * rtol ** .2)
+        relative = np.linalg.norm(f / np.fmax(np.abs(y), threshold), np.inf) / (.8 * real_power(rtol, .2))
         step = maximum_step
         if step * relative > 1:
             step = 1.0 / relative
-        step = float(np.fmax(step, 16 * np.spacing(t)))
-        while t < finish:
-            minimum_step = 16 * np.spacing(t)
-            step = float(np.fmin(maximum_step, np.fmax(minimum_step, step)))
-            final_step = 1.1 * step >= finish - t
+        step = float(np.fmax(step, 16 * abs(np.spacing(t))))
+        while direction * (finish - t) > 0:
+            minimum_step = 16 * abs(np.spacing(t))
+            current_maximum_step = max(minimum_step, maximum_step)
+            step = float(np.fmin(current_maximum_step, np.fmax(minimum_step, step)))
+            final_step = 1.1 * step >= abs(finish - t)
             if final_step:
-                step = finish - t
+                step = abs(finish - t)
             no_rejection = True
             while True:
-                h = step
+                h = direction * step
                 k2 = np.asarray(function(t + h*(1/5), y + h * ((1/5) * f)))
                 k3 = np.asarray(function(t + h*(3/10), y + h * (3/40*f + 9/40*k2)))
                 k4 = np.asarray(function(t + h*(4/5), y + h * (44/45*f - 56/15*k2 + 32/9*k3)))
@@ -59,7 +65,7 @@ def ode45_final_ieee(function: Callable[[float, np.ndarray], np.ndarray],
                         return y
                     if no_rejection:
                         no_rejection = False
-                        step = float(np.fmax(minimum_step, step * np.fmax(.1, .8 * (rtol/error) ** .2)))
+                        step = float(np.fmax(minimum_step, step * np.fmax(.1, .8 * real_power(rtol/error, .2))))
                     else:
                         step = float(np.fmax(minimum_step, .5 * step))
                     final_step = False
@@ -68,7 +74,7 @@ def ode45_final_ieee(function: Callable[[float, np.ndarray], np.ndarray],
             if final_step:
                 return next_y
             if no_rejection:
-                multiplier = 1.25 * (error/rtol) ** .2
+                multiplier = 1.25 * real_power(error/rtol, .2)
                 step = step / multiplier if multiplier > .2 else 5 * step
             t, y, f = next_t, next_y, k7
     return y

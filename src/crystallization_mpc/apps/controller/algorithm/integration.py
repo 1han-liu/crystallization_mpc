@@ -12,7 +12,6 @@ from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.apps.controller.algorithm.controller import (
     CrystallizationController,
 )
-from crystallization_mpc.messaging.contracts import GrowthRateSamplePayload
 
 
 class CrystallizationControllerAdapter(ControllerAdapter):
@@ -24,12 +23,36 @@ class CrystallizationControllerAdapter(ControllerAdapter):
         self.controller = controller or CrystallizationController()
 
     def configure(self, params: Mapping[str, Any], run_id: str) -> None:
-        # Central supplies one immutable parameter snapshot per run.
+        # Source receive_params assigns the supplied workspace.
         self.controller.configure(params, run_id)
 
     def start(self) -> None:
         # Algorithm initialization is owned by controller.py.
         self.controller.start()
+
+    def assign_initial_scalar(self, name: str, value: Any, *, raw_units: bool = True) -> None:
+        self.controller.assign_initial_scalar(name, value, raw_units=raw_units)
+
+    def complete_initialization(self) -> None:
+        self.controller.complete_initialization()
+
+    def apply_modified(self, mapping: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.controller.apply_modified(mapping)
+
+    def request_refresh(self) -> None:
+        self.controller.request_refresh()
+
+    def refresh_pending(self) -> bool:
+        return self.controller.refresh_pending()
+
+    def prepare_iteration(self) -> None:
+        self.controller.prepare_iteration()
+
+    def set_g_active(self, active: bool) -> None:
+        self.controller.set_g_active(active)
+
+    def workspace_snapshot(self) -> Mapping[str, Any]:
+        return self.controller.workspace_snapshot()
 
     def initialize_process_state(self, process_state: ProcessState) -> None:
         self.controller.initialize_process_state(process_state)
@@ -37,60 +60,20 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def record_activation_read_failure(self, error: Exception) -> None:
         self.controller.record_activation_read_failure(error)
 
-    def resume_process_state(self, process_state: ProcessState) -> None:
-        self.controller.resume_process_state(process_state)
 
     def record_read_failure(self, tick: ControllerTickInput, error: Exception | None = None) -> None:
         self.controller.record_read_failure(tick, error)
 
-    def initialization_pending(self) -> bool:
-        return self.controller.initialization_pending()
 
-    def retry_initialization(self) -> None:
-        self.controller.retry_initialization()
 
-    def step(
-        self,
-        sample: GrowthRateSamplePayload | ControllerTickInput,
-        process_state: ProcessState | None = None,
-    ) -> ControllerStepResult | None:
-        # Execute one controller-clock cycle.
-        if isinstance(sample, ControllerTickInput):
-            tick = sample
-        else:
-            # Backward-compatible bridge for the pre-scheduler service. The
-            # dedicated scheduler sends ControllerTickInput directly.
-            controller_dt = float(self.controller.params.get("dt", sample.dt_s))
-            tick = ControllerTickInput(
-                tick_seq=self.controller.frame_index + 1,
-                controller_dt_s=controller_dt,
-                elapsed_s=(self.controller.frame_index + 1) * controller_dt,
-                growth_sample=sample,
-                growth_sample_age_s=0.0,
-                process_state=process_state,
-            )
-        output = self.controller.step(tick)
-
-        # Do not manufacture an output while the algorithm is warming up.
-        if output is None:
-            return None
-
-        if isinstance(output, ControllerStepResult):
-            return output
-
-        if isinstance(output, Mapping):
-            return ControllerStepResult.from_mapping(output)
-
-        raise TypeError(
-            "CrystallizationController.step() must return ControllerStepResult, "
-            "a result mapping, or None."
-        )
+    def step(self, tick: ControllerTickInput) -> ControllerStepResult | None:
+        if not isinstance(tick, ControllerTickInput):
+            raise TypeError("step() requires the Controller-clock input.")
+        return self.controller.step(tick)
 
     def stop(self) -> None:
         self.controller.stop()
 
-    def add_seed(self, event: Mapping[str, Any]) -> None:
-        self.controller.add_seed(event)
 
     def set_adaptation(
         self,
@@ -126,11 +109,7 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def refresh_status(self) -> Mapping[str, Any]:
         return self.controller.refresh_status()
 
-    def rollback_runtime_refresh(self, event_id: str) -> bool:
-        return self.controller.rollback_runtime_refresh(event_id)
 
-    def commit_runtime_refresh(self, event_id: str) -> bool:
-        return self.controller.commit_runtime_refresh(event_id)
 
     def adaptation_status(self) -> Mapping[str, Any] | None:
         if not self.controller.configured:
@@ -143,24 +122,13 @@ class CrystallizationControllerAdapter(ControllerAdapter):
     def export_state(self) -> Mapping[str, Any] | None:
         return self.controller.export_state()
 
-    def restore_state(
-        self,
-        params: Mapping[str, Any],
-        run_id: str,
-        state: Mapping[str, Any],
-    ) -> bool:
-        # Validate a checkpoint that claimed RUNNING before interruption.
-        # A stopped numerical archive cannot satisfy that stricter claim.
-        # Successful restoration itself never authorizes service scheduling.
-        return self.controller.restore_state(params, run_id, state) and self.controller.running
 
-    def restore_held_state(
-        self, params: Mapping[str, Any], run_id: str, state: Mapping[str, Any]
-    ) -> bool:
-        # End may have stopped the algorithm before disconnect/persistence
-        # failed. Its complete stopped numerical state is still valid for a
-        # service-level hold, never for an automatically running scheduler.
+
+    def restore_state(self, params, run_id, state):
         return self.controller.restore_state(params, run_id, state)
+
+    def restore_held_state(self, params, run_id, state):
+        return self.restore_state(params, run_id, state)
 
 
 __all__ = ["CrystallizationControllerAdapter"]

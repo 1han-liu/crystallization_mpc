@@ -247,7 +247,7 @@ class FourPhaseAcceptance:
         self.seed_id: str | None = None
         self.seed_consumed_tick: int | None = None
         self.pending_event_id: str | None = None
-        self.expected_refresh_count = 0
+        self.expected_refresh_count = 1  # original startup refresh only
         self.seen_refresh_count = 0
         self.start_wall = utc_ts()
         self.latest_computed_at: str | None = None
@@ -293,6 +293,16 @@ class FourPhaseAcceptance:
         return result
 
     def _runtime(self, changes: Mapping[str, Any]) -> None:
+        changes = dict(changes)
+        if changes.get("adaptation_enabled"):
+            changes["G_active"] = True  # explicit operator action in phase 2
+        if changes.get("control_target") == "G":
+            # The unchanged wire sends a partial map. This offline operator
+            # explicitly supplies the aliases the original GUI sends for G.
+            for key in ("dT_dt_min", "dT_dt_max", "t_lag_threshold_perc"):
+                changes[key] = self.params[f"{key}_G"]
+            for key in ("K_P_T", "K_I_T"):
+                changes[f"params.{key}"] = self.params[f"{key}_G"]
         event_id = uuid4().hex
         self._command(CONTROLLER_RUNTIME_UPDATE_COMMAND, {
             "run_id": self.run_id, "event_id": event_id,
@@ -300,7 +310,7 @@ class FourPhaseAcceptance:
             "changes": dict(changes), "requested_at": utc_ts(),
         })
         self.pending_event_id = event_id
-        self.expected_refresh_count += 1
+        # Ordinary GUI assignments do not request a Controller refresh.
 
     def _capture(self) -> tuple[dict[str, Any], dict[str, Any]]:
         status = self.service.status()
@@ -334,9 +344,9 @@ class FourPhaseAcceptance:
             if last_result.get("event_id") == self.pending_event_id:
                 if last_result.get("status") == "applied":
                     if refresh_count != self.expected_refresh_count:
-                        raise RuntimeError("One changed runtime batch must cause exactly one Controller refresh.")
+                        raise RuntimeError("Ordinary parameter assignment unexpectedly changed the refresh count.")
                     if last_result.get("effective_tick") != self.service.control_tick_count:
-                        raise RuntimeError("Runtime acknowledgement must name the actual refresh tick.")
+                        raise RuntimeError("Runtime acknowledgement must name its assignment tick.")
                     self._event("runtime_applied", actual=True, wall_utc=last_result["applied_at"], receipt=copy.deepcopy(last_result))
                     self._mark_phase(self.gates.phase, "RUNNING", start_tick=self.service.control_tick_count)
                     self._event("phase_started", actual=True, wall_utc=last_result["applied_at"], name_in_paper=PHASE_NAMES[self.gates.phase])
@@ -553,9 +563,9 @@ class FourPhaseAcceptance:
             filters = raw.get("filters") or {}
             if set(refresh) != set(expected_filters):
                 failed.append("Missing full initialization snapshots for one or more filters.")
-            expected_main = [row.get("T"), 0.0, row.get("c"), 0.0]
+            expected_main = [self.params["T_init"], 0.0, self.params["c_init"], 0.0]
             if refresh.get("main", {}).get("state") != expected_main:
-                failed.append("Main EKF did not initialize from current T/c with zero derivatives.")
+                failed.append("Main EKF did not initialize from the source workspace T/c scalars.")
             if (scalars.get("diag_snapshot_stage") != "refresh_init"
                     or scalars.get("diag_refresh_applied") is not True
                     or scalars.get("diag_refresh_count") != current_count):
@@ -570,13 +580,11 @@ class FourPhaseAcceptance:
                                and all(isinstance(line, list) and len(line) == size for line in covariance))
                 if not valid_shape or initial is None or covariance != initial:
                     failed.append(f"{name}: full covariance did not equal its constructor initial matrix.")
-            if row.get("fit_sample_count") != 0:
-                failed.append("New fitting segment did not start with zero samples.")
-            if row.get("dT_dt_KF") != 0.0 or row.get("dc_dt_KF") != 0.0:
-                failed.append("Refresh tick derivative outputs were not zero.")
-            if any(scalars.get(name) != 0.0 for name in
-                   ("diag_int_target", "diag_int_dT_dt", "diag_int_T")):
-                failed.append("Refresh tick control integrals were not zero.")
+            # The original refresh proceeds into predict/correct/control in
+            # this SAME loop. Final derivatives/integrals need not remain zero,
+            # and G history is not split into a fresh fitting segment.
+            if not (filters.get("main") or {}).get("prior") or not (filters.get("main") or {}).get("posterior"):
+                failed.append("Refresh did not continue main EKF prediction/correction in the same cycle.")
             next_row = next((item for item in self.rows
                              if item["tick_seq"] == row["tick_seq"] + 1), None)
             if next_row is None:

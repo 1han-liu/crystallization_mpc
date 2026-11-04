@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
 from typing import Any, Callable, Mapping
 
 import numpy as np
-from scipy.linalg import solve_triangular
+from ._numeric_backend import cholesky_upper, matmul, qr_r, solve_triangular, svd_right, symmetric_eigenvalues
 
 from crystallization_mpc.apps.controller.tick import ControllerGrowthMeasurementError, ControllerInputValueError
 from .dynamics import state_transition_function
@@ -18,15 +19,48 @@ ArrayFunction = Callable[[np.ndarray], np.ndarray]
 def _chol_psd(matrix: np.ndarray) -> np.ndarray:
     """Same positive-definite Cholesky / PSD SVD factor as the source filter."""
     try:
-        return np.linalg.cholesky(matrix)
+        # The source tests the *upper* Cholesky factor.  On a rank-deficient
+        # covariance, lower and upper LAPACK paths can make different rounded
+        # definiteness decisions; using the other path changes the later EKF.
+        return cholesky_upper(matrix).T
     except np.linalg.LinAlgError:
-        _left, singular, right = np.linalg.svd(matrix)
-        return right.T @ np.diag(np.sqrt(singular))
+        singular, right = svd_right(matrix)
+        result = matmul(right.conj().T, np.diag(np.sqrt(singular)))
+        return result.real if np.iscomplexobj(result) and np.all(result.imag == 0) else result
+
+
+def _validate_process_noise(value: np.ndarray) -> None:
+    """Only Q takes the source constructor's covariance property setter.
+
+    MeasurementNoise deliberately bypasses that setter in this constructor;
+    applying these checks to R would invent a source-incompatible restriction.
+    """
+    def fail(identifier: str, message: str) -> None:
+        raise ControllerInputValueError(message, stage="filter_initialization",
+                                        reference_identifier=identifier)
+    if np.iscomplexobj(value):
+        fail("MATLAB:ExtendedKalmanFilter:expectedReal", "ProcessNoise must be real.")
+    array = np.asarray(np.real(value), dtype=float)
+    if not np.isfinite(array).all():
+        fail("MATLAB:ExtendedKalmanFilter:expectedFinite", "ProcessNoise must be finite.")
+    if array.ndim != 2 or array.shape[0] != array.shape[1]:
+        fail("MATLAB:ExtendedKalmanFilter:expectedSquare", "ProcessNoise must be square.")
+    if array.size == 0:
+        return
+    tolerance = 100.0 * np.spacing(np.max(np.abs(np.diag(array))))
+    symmetric = np.all(np.abs(array - array.T) < np.sqrt(tolerance))
+    averaged = (array + array.T) / 2.0
+    if not np.isfinite(averaged).all():
+        fail("MATLAB:eig:matrixWithNaNInf", "Eigenvalue input must not contain NaN or Inf.")
+    eigenvalues = symmetric_eigenvalues(averaged)
+    if not symmetric or np.any(eigenvalues < -tolerance):
+        fail("shared_tracking:KalmanFilter:invalidCovarianceValues",
+             "ProcessNoise must be symmetric and positive semidefinite.")
 
 
 def _qr_factor(matrix: np.ndarray, root: np.ndarray, noise_root: np.ndarray) -> np.ndarray:
-    augmented = np.vstack((root.T @ matrix.T, noise_root.T))
-    return np.linalg.qr(augmented, mode="reduced")[1].T
+    augmented = np.vstack((matmul(root.T, matrix.T), noise_root.T))
+    return qr_r(augmented).T
 
 
 def calc_Q(params: Mapping[str, Any], dt: float) -> np.ndarray:
@@ -94,16 +128,31 @@ class ExtendedKalmanFilter:
     diagnostic_capture_failed: bool = field(default=False, init=False, repr=False, compare=False)
     _sqrt_covariance: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
     _covariance_snapshot: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _sqrt_process_noise: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _sqrt_measurement_noise: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # The source extendedKalmanFilter State setter validates real, finite
         # initial state. It does not impose positive temperature/concentration.
-        if np.iscomplexobj(self.state) or not np.isfinite(self.state).all():
+        if np.iscomplexobj(self.state):
+            raise ControllerInputValueError("Initial filter State must be real.",
+                                            stage="filter_initialization",
+                                            reference_identifier="MATLAB:ExtendedKalmanFilter:expectedReal")
+        if not np.isfinite(self.state).all():
             raise ControllerInputValueError("Initial filter State must be real and finite.",
                                             stage="filter_initialization",
                                             reference_identifier="MATLAB:ExtendedKalmanFilter:expectedFinite")
         self._sqrt_covariance = _chol_psd(self.covariance)
         self._covariance_snapshot = self.covariance.copy()
+        _validate_process_noise(self.process_noise)
+        self._sqrt_process_noise = _chol_psd(self.process_noise)
+        if np.asarray(self.measurement_noise).size == 0:
+            self.measurement_noise = np.ones((1, 1))
+        if np.asarray(self.measurement_noise).ndim != 2 or self.measurement_noise.shape[0] != self.measurement_noise.shape[1]:
+            raise ControllerInputValueError("Matrix must be square.", stage="filter_initialization",
+                                            reference_identifier="MATLAB:square")
+        self._sqrt_measurement_noise = _chol_psd(self.measurement_noise)
+        self.measurement_noise = matmul(self._sqrt_measurement_noise, self._sqrt_measurement_noise.conj().T)
         # Observational only: constructor P remains unchanged and this copy is
         # deliberately absent from the recovery wire format.
         try:
@@ -138,8 +187,8 @@ class ExtendedKalmanFilter:
         prior = self.state.copy()
         F = _forward_jacobian(self.transition, prior)
         predicted = np.asarray(self.transition(prior), dtype=float)
-        predicted_root = _qr_factor(F, self._sqrt_covariance, _chol_psd(self.process_noise))
-        predicted_covariance = predicted_root @ predicted_root.T
+        predicted_root = _qr_factor(F, self._sqrt_covariance, self._sqrt_process_noise)
+        predicted_covariance = matmul(predicted_root, predicted_root.T)
         self.state = predicted
         self.covariance = predicted_covariance
         self._sqrt_covariance = predicted_root
@@ -157,22 +206,29 @@ class ExtendedKalmanFilter:
         observed_array = np.asarray(observed, dtype=float).reshape(-1)
         H = _forward_jacobian(self.measurement, self.state)
         expected = np.asarray(self.measurement(self.state), dtype=float).reshape(-1)
-        noise_root = _chol_psd(self.measurement_noise)
+        noise_root = self._sqrt_measurement_noise
+        if noise_root.shape == (1, 1) and observed_array.size != 1:
+            noise_root = np.eye(observed_array.size) * noise_root[0, 0]
+            self._sqrt_measurement_noise = noise_root
+            self.measurement_noise = matmul(noise_root, noise_root.conj().T)
+        elif noise_root.shape[0] != observed_array.size:
+            raise ControllerInputValueError("MeasurementNoise has incompatible dimensions.",
+                                            reference_identifier="shared_tracking:KalmanFilter:invalidCovarianceDims")
         innovation_root = _qr_factor(H, self._sqrt_covariance, noise_root)
-        cross_covariance = (self._sqrt_covariance @ self._sqrt_covariance.T) @ H.T
+        cross_covariance = matmul(matmul(self._sqrt_covariance, self._sqrt_covariance.T), H.T)
         gain = solve_triangular(innovation_root.T,
                                 solve_triangular(innovation_root, cross_covariance.T, lower=True, check_finite=False),
                                 lower=False, check_finite=False).T
-        corrected = self.state + gain @ (observed_array - expected)
-        correction = -gain @ H
+        corrected = self.state + matmul(gain, observed_array - expected)
+        correction = matmul(-gain, H)
         for index in range(self.state.size):
             correction[index, index] += 1.0
-        corrected_root = _qr_factor(correction, self._sqrt_covariance, gain @ noise_root)
+        corrected_root = _qr_factor(correction, self._sqrt_covariance, matmul(gain, noise_root))
         self.state = corrected
         self._sqrt_covariance = corrected_root
-        self.covariance = corrected_root @ corrected_root.T
+        self.covariance = matmul(corrected_root, corrected_root.T)
         self._covariance_snapshot = self.covariance.copy()
-        innovation_covariance = innovation_root @ innovation_root.T
+        innovation_covariance = matmul(innovation_root, innovation_root.T)
         self._observe(
             "posterior", state=self.state, covariance=self.covariance,
             innovation=observed_array - expected,
@@ -192,10 +248,12 @@ class ExtendedKalmanFilter:
 def construct_EKF(
     state: np.ndarray, params: Mapping[str, Any], dt: float
 ) -> ExtendedKalmanFilter:
-    initial = np.asarray(state, dtype=float).reshape(4)
+    initial = np.asarray(state).reshape(4)
+    captured_params = copy.deepcopy(params)
+    captured_dt = float(dt)
     return ExtendedKalmanFilter(
-        transition=lambda value: state_transition_function(params, value, dt),
-        measurement=lambda value: measurement_function(params, value),
+        transition=lambda value: state_transition_function(captured_params, value, captured_dt),
+        measurement=lambda value: measurement_function(captured_params, value),
         state=initial.copy(),
         process_noise=calc_Q(params, dt),
         measurement_noise=calc_R(params),
@@ -231,11 +289,11 @@ def create_EKF_general(
         dtype=float,
     ) * float(q2_general)
     return ExtendedKalmanFilter(
-        transition=lambda value: F @ value,
+        transition=lambda value: matmul(F, value),
         measurement=lambda value: value,
-        state=np.asarray(state, dtype=float).reshape(3).copy(),
+        state=np.asarray(state).reshape(3).copy(),
         process_noise=Q,
-        measurement_noise=np.diag(np.asarray(r_diag_general, dtype=float)),
+        measurement_noise=np.diag(np.asarray(r_diag_general)),
         covariance=np.eye(3),
     )
 

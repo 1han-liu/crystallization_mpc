@@ -6,7 +6,7 @@ import math
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
-from scipy.optimize import minimize_scalar
+from ._fminbnd import fminbnd
 
 from .dynamics import state_transition_matrices
 from .thermodynamics import calc_G, calc_relative_sigma
@@ -78,8 +78,15 @@ def calc_e_dT_dt(
     return calc_dT_dt_model(params, x, T_j) - float(dT_dt_set)
 
 
-def _signed_root(value: float, order: float) -> float:
-    return float(np.sign(value) * np.power(np.abs(np.float64(value)), 1.0 / float(order)))
+def _nthroot(value: float, order: float) -> float:
+    x, n = np.float64(value), np.float64(order)
+    if x < 0 and np.mod(n, 2) != 1:
+        raise ValueError("A negative nthroot input requires an odd integer root.")
+    with np.errstate(all="ignore"):
+        y = (np.sign(x) + (x == 0)) * np.power(np.abs(x), np.divide(1., n))
+        if x != 0 and abs(x) < 1. / np.finfo(float).eps and np.isfinite(n):
+            y = y - np.divide(np.power(y, n) - x, n * np.power(y, n - 1))
+    return float(y)
 
 
 def calc_e_target(
@@ -92,8 +99,8 @@ def calc_e_target(
         growth = float(calc_G(params, c, T, is_model=False))
         k_T = np.float64(params["k_0"]) * np.exp(
             np.divide(-np.float64(params["E_A"]) / float(params["R"]), np.float64(T)))
-        target_value = _signed_root(np.divide(growth, k_T), float(params["n"]))
-        target_set = _signed_root(np.divide(float(target_set), k_T), float(params["n"]))
+        target_value = _nthroot(np.divide(abs(growth), k_T), float(params["n"])) * np.sign(growth)
+        target_set = _nthroot(np.divide(abs(float(target_set)), k_T), float(params["n"])) * np.sign(target_set)
     else:
         raise ValueError("target must be sigma or G.")
     return target_value - float(target_set)
@@ -113,7 +120,7 @@ def objective_function(
     dc_dt_model = float(A[2, :] @ state + Bu[2])
     d2c_dt2 = float(A[3, :] @ state + Bu[3])
     T_next = T + float(dT_dt_set) * float(dt)
-    c_next = c + dc_dt_model * float(dt) + d2c_dt2 * float(dt) ** 2 / 2.0
+    c_next = c + dc_dt_model * float(dt) + d2c_dt2 / 2.0 * float(dt) ** 2
     error = calc_e_target(params, target, target_set, c_next, T_next)
     weight = float(params["w_sigma"] if target == "sigma" else params["w_G"])
     return float(
@@ -139,23 +146,14 @@ def calc_dT_dt_set(
     if mode == "MPC":
         lower = float(dT_dt_min)
         upper = float(dT_dt_max)
-        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
-            raise OptimizationError("MPC optimization bounds are infeasible.")
-        try:
-            result = minimize_scalar(
-                lambda value: objective_function(params, state, target, float(value), target_set, dt),
-                bounds=(lower, upper),
-                method="bounded",
-                options={"xatol": 1e-4},
-            )
-        except OptimizationError:
-            raise
-        except (RuntimeError, ValueError) as exc:
-            raise OptimizationError(f"MPC optimization failed: {exc}") from exc
+        value = fminbnd(
+            lambda value: objective_function(params, state, target, float(value), target_set, dt),
+            lower,
+            upper,
+        )
         # MATLAB fminbnd's default FunValCheck is off, and this caller does not
         # request/check exitflag. A returned iterate is not rejected merely
         # because the objective contains NaN/Inf or convergence was not flagged.
-        value = float(result.x)
     elif mode == "PI":
         value = clip(
             float(params["K_P_target"]) * error
@@ -277,9 +275,9 @@ def calc_t_lag_perc(
     target_set: float,
     absolute_error: float,
 ) -> float:
-    ratio = math.inf if absolute_error == 0 else (
-        float(threshold_percentage) * float(target_set) / float(absolute_error)
-    )
+    with np.errstate(all="ignore"):
+        ratio = float(np.divide(np.float64(threshold_percentage) * float(target_set),
+                                np.float64(absolute_error)))
     return 1.0 + float(base_percentage) * math.atan(ratio) / (math.pi / 2.0)
 
 

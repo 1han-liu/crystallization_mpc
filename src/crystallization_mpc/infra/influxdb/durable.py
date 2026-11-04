@@ -6,8 +6,6 @@ restarts, so an ambiguous HTTP result overwrites the same Influx point.
 """
 from __future__ import annotations
 
-from crystallization_mpc.infra.numeric import encode_nonfinite, decode_nonfinite
-
 from datetime import datetime, timezone
 from contextlib import closing
 import hashlib
@@ -68,7 +66,7 @@ def enqueue_record(connection: sqlite3.Connection, fields: dict[str, Any], *,
     """Enqueue inside the caller's transaction; does not commit on its behalf."""
     stamp = timestamp_ns(timestamp)
     payload = {"fields": fields, "tags": tags or {}, "measurement": measurement, "timestamp_ns": stamp}
-    encoded = json.dumps(encode_nonfinite(payload), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     identifier = event_id or hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     connection.execute(
         "INSERT OR IGNORE INTO telemetry_outbox(event_id,run_id,measurement,timestamp_ns,payload,queued_at_ns) "
@@ -191,7 +189,7 @@ class DurableInfluxWriter:
                 "SELECT event_id,payload FROM telemetry_outbox WHERE delivered_at_ns IS NULL ORDER BY queued_at_ns LIMIT 100"
             ).fetchall()
         for identifier, encoded in rows:
-            payload = decode_nonfinite(json.loads(encoded))
+            payload = json.loads(encoded)
             try:
                 writer.write_tagged_fields(payload["fields"], tags=payload["tags"],
                                            measurement=payload["measurement"], timestamp=payload["timestamp_ns"])

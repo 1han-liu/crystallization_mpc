@@ -74,14 +74,20 @@ python -m pip install -e .
 - The Controller keeps the safe no-op adapter as its default. The
   reference-validated algorithm is enabled explicitly with
   `CONTROLLER_ADAPTER=crystallization_mpc.apps.controller.algorithm.integration:CrystallizationControllerAdapter`.
+- The numerical Controller loads the independent `mkl==2025.0.1` distribution
+  on Windows x86-64 or Linux x86-64. For native Windows, use 64-bit Python
+  and install `requirements.txt` in that same environment; the loader locates
+  `Library/bin/mkl_rt.2.dll` and registers its DLL dependency directories.
+  Windows loading is covered by isolated platform tests; native Windows
+  numerical replay remains to be verified. Docker Desktop uses Linux containers.
 - `CONTROLLER_PROCESS_ENABLED=true` enables process reads through Telegraf and RabbitMQ.
-  Start the `process-io` Compose profile and follow [Process I/O setup](docs/process-io.md)
-  for configuration migration and simulator/device commissioning. Simulator
+  Start the `process-io` Compose profile; see [Lab daily operation](docs/lab-daily-operation-zh.md)
+  for service startup and data-source status. Simulator
   developers should follow the [five-node OPC UA interface](docs/opcua-simulator-interface.md).
   `CONTROLLER_PROCESS_WRITE_ENABLED=false` remains the default write gate; this
   combination is read-only shadow mode. Never enable the write gate without a
   completed numerical and on-site safety review.
-- Central, Gsensor, and Controller share `EXPERIMENT_HOST_ROOT`. New experiment folders use UTC creation time and the experiment label; the unique `run_id` remains unchanged. System state and durable telemetry queues live under `_system`; per-run processing state remains inside its experiment folder. Existing installations require the stopped-service migration described in [experiment storage and CSV exports](docs/process-io.md#experiment-storage-and-csv-exports).
+- Central, Gsensor, and Controller share `EXPERIMENT_HOST_ROOT`. New experiment folders use UTC creation time and the experiment label; the unique `run_id` remains unchanged. System state and durable telemetry queues live under `_system`; per-run processing state remains inside its experiment folder.
 - Central's **Experiment History & Exports** panel searches by label, `run_id`, and UTC creation date. Ended experiments automatically export parameters, raw process data, controller data, GSensor data, and events to five CSV files in their own folder. Browsing history does not change the active experiment. All archive UI labels are English.
 - Image revisions are identified by filename, nanosecond modification time, and file size. A camera may therefore overwrite a fixed filename and still produce a new measurement frame.
 - `GSENSOR_HOUGH_DEBUG_ENABLED` defaults to `false`; normal experiments keep only the latest/final detection overlays and restart state. Enable it only for local Hough diagnosis.

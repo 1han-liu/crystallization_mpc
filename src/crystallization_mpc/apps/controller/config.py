@@ -75,23 +75,9 @@ class ControllerSettings:
     process_verify_tolerance_K: float = 0.05
 
     def __post_init__(self) -> None:
-        if self.process_write_enabled and not self.process_enabled:
-            raise ValueError(
-                "CONTROLLER_PROCESS_WRITE_ENABLED requires CONTROLLER_PROCESS_ENABLED."
-            )
-        for name in ("process_sample_max_age_s", "process_startup_timeout_s",
-                     "process_command_ttl_s", "process_write_timeout_s",
-                     "process_verify_tolerance_K"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive.")
-        if not (0 < self.process_jacket_min_K < self.process_jacket_max_K < math.inf):
-            raise ValueError("Process jacket bounds must be finite positive increasing values.")
-        if not all(str(getattr(self, name)).strip() for name in (
-            "process_device_id", "process_measurement_name", "process_telemetry_queue",
-            "process_result_queue",
-        )):
-            raise ValueError("Process device, measurement and queues must be configured.")
+        # Only transport call configuration is represented here. Source input,
+        # parameter and physical limits are evaluated at the source statements.
+        pass
 
     @classmethod
     def from_env(cls) -> "ControllerSettings":
@@ -106,7 +92,7 @@ class ControllerSettings:
             rabbit_url=os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F"),
             rabbit_exchange=os.getenv("RABBIT_EXCHANGE", EXCHANGE),
             rabbit_queue=os.getenv("RABBIT_QUEUE", QUEUES["controller"]),
-            adapter_spec=os.getenv("CONTROLLER_ADAPTER", "").strip() or None,
+            adapter_spec=os.getenv("CONTROLLER_ADAPTER", "").strip() or "crystallization_mpc.apps.controller.algorithm.integration:CrystallizationControllerAdapter",
             process_enabled=_env_bool("CONTROLLER_PROCESS_ENABLED"),
             process_write_enabled=_env_bool("CONTROLLER_PROCESS_WRITE_ENABLED"),
             influx_enabled=_env_bool("CONTROLLER_INFLUX_ENABLED"),

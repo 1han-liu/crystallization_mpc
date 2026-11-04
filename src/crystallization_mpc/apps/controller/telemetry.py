@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
 import math
@@ -14,7 +15,7 @@ from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.process import ProcessState, ProcessWriteResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput
 from crystallization_mpc.infra.influxdb.write import InfluxWriter
-from crystallization_mpc.infra.numeric import encode_nonfinite
+from crystallization_mpc.apps.controller.numeric import encode_nonfinite
 
 CONTROLLER_MEASUREMENT = "controller_measurement"
 CONTROLLER_SERVICE_TAG = "controller"
@@ -201,6 +202,7 @@ class ControllerMeasurementRecord:
     measurement_parameter_revision: int = 0
     diagnostics: ControllerDiagnosticsSnapshot | None = None
     diagnostics_capture_error: str | None = None
+    process_write_requested: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.run_id).strip():
@@ -280,7 +282,35 @@ class ControllerMeasurementRecord:
                     "process_read_at": self.process_state.read_at,
                 }
             )
+            sources = getattr(self.process_state, "field_sources", None)
+            if isinstance(sources, Mapping) and sources:
+                # These are the actual inputs used for this calculation, not
+                # additional OPC UA acquisitions. Keep last-received times
+                # unchanged when a cycle uses a held value.
+                fields["process_input_sources"] = json.dumps(
+                    encode_nonfinite(dict(sources)), sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                )
+                for name in ("T", "T_j", "c", "count_middle", "T_j_set"):
+                    source = sources.get(name)
+                    if not isinstance(source, Mapping):
+                        continue
+                    for key in ("updated", "held"):
+                        if type(source.get(key)) is bool:
+                            fields[f"input_{name}_{key}"] = source[key]
+                    for key in ("received_at", "collected_at"):
+                        if isinstance(source.get(key), str):
+                            fields[f"input_{name}_{key}"] = source[key]
+                    error = source.get("last_error")
+                    if error is None or isinstance(error, str):
+                        fields[f"input_{name}_read_error"] = error or ""
+        fields["process_write_requested"] = self.process_write_requested
         fields["process_write_attempted"] = self.process_write_attempted
+        fields["process_write_status"] = (
+            "success" if self.process_write is not None else
+            "failed" if self.process_write_error is not None else
+            "pending" if self.process_write_requested else "not_requested"
+        )
         if self.process_write is not None:
             fields.update(
                 {

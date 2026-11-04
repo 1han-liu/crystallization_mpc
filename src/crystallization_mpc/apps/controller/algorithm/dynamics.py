@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import numpy as np
-from scipy.integrate import solve_ivp
 
 from ._ode45_ieee import ode45_final_ieee
 from .thermodynamics import calc_c_sat, calc_dc_sat_dT, calc_relative_sigma
@@ -33,7 +32,7 @@ def state_transition_matrices_model(
         A33 = 0.0
     else:
         A31 = dc_dt * (
-            -n * c * dc_sat_dT / c_sat / (c - c_sat) + E_A / R / T**2
+            -n * c * dc_sat_dT / c_sat / (c - c_sat) + E_A / R / (T * T)
         )
         A33 = dc_dt * n / (c - c_sat)
     A = np.array(
@@ -92,7 +91,7 @@ def state_transition_ode_T(params: Mapping[str, Any], T: float, T_j: float) -> f
     tau_1 = float(params["tau_1"])
     tau_2 = float(params["tau_2"])
     T_R = float(params["T_R"])
-    return -(1.0 / tau_1 + 1.0 / tau_2) * T + T_j / tau_1 + T_R / tau_2
+    return -(1.0 / tau_1 + 1.0 / tau_2) * T + 1.0 / tau_1 * T_j + 1.0 / tau_2 * T_R
 
 
 def state_transition_function_T(
@@ -104,23 +103,16 @@ def state_transition_function_T(
     rtol: float = ODE_RTOL,
     atol: float = ODE_ATOL,
 ) -> float:
-    result = solve_ivp(
+    result = ode45_final_ieee(
         lambda _time, state: np.array(
             [state_transition_ode_T(params, float(state[0]), float(T_j))]
         ),
-        (0.0, float(dt)),
         np.array([float(T)]),
-        method="RK45",
+        float(dt),
         rtol=rtol,
         atol=atol,
-        max_step=abs(float(dt)) / 10.0,
     )
-    if not result.success or result.y.shape[1] == 0:
-        raise RuntimeError(f"Temperature RK45 failed: {result.message}")
-    value = float(result.y[0, -1])
-    if not np.isfinite(value):
-        raise FloatingPointError("Temperature RK45 produced a non-finite value.")
-    return value
+    return float(result[0])
 
 
 __all__ = [

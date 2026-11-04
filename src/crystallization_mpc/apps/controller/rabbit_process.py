@@ -1,7 +1,8 @@
 """RabbitMQ process I/O, independent of the Controller business-message thread.
 
-Telegraf emits one metric per OPC UA node. Only a complete collection timestamp
-is exposed as a ProcessState; timestamps are never rounded or joined by arrival.
+Telegraf fields are consumed independently at source read positions. Unread
+deliveries are not evidence of synchronous OPC UA readValue; no delivery is
+reused after consumption. Writer calls finish once and do not gate later cycles.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from numbers import Real
 from typing import Any, Callable, Mapping
@@ -22,19 +23,14 @@ from typing import Any, Callable, Mapping
 import pika
 
 from crystallization_mpc.messaging.schema import build_envelope
-from crystallization_mpc.infra.numeric import decode_numeric
 from crystallization_mpc.infra.influxdb.process_events import write_process_event
 
 from .process import (
     CELSIUS_TO_KELVIN,
+    ControllerReadError, ProcessWriteError, MATLAB_EMPTY,
     OpcUaNodeConfig,
     ProcessAdapter,
     ProcessConnectionError,
-    ControllerReadError,
-    ProcessDataTimeoutPending,
-    ProcessMeasurementPending,
-    ProcessTransportPending,
-    ProcessWritePending,
     ProcessSafetyError,
     ProcessState,
     ProcessWriteResult,
@@ -119,11 +115,9 @@ class RabbitProcessConfig:
         if len(set(nodes.values())) != len(FIELDS):
             raise ValueError("Each process field requires a distinct NodeId.")
         object.__setattr__(self, "node_ids", dict(nodes))
-        for name in ("sample_max_age_s", "startup_timeout_s", "command_ttl_s", "write_timeout_s", "verify_tolerance_K"):
+        for name in ("startup_timeout_s", "command_ttl_s", "write_timeout_s"):
             if _number(getattr(self, name), name) <= 0:
                 raise ValueError(f"{name} must be positive.")
-        if not 0 < _number(self.jacket_min_K, "jacket_min_K") < _number(self.jacket_max_K, "jacket_max_K"):
-            raise ValueError("Invalid jacket temperature limits.")
 
 
 @dataclass
@@ -160,10 +154,6 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         self._monotonic = monotonic
         self._condition = threading.Condition(threading.RLock())
         self._outgoing: queue.Queue[_PendingWrite] = queue.Queue()
-        self._recovery_outgoing: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._write_recovery: dict[str, Any] | None = None
-        self._recovery_request: dict[str, Any] | None = None
-        self._recovery_last_queued = float("-inf")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._connected = False
@@ -173,13 +163,9 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         self._last_read_ns: int | None = None
         self._startup_deadline = 0.0
         self._rounds: dict[int, dict[str, float]] = {}
-        self._round_empty_fields: dict[int, set[str]] = {}
         self._invalid_rounds: set[int] = set()
         self._latest: ProcessState | None = None
         self._latest_ns = 0
-        self._latest_empty_fields: set[str] = set()
-        self._read_error: str | None = None
-        self._last_field_values: dict[str, float] = {}
         self._negative_sample: dict[str, Any] | None = None
         self._negative_ns = 0
         self._waiting_since: str | None = None
@@ -188,6 +174,7 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         self._timeout_boundary_ns = 0
         self._last_valid_read_at: str | None = None
         self._hard_telemetry_error: str | None = None
+        self._field_results = {}
         self._newest_seen_ns = 0
         self._newest_fields: set[str] = set()
         self._pending: _PendingWrite | None = None
@@ -227,7 +214,7 @@ class RabbitMqProcessAdapter(ProcessAdapter):
             while not self._connected and not self._stop.is_set():
                 remaining = self._startup_deadline - self._monotonic()
                 if remaining <= 0:
-                    raise ControllerReadError("Process message bus connection attempt timed out.")
+                    raise self._transport_wait_locked("Reconnecting after process message bus connection timeout.")
                 self._condition.wait(remaining)
             if not self._connected:
                 raise ProcessConnectionError("Process I/O was stopped before connecting.")
@@ -238,51 +225,30 @@ class RabbitMqProcessAdapter(ProcessAdapter):
             self._connected = False
             self._reset_samples_locked(clear_fault=True)
             self._fail_pending_locked("Process I/O disconnected; write result unknown.")
-            self._write_recovery = None
-            self._recovery_request = None
             thread = self._thread
             self._condition.notify_all()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=4.5)
 
-    def _reset_samples_locked(self, *, clear_fault: bool = False) -> None:
-        self._rounds.clear()
-        self._round_empty_fields.clear()
-        self._invalid_rounds.clear()
+    def _reset_samples_locked(self, *, clear_fault=False):
+        self._field_results = {}
         self._latest = None
-        self._latest_ns = 0
-        self._latest_empty_fields.clear()
-        self._read_error = None
-        self._negative_sample = None
-        self._negative_ns = 0
-        self._waiting_since = None
-        self._timeout_sample = None
-        self._timeout_boundary_ns = 0
-        self._last_valid_read_at = None
-        if clear_fault:
-            self._hard_telemetry_error = None
-            self._last_field_values.clear()
-        self._newest_seen_ns = 0
-        self._newest_fields.clear()
-        self._last_read_generation = None
         self._last_read_ns = None
+        self._hard_telemetry_error = None
+        self._condition.notify_all()
 
-    def _mark_connected(self) -> None:
+
+    def _mark_connected(self):
         with self._condition:
             self._reset_samples_locked()
-            self._epoch_ns = self._clock_ns()
             self._generation += 1
             self._connected = True
-            # Any response from the preceding transport generation is stale.
-            if self._write_recovery is not None and self._write_recovery.get("pending"):
-                self._new_recovery_request_locked()
             self._condition.notify_all()
 
-    def _transport_wait_locked(self, detail: str = "Reconnecting to the process message bus.") -> ProcessTransportPending:
-        self._waiting_since = self._waiting_since or _iso_ns(self._clock_ns())
-        pending = ProcessTransportPending(waiting_since=self._waiting_since, detail=detail)
-        self._last_invalid_state = pending.to_dict()
-        return pending
+
+    def _transport_wait_locked(self, detail='Process message bus is disconnected.'):
+        return ProcessConnectionError(detail)
+
 
     def _io_loop(self) -> None:
         connected_once = False
@@ -308,7 +274,6 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                 self._mark_connected()
                 while not self._stop.is_set():
                     self._publish_pending(channel)
-                    self._publish_recovery(channel)
                     connection.process_data_events(time_limit=0.1)
             except Exception as exc:
                 with self._condition:
@@ -330,55 +295,12 @@ class RabbitMqProcessAdapter(ProcessAdapter):
                         pass
             self._stop.wait(0.25)
 
-    def read_initial_state(self) -> ProcessState:
-        with self._condition:
-            self._last_field_values.clear()
-            return self._read_process_state(initial=True)
+    def read_state(self):
+        values = {name:self.read_initial_field(name) for name in ('T','T_j','T_j_set','c','count_middle')}
+        return ProcessState(T=values['T']+CELSIUS_TO_KELVIN,T_j=values['T_j']+CELSIUS_TO_KELVIN,
+            T_j_set=values['T_j_set']+CELSIUS_TO_KELVIN,c=values['c'],count_middle=values['count_middle'],
+            read_at=_iso_ns(self._clock_ns()))
 
-    def read_state(self) -> ProcessState:
-        return self._read_process_state(initial=False)
-
-    def _read_process_state(self, *, initial: bool) -> ProcessState:
-        # One successful read consumes one delivered complete collection. A
-        # repeated numeric value is valid, but a cached collection is not a new
-        # synchronous OPC UA read. This transport timeout only bounds this call.
-        deadline = self._monotonic() + self.config.startup_timeout_s
-        with self._condition:
-            while True:
-                if self._stop.is_set() or self._thread is None or not self._connected:
-                    raise ControllerReadError("Process message bus is not connected.")
-                if self._hard_telemetry_error is not None:
-                    raise ProcessSafetyError(self._hard_telemetry_error)
-                if self._read_error is not None:
-                    raise ControllerReadError(self._read_error)
-                waiting = self._current_measurement_wait_locked()
-                if waiting is not None:
-                    # Retained for the separate Writer outcome protocol and
-                    # legacy archive vocabulary, not numeric-input validation.
-                    raise waiting
-                if (self._latest is not None
-                        and self._newest_seen_ns <= self._latest_ns
-                        and self._last_read_ns != self._latest_ns):
-                    state = self._latest
-                    if self._latest_empty_fields:
-                        if initial or any(name not in self._last_field_values
-                                          for name in self._latest_empty_fields):
-                            raise ControllerReadError("Empty process field has no runtime history for this read.")
-                        state = replace(state, **{name: self._last_field_values[name]
-                                                  for name in self._latest_empty_fields})
-                    self._read_count += 1
-                    self._last_read_generation = self._generation
-                    self._last_read_ns = self._latest_ns
-                    if not initial:
-                        # Arrival alone, initial scalar reads, and incomplete
-                        # rounds do not append MATLAB's runtime c/count lists.
-                        self._last_field_values.update(c=state.c, count_middle=state.count_middle)
-                    self._latest = state
-                    return state
-                remaining = deadline - self._monotonic()
-                if remaining <= 0:
-                    raise ControllerReadError("No new complete process collection arrived during this read attempt.")
-                self._condition.wait(remaining)
 
     def _on_telemetry(self, channel: Any, method: Any, properties: Any, body: bytes) -> None:
         try:
@@ -386,469 +308,126 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         except (ValueError, TypeError, OverflowError) as exc:
             with self._condition:
                 self._invalid_count += 1
-                self._latch_telemetry_fault_locked(f"Invalid process telemetry ({type(exc).__name__}).")
+                self._last_error = f"Invalid process telemetry ({type(exc).__name__})."
         finally:
             channel.basic_ack(delivery_tag=method.delivery_tag)
 
-    def _measurement_pending_locked(self) -> ProcessMeasurementPending:
-        pending = self._current_measurement_wait_locked()
-        if pending is None:
-            raise ProcessSafetyError("No pending process measurement condition is available.")
-        return pending
 
-    def _begin_timeout_wait_locked(self) -> ProcessDataTimeoutPending:
-        if self._hard_telemetry_error is not None:
-            raise ProcessSafetyError(self._hard_telemetry_error)
-        if self._timeout_sample is None:
-            self._timeout_boundary_ns = self._clock_ns()
-            self._waiting_since = self._waiting_since or _iso_ns(self._timeout_boundary_ns)
-            self._timeout_sample = {"waiting_since": self._waiting_since}
-            if self._last_valid_read_at is not None:
-                self._timeout_sample["last_valid_read_at"] = self._last_valid_read_at
-            self._latest = None
-            self._negative_sample = None
-            self._negative_ns = 0
-            self._last_read_generation = None
-            self._last_read_ns = None
-            pending = ProcessDataTimeoutPending(**self._timeout_sample)
-            self._last_invalid_state = pending.to_dict()
-            self._last_error = str(pending)
-        return ProcessDataTimeoutPending(**self._timeout_sample)
-
-    def _current_measurement_wait_locked(self) -> ProcessMeasurementPending | None:
-        if self._hard_telemetry_error is not None:
-            raise ProcessSafetyError(self._hard_telemetry_error)
-        # Ordinary read errors are observed only by read_state(), not by
-        # an unsolicited second process check before the current write.
-        if self._timeout_sample is not None:
-            # A Writer reconciliation still requires its own post-result
-            # measurement. Ordinary read failures never create this marker.
-            return ProcessDataTimeoutPending(**self._timeout_sample)
-        if self._negative_sample is not None:
-            return ProcessMeasurementPending(**self._negative_sample)
-        return None
-
-    def _latch_telemetry_fault_locked(self, message: str, *, stamp: int | None = None) -> None:
-        self._hard_telemetry_error = message
-        self._last_error = message
-        self._latest = None
-        self._negative_sample = None
-        self._negative_ns = 0
-        self._timeout_sample = None
-        self._waiting_since = None
-        self._last_read_generation = None
-        self._last_read_ns = None
-        self._last_invalid_state = {"reason": "invalid_process_telemetry", "error": message}
-        if stamp is not None:
-            self._last_invalid_state["read_at"] = _iso_ns(stamp)
-        self._condition.notify_all()
-
-    def _cancel_unsent_for_measurement_locked(self, error: Exception | None = None) -> None:
-        pending = self._pending
-        if pending is None or pending.sent or pending.event.is_set():
-            return
-        error = error or self._measurement_pending_locked()
-        self._last_result = {**pending.envelope["payload"], "status": "failed",
-                             "error": str(error), "write_result": None, "command_sent": False}
-        try:
-            self._audit(self._last_result, "not_sent")
-        except ProcessConnectionError as exc:
-            # A durable archive failure is a fault, not recoverable measurement
-            # waiting. The command is still never sent.
-            pending.error = exc
-        else:
-            pending.error = error
-        pending.event.set()
-
-    def _accept_telemetry(self, message: Any) -> None:
-        if not isinstance(message, dict) or not isinstance(message.get("metrics"), list):
-            with self._condition:
-                self._latch_telemetry_fault_locked("Process telemetry must contain a metrics JSON array.")
-            raise ValueError("Process telemetry must contain a metrics JSON array.")
+    def _accept_telemetry(self, message):
+        if not isinstance(message,dict) or not isinstance(message.get('metrics'),list):
+            raise ValueError('Process telemetry requires a metrics array.')
         with self._condition:
-            if self._hard_telemetry_error is not None:
-                return
-            now_ns = self._clock_ns()
-            cutoff = max(self._epoch_ns, self._timeout_boundary_ns)
-            self._rounds = {ts: values for ts, values in self._rounds.items() if ts >= cutoff}
-            self._round_empty_fields = {ts: values for ts, values in self._round_empty_fields.items()
-                                        if ts >= cutoff}
-            self._invalid_rounds = {ts for ts in self._invalid_rounds if ts >= cutoff}
-            for metric in message["metrics"]:
-                if not isinstance(metric, dict):
-                    self._invalid_count += 1
-                    self._latch_telemetry_fault_locked("Malformed process metric.")
-                    break
-                tags = metric.get("tags")
-                if not isinstance(tags, dict):
-                    if metric.get("name") == self.config.measurement_name:
-                        self._invalid_count += 1
-                        self._latch_telemetry_fault_locked("Missing process metric identity tags.")
-                        break
+            for metric in message['metrics']:
+                if not isinstance(metric,dict):
                     continue
-                if tags.get("device") != self.config.device_id:
+                tags,fields = metric.get('tags',{}),metric.get('fields',{})
+                if metric.get('name')!=self.config.measurement_name or tags.get('device')!=self.config.device_id:
                     continue
-                if metric.get("name") != self.config.measurement_name:
+                if not isinstance(fields,dict):
                     continue
-                stamp = metric.get("timestamp")
-                if isinstance(stamp, bool) or not isinstance(stamp, int):
-                    self._invalid_count += 1
-                    self._latch_telemetry_fault_locked("Process metric timestamp must be integer nanoseconds.")
-                    break
-                if (stamp < cutoff or stamp > now_ns
-                        or (self._timeout_boundary_ns and stamp <= self._timeout_boundary_ns)):
-                    self._invalid_count += 1
-                    continue
-                if stamp < self._latest_ns or stamp in self._invalid_rounds:
-                    continue
-                fields = metric.get("fields")
-                try:
-                    if not isinstance(fields, dict):
-                        raise ProcessSafetyError("Missing metric fields.")
-                    process_fields = [key for key in FIELDS if key in fields]
-                    if len(process_fields) != 1:
-                        raise ProcessSafetyError("Each OPC UA metric must identify exactly one process node.")
-                    name = process_fields[0]
-                    if tags.get("id") != self.config.node_ids[name]:
-                        raise ProcessSafetyError(f"Unexpected OPC UA NodeId for {name}.")
-                    quality = fields.get("Quality")
-                    if _communication_quality(quality):
-                        self._invalid_count += 1
-                        self._invalid_rounds.add(stamp)
-                        self._rounds.pop(stamp, None)
-                        self._round_empty_fields.pop(stamp, None)
-                        self._read_error = f"OPC UA collection failed with communication status {quality}."
-                        self._last_error = self._read_error
-                        self._latest = None
-                        self._last_invalid_state = {"reason": "process_read_error", "communication_quality": quality}
-                        break
-                    if not ((isinstance(quality, str) and quality in GOOD_QUALITY_STRINGS)
-                            or (type(quality) is int and quality == 0)):
-                        raise ProcessSafetyError(f"Missing or bad OPC UA quality for {name}.")
-                    raw_value = fields[name]
-                    empty = raw_value is None or (isinstance(raw_value, (list, tuple)) and not raw_value)
-                    if empty:
-                        if name not in ("c", "count_middle") or name not in self._last_field_values:
-                            self._read_error = f"Empty {name} has no MATLAB-compatible fallback."
-                            self._last_error = self._read_error
-                            self._latest = None
-                            self._invalid_rounds.add(stamp)
-                            break
-                        value = self._last_field_values[name]
-                        self._round_empty_fields.setdefault(stamp, set()).add(name)
+                for name in FIELDS:
+                    if name not in fields:
+                        continue
+                    # Routing identity is representation, not a physical-value gate.
+                    if tags.get('id')!=self.config.node_ids[name]:
+                        result = ControllerReadError(f'Unexpected OPC UA NodeId for {name}.')
                     else:
-                        try:
-                            value = decode_numeric(raw_value, name)
-                        except (OverflowError, TypeError, ValueError) as exc:
-                            raise ProcessSafetyError(f"{name} must be a numeric measurement scalar.") from exc
-                        self._round_empty_fields.setdefault(stamp, set()).discard(name)
-                    values = self._rounds.setdefault(stamp, {})
-                    if name in values and values[name] != value and not (math.isnan(values[name]) and math.isnan(value)):
-                        raise ProcessSafetyError(f"Conflicting duplicate process {name}.")
-                    values[name] = value
-                    if stamp >= self._newest_seen_ns:
-                        self._newest_seen_ns = stamp
-                        self._newest_fields = set(values)
-                    if len(values) == len(FIELDS) and stamp > self._latest_ns:
-                        self._latest = ProcessState(
-                            T=values["T"] + CELSIUS_TO_KELVIN,
-                            T_j=values["T_j"] + CELSIUS_TO_KELVIN,
-                            c=values["c"], count_middle=values["count_middle"],
-                            T_j_set=values["T_j_set"] + CELSIUS_TO_KELVIN,
-                            read_at=_iso_ns(stamp), status_codes={key: "OK (0x0)" for key in FIELDS},
-                        )
-                        self._negative_sample = None
-                        self._negative_ns = 0
-                        self._waiting_since = None
-                        self._timeout_sample = None
-                        self._timeout_boundary_ns = 0
-                        self._last_valid_read_at = self._latest.read_at
-                        self._read_error = None
-                        self._last_error = None
-                        self._latest_ns = stamp
-                        self._latest_empty_fields = set(self._round_empty_fields.get(stamp, ()))
-                except ProcessSafetyError as exc:
-                    self._invalid_rounds.add(stamp)
-                    self._rounds.pop(stamp, None)
-                    self._round_empty_fields.pop(stamp, None)
-                    self._invalid_count += 1
-                    self._latch_telemetry_fault_locked(str(exc), stamp=stamp)
-                    if stamp >= self._newest_seen_ns:
-                        self._newest_seen_ns = stamp
-                        self._newest_fields.clear()
-                    break
-            # Bounds memory even under a producer sending many fresh incomplete rounds.
-            for stamp in sorted(self._rounds)[:-128]:
-                self._rounds.pop(stamp, None)
-                self._round_empty_fields.pop(stamp, None)
-            if len(self._invalid_rounds) > 128:
-                self._invalid_rounds = set(sorted(self._invalid_rounds)[-128:])
+                        quality = fields.get('Quality')
+                        good = quality in GOOD_QUALITY_STRINGS if isinstance(quality,str) else type(quality) is int and quality==0
+                        result = copy.deepcopy(fields[name]) if good else ControllerReadError(f'Telegraf reported read quality {quality!r} for {name}.')
+                    # Only unread deliveries are stored. A consumed value is never
+                    # reused as proof of another successful read. Timestamp age and
+                    # cross-field collection rounds do not decide admissibility.
+                    self._field_results[name] = (result, metric.get('timestamp'))
             self._condition.notify_all()
 
-    def set_command_context(self, run_id: str, run_started_at: str, tick_seq: int) -> None:
-        if not isinstance(run_id, str) or not run_id.strip():
-            raise ProcessSafetyError("A run_id is required for process writes.")
-        if not isinstance(run_started_at, str) or not run_started_at.strip():
-            raise ProcessSafetyError("A run_started_at timestamp is required for process writes.")
-        try:
-            started = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
-            if started.tzinfo is None:
-                raise ValueError("Timestamp has no timezone.")
-        except ValueError as exc:
-            raise ProcessSafetyError("Invalid run_started_at timestamp.") from exc
-        if isinstance(tick_seq, bool) or not isinstance(tick_seq, int) or tick_seq < 0:
-            raise ProcessSafetyError("tick_seq must be a non-negative integer.")
-        with self._condition:
-            if self._pending is not None and not self._pending.event.is_set():
-                raise ProcessSafetyError("Cannot replace the context of an in-flight process write.")
-            self._context = (run_id, run_started_at, tick_seq)
 
-    def write_jacket_setpoint(self, setpoint_K: float) -> ProcessWriteResult:
-        value = _number(setpoint_K, "setpoint_K")
-        if not self.config.jacket_min_K <= value <= self.config.jacket_max_K:
-            raise ProcessSafetyError("Jacket setpoint is outside the configured safe range.")
+    def set_command_context(self,run_id,run_started_at,tick_seq):
+        with self._condition:
+            self._context=(run_id,run_started_at,tick_seq)
+
+
+    def write_jacket_setpoint(self,setpoint_K):
         with self._condition:
             if not self._connected or self._stop.is_set():
-                raise self._transport_wait_locked()
-            if self._write_recovery is not None:
-                raise ProcessWritePending(self._write_recovery)
-            if self._pending is not None and not self._pending.event.is_set():
-                raise ProcessSafetyError("Only one process write may be in flight.")
-            waiting = self._current_measurement_wait_locked()
-            if waiting is not None:
-                raise waiting
+                raise ProcessWriteError('Process message bus is disconnected.',command_sent=False)
             if self._context is None:
-                raise ProcessSafetyError("Process write requires experiment and control-cycle context.")
-            if self._last_read_generation != self._generation or self._last_read_ns is None:
-                raise ProcessSafetyError("Process write requires a measurement read on the current connection.")
-            read_age_s = (self._clock_ns() - self._last_read_ns) / 1_000_000_000
-            if read_age_s < 0:
-                raise ProcessSafetyError("The control measurement timestamp is in the future.")
-            run_id, run_started_at, tick_seq = self._context
-            command_id = str(uuid.uuid4())
-            payload = {
-                "command_id": command_id, "run_id": run_id, "run_started_at": run_started_at,
-                "tick_seq": tick_seq, "setpoint_K": value,
-                "expires_at": _iso_ns(self._clock_ns() + int(self.config.command_ttl_s * 1_000_000_000)),
-            }
-            envelope = build_envelope("controller", "opcua_writer", "command", "process.setpoint.write", tick_seq, payload, command_id)
-            # The command must exist durably before it can reach the hardware.
-            self._audit(payload, "prepared")
-            pending = _PendingWrite(
-                envelope=envelope, deadline=self._monotonic() + self.config.write_timeout_s,
-                read_generation=self._last_read_generation, read_timestamp_ns=self._last_read_ns,
-            )
-            self._pending = pending
-            self._last_command = dict(payload)
-            self._last_result = None
+                raise ProcessWriteError('Writer envelope has no experiment/cycle identity.',command_sent=False)
+            run_id,started,tick=self._context
+            command_id=str(uuid.uuid4())
+            payload={'command_id':command_id,'run_id':run_id,'run_started_at':started,'tick_seq':tick,
+                     'setpoint_K':setpoint_K,'expires_at':_iso_ns(self._clock_ns()+int(self.config.command_ttl_s*1e9))}
+            envelope=build_envelope('controller','opcua_writer','command','process.setpoint.write',tick,payload,command_id)
+            pending=_PendingWrite(envelope=envelope,deadline=self._monotonic()+self.config.write_timeout_s,
+                                  read_generation=self._generation,read_timestamp_ns=self._clock_ns())
+            self._pending=pending
+            self._last_command=copy.deepcopy(payload)
+            self._last_result=None
             self._outgoing.put(pending)
         pending.event.wait(timeout=self.config.write_timeout_s)
         with self._condition:
             if not pending.event.is_set():
-                # Only an unsubmitted command may be canceled as measurement
-                # waiting. A sent command's missing receipt is always a fault.
-                if (not pending.sent and self._connected
-                        and pending.read_generation == self._generation):
-                    try:
-                        waiting = self._current_measurement_wait_locked()
-                        read_age_s = (self._clock_ns() - pending.read_timestamp_ns) / 1_000_000_000
-                        if waiting is not None:
-                            self._cancel_unsent_for_measurement_locked(waiting)
-                    except ProcessSafetyError as exc:
-                        self._fail_pending_locked(f"{exc} Command not sent.")
-                if not pending.event.is_set():
-                    self._fail_pending_locked("Timed out waiting for device write acknowledgement; result unknown.", recoverable=True)
+                pending.error=ProcessWriteError('Writer call did not return before its existing timeout; result unknown.',
+                                                command_sent=pending.sent)
+                pending.event.set()
+                self._last_result={**payload,'status':'unknown','error':str(pending.error)}
+            if self._pending is pending:
+                self._pending=None
             if pending.error is not None:
                 raise pending.error
             if pending.result is None:
-                raise ProcessConnectionError("Device write result unknown.")
-            self._write_count += 1
-            self._last_write_at = pending.result.written_at
+                raise ProcessWriteError('Writer returned no result.',command_sent=pending.sent)
+            self._write_count+=1
+            self._last_write_at=pending.result.written_at
             return pending.result
 
-    def _publish_pending(self, channel: Any) -> None:
+
+    def _publish_pending(self,channel):
+        try: pending=self._outgoing.get_nowait()
+        except queue.Empty: return
+        with self._condition:
+            if pending is not self._pending or pending.event.is_set():return
+            if pending.sent:return
+            if not self._connected:
+                self._fail_pending_locked('Process message bus disconnected before publication.')
+                return
+        # Exactly one publication; no replay, status query or readback request.
         try:
-            pending = self._outgoing.get_nowait()
-        except queue.Empty:
-            return
-        with self._condition:
-            if pending is not self._pending or pending.event.is_set():
-                return
-            if pending.sent:
-                return
-            if not self._connected or pending.read_generation != self._generation:
-                self._fail_pending_locked("Process connection changed before publication; command not sent.", recoverable=True)
-                return
-            try:
-                waiting = self._current_measurement_wait_locked()
-                read_age_s = (self._clock_ns() - pending.read_timestamp_ns) / 1_000_000_000
-                if waiting is not None:
-                    self._cancel_unsent_for_measurement_locked(waiting)
-                    return
-                if read_age_s < 0:
-                    raise ProcessSafetyError("Control measurement timestamp is in the future.")
-            except ProcessSafetyError as exc:
-                self._fail_pending_locked(f"{exc} Command not sent.")
-                return
-            if self._monotonic() >= pending.deadline:
-                self._fail_pending_locked("Write publication deadline expired; command not sent.", recoverable=True)
-                return
-            pending.sent = True
-        # This is invoked only on the owning Pika I/O thread. Never retry publication.
-        confirmed = channel.basic_publish(
-            exchange=self.config.exchange, routing_key=COMMAND_ROUTE,
-            body=json.dumps(pending.envelope, allow_nan=False).encode("utf-8"),
-            properties=pika.BasicProperties(
-                content_type="application/json", delivery_mode=2,
-                correlation_id=pending.envelope["correlation_id"],
-                expiration=str(max(1, int(self.config.command_ttl_s * 1000))),
-            ), mandatory=True,
-        )
-        if confirmed is False:
-            raise ProcessConnectionError("Process command publication was not confirmed.")
-        self._audit(pending.envelope["payload"], "published")
-
-    def _audit(self, payload, stage):
-        if self.audit_writer is None and not self.audit_required:
-            return
-        try:
-            if self.audit_writer is None:
-                raise RuntimeError("Command archive is unavailable.")
-            write_process_event(self.audit_writer, payload, "controller", stage, timestamp=self._clock_ns())
-            self._audit_error = None
-        except Exception as exc:
-            self._audit_error = f"Command audit persistence failed ({type(exc).__name__})."
-            run_id = str(payload.get("run_id", ""))
-            self._audit_failures[run_id] = self._audit_failures.get(run_id, 0) + 1
-            raise ProcessConnectionError(self._audit_error) from exc
-
-    def _fail_pending_locked(self, message: str, *, recoverable: bool = False) -> None:
-        pending = self._pending
-        if pending is not None and not pending.event.is_set():
-            pending.error = ProcessConnectionError(message)
-            self._last_error = message
-            self._last_result = {**pending.envelope["payload"], "status": "unknown", "error": message, "write_result": None}
-            try:
-                self._audit(self._last_result, "unknown")
-            except ProcessConnectionError:
-                # The device outcome is still unknown. Never repeat a write due
-                # to a local audit failure; surface the archive error separately.
-                pass
-            if recoverable and self._audit_error is None:
-                self._begin_write_recovery_locked(pending, message)
-                pending.error = ProcessWritePending(self._write_recovery)
-            pending.event.set()
-
-    def _begin_write_recovery_locked(self, pending: _PendingWrite, detail: str) -> None:
-        """Latch the original attempt independently of its expired waiter."""
-        self._write_recovery = {
-            "pending": bool(pending.sent),
-            "reason": "process_write_confirmation_pending" if pending.sent else "process_write_not_sent",
-            "detail": detail, "waiting_since": _iso_ns(self._clock_ns()),
-            "command": copy.deepcopy(pending.envelope["payload"]),
-            "command_sent": bool(pending.sent),
-            "manual_confirmation_required": False,
-            "resolution": None if pending.sent else {"status": "not_sent", "execution_complete": True,
-                                                       "recoverable": True},
-        }
-        self._recovery_request = None
-        if pending.sent:
-            self._new_recovery_request_locked()
-        else:
-            self._timeout_sample = None
-            self._begin_timeout_wait_locked()
-
-    def _new_recovery_request_locked(self, *, confirm: bool = False) -> None:
-        recovery = self._write_recovery
-        if recovery is None:
-            return
-        query_id = str(uuid.uuid4())
-        generation = int(recovery.get("recovery_generation", 0)) + 1
-        payload = {**copy.deepcopy(recovery["command"]), "query_id": query_id,
-                   "recovery_generation": generation}
-        if confirm:
-            payload["operator_confirmed"] = True
-        recovery["query_id"] = query_id
-        recovery["recovery_generation"] = generation
-        self._recovery_request = build_envelope(
-            "controller", "opcua_writer", "command",
-            "process.setpoint.confirm" if confirm else "process.setpoint.status",
-            payload["tick_seq"], payload, query_id,
-        )
-        self._recovery_last_queued = float("-inf")
-
-    def write_recovery_status(self) -> dict[str, Any]:
-        """Poll nonblocking; all actual AMQP operations remain on the I/O thread."""
-        with self._condition:
-            recovery = self._write_recovery
-            if recovery is None:
-                return {"pending": False, "manual_confirmation_required": False, "reason": None, "command": None}
-            if recovery.get("resolution_error"):
-                raise ProcessSafetyError(recovery["resolution_error"])
-            if (recovery.get("pending") and self._connected and not self._stop.is_set()
-                    and self._recovery_request is not None
-                    and self._monotonic() - self._recovery_last_queued >= max(1.0, self.config.write_timeout_s)):
-                self._recovery_outgoing.put(copy.deepcopy(self._recovery_request))
-                self._recovery_last_queued = self._monotonic()
-            return copy.deepcopy(recovery)
-
-    def confirm_write_recovery(self) -> dict[str, Any]:
-        with self._condition:
-            if self._write_recovery is None or not self._write_recovery.get("pending"):
-                raise ProcessSafetyError("No unresolved process command requires confirmation.")
-            if not self._write_recovery.get("manual_confirmation_required"):
-                raise ProcessSafetyError("Wait for Writer to identify the uncertain command before confirming it.")
-            if not self._connected or self._stop.is_set():
-                raise self._transport_wait_locked()
-            self._new_recovery_request_locked(confirm=True)
-        return self.write_recovery_status()
-
-    def clear_write_recovery(self) -> None:
-        """Called only after Controller committed the recovery baseline."""
-        with self._condition:
-            if self._write_recovery is not None and self._write_recovery.get("pending"):
-                raise ProcessSafetyError("Cannot clear an unresolved process command.")
-            self._write_recovery = None
-            self._recovery_request = None
-
-    def restore_write_recovery(self, snapshot: Mapping[str, Any]) -> None:
-        from crystallization_mpc.apps.opcua_writer.commands import WriteCommand
-
-        restored = copy.deepcopy(dict(snapshot))
-        command = restored.get("command")
-        if not isinstance(command, dict) or type(restored.get("pending")) is not bool:
-            raise ValueError("Invalid saved process write recovery state.")
-        WriteCommand.from_envelope(build_envelope("controller", "opcua_writer", "command",
-            "process.setpoint.write", command.get("tick_seq", 0), command, command.get("command_id")))
-        if type(restored.get("manual_confirmation_required")) is not bool:
-            raise ValueError("Invalid saved process write confirmation state.")
-        with self._condition:
-            self._write_recovery = restored
-            self._recovery_request = None
-            if restored["pending"]:
-                self._new_recovery_request_locked()
-
-    def _publish_recovery(self, channel: Any) -> None:
-        while True:
-            try:
-                envelope = self._recovery_outgoing.get_nowait()
-            except queue.Empty:
-                return
+            body=json.dumps(pending.envelope,allow_nan=False).encode('utf-8')
             with self._condition:
-                if (self._write_recovery is None or not self._write_recovery.get("pending")
-                        or not self._connected or self._stop.is_set()
-                        or envelope["correlation_id"] != self._write_recovery.get("query_id")):
-                    continue
-            break
-        confirmed = channel.basic_publish(
-            exchange=self.config.exchange, routing_key=COMMAND_ROUTE,
-            body=json.dumps(envelope, allow_nan=False).encode("utf-8"),
-            properties=pika.BasicProperties(content_type="application/json", delivery_mode=2,
-                correlation_id=envelope["correlation_id"],
-                expiration=str(max(1, int(self.config.command_ttl_s * 1000)))), mandatory=True,
-        )
-        if confirmed is False:
-            raise ProcessConnectionError("Process recovery query publication was not confirmed.")
+                if pending.event.is_set(): return
+                pending.sent=True
+            confirmed=channel.basic_publish(exchange=self.config.exchange,routing_key=COMMAND_ROUTE,body=body,
+                properties=pika.BasicProperties(content_type='application/json',delivery_mode=2,
+                    correlation_id=pending.envelope['correlation_id'],
+                    expiration=str(max(1,int(self.config.command_ttl_s*1000)))),mandatory=True)
+            if confirmed is False:raise ProcessConnectionError('Message publication was not confirmed.')
+        except Exception as exc:
+            with self._condition:self._fail_pending_locked(str(exc))
+            return
+        self._audit(pending.envelope['payload'],'published')
+
+
+    def _audit(self,payload,stage):
+        if self.audit_writer is None:return
+        try:
+            write_process_event(self.audit_writer,payload,'controller',stage,timestamp=self._clock_ns())
+            self._audit_error=None
+        except Exception as exc:
+            self._audit_error=f'Command observation failed ({type(exc).__name__}).'
+            run_id=str(payload.get('run_id',''))
+            self._audit_failures[run_id]=self._audit_failures.get(run_id,0)+1
+
+
+    def _fail_pending_locked(self,message,*,recoverable=False):
+        pending=self._pending
+        if pending is not None and not pending.event.is_set():
+            pending.error=ProcessWriteError(message,command_sent=pending.sent)
+            pending.event.set()
+            self._last_result={**pending.envelope['payload'],'status':'unknown','error':message}
+        self._last_error=message
+        self._condition.notify_all()
+
 
     @staticmethod
     def _matching_command(payload: Mapping[str, Any], command: Mapping[str, Any]) -> bool:
@@ -862,176 +441,96 @@ class RabbitMqProcessAdapter(ProcessAdapter):
         except (KeyError, TypeError, AttributeError, ValueError):
             return False
 
-    def _validate_success(self, payload: Mapping[str, Any], command: Mapping[str, Any]) -> ProcessWriteResult:
-        result = payload.get("write_result")
-        if not isinstance(result, dict) or result.get("verified") is not True:
-            raise ProcessSafetyError("Device write result does not confirm readback verification.")
-        written_K = _number(result.get("setpoint_K"), "write_result.setpoint_K")
-        written_C = _number(result.get("setpoint_C"), "write_result.setpoint_C")
-        readback_K = _number(result.get("readback_K"), "write_result.readback_K")
-        if (abs(written_K - command["setpoint_K"]) > 1e-9
-                or abs(written_K - written_C - CELSIUS_TO_KELVIN) > 1e-9
-                or abs(readback_K - written_K) > self.config.verify_tolerance_K):
-            raise ProcessSafetyError("Device write result does not match the requested setpoint/readback.")
-        written_at = result.get("written_at")
-        try:
-            parsed = datetime.fromisoformat(written_at.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                raise ValueError("Missing timezone.")
-        except (AttributeError, ValueError) as exc:
-            raise ProcessSafetyError("Device write result has an invalid written_at timestamp.") from exc
-        return ProcessWriteResult(written_K, written_C, written_at, True, readback_K)
+    def _validate_success(self, payload, command):
+        result = payload.get('write_result')
+        if not isinstance(result, dict):
+            raise ProcessWriteError('Writer success receipt omitted its write result.', command_sent=True)
+        return ProcessWriteResult(setpoint_K=result['setpoint_K'], setpoint_C=result['setpoint_C'],
+            written_at=result['written_at'], verified=result.get('verified', False),
+            readback_K=result.get('readback_K'))
 
-    def _accept_recovery_result(self, envelope: Mapping[str, Any]) -> None:
-        payload = envelope.get("payload")
-        if not isinstance(payload, dict):
-            return
-        with self._condition:
-            recovery = self._write_recovery
-            if (recovery is None or not recovery.get("pending")
-                    or envelope.get("correlation_id") != recovery.get("query_id")
-                    or payload.get("query_id") != recovery.get("query_id")
-                    or type(payload.get("recovery_generation")) is not int
-                    or payload.get("recovery_generation") != recovery.get("recovery_generation")
-                    or not self._matching_command(payload, recovery["command"])):
-                return
-            for name in ("execution_complete", "manual_confirmation_required", "recoverable"):
-                if type(payload.get(name)) is not bool:
-                    return
-            if payload.get("status") not in {"success", "failed", "unknown", "executing"}:
-                return
-            if (payload["status"] == "unknown" and payload["recoverable"]
-                    and payload.get("confirmed_current_state") is not True):
-                return
-            if (payload["status"] == "failed" and payload["recoverable"]
-                    and payload.get("failure_kind") not in {"communication", "cancelled"}):
-                return
-            self._audit(payload, f"recovery_receipt:{payload['query_id']}:{payload['status']}:"
-                        f"{int(payload['execution_complete'])}:{int(payload['manual_confirmation_required'])}")
-            if payload["status"] == "success":
-                try:
-                    self._validate_success(payload, recovery["command"])
-                except ProcessSafetyError as exc:
-                    recovery["resolution_error"] = str(exc)
-                    return
-            recovery["resolution"] = copy.deepcopy(payload)
-            recovery["manual_confirmation_required"] = payload["manual_confirmation_required"]
-            if payload["execution_complete"] and payload["recoverable"] and not payload["manual_confirmation_required"]:
-                recovery["pending"] = False
-                recovery["reason"] = "process_write_resolved"
-                # Recovery measurements must be newer than the confirmation,
-                # even if a data timeout had already established an older floor.
-                self._timeout_sample = None
-                self._begin_timeout_wait_locked()
-            elif payload["execution_complete"] and not payload["recoverable"] and not payload["manual_confirmation_required"]:
-                recovery["resolution_error"] = payload.get("error") or "Writer rejected the previous device command."
-            self._condition.notify_all()
 
-    def _on_result(self, channel: Any, method: Any, properties: Any, body: bytes) -> None:
+    def _on_result(self, channel, method, properties, body):
         try:
             self._accept_result(json.loads(body))
-        except (ValueError, TypeError, OverflowError):
+        except (ValueError, TypeError, OverflowError) as exc:
             with self._condition:
-                self._last_error = "Invalid process write result JSON."
-        except ProcessConnectionError:
-            # Keep a valid result available for audit retry after disk recovery.
-            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-            return
-        channel.basic_ack(delivery_tag=method.delivery_tag)
+                self._last_error = f'Invalid Writer receipt ({type(exc).__name__}).'
+        finally:
+            channel.basic_ack(delivery_tag=method.delivery_tag)
 
-    def _accept_result(self, envelope: Any) -> None:
-        if (not isinstance(envelope, dict) or envelope.get("ver") != 1
-                or envelope.get("msg_type") != "event"
-                or envelope.get("src") != "opcua_writer" or envelope.get("dst") != "process"):
-            return
-        if envelope.get("name") == "process.setpoint.status.result":
-            self._accept_recovery_result(envelope)
-            return
-        if envelope.get("name") != "process.setpoint.result":
-            return
-        payload = envelope.get("payload")
-        if (not isinstance(payload, dict) or not isinstance(payload.get("command_id"), str)
-                or not isinstance(payload.get("run_id"), str) or type(payload.get("tick_seq")) is not int
-                or payload.get("status") not in ("success", "failed", "unknown")
-                or envelope.get("correlation_id") != payload.get("command_id")):
-            return
-        # Retain late/replayed receipts without rewriting a timed-out cycle.
-        self._audit(payload, "receipt")
+
+    def _accept_result(self,envelope):
+        if not isinstance(envelope,dict) or envelope.get('src')!='opcua_writer' or envelope.get('name')!='process.setpoint.result':return
+        payload=envelope.get('payload')
+        if not isinstance(payload,dict):return
+        self._audit(payload,'receipt')
         with self._condition:
-            pending = self._pending
-            if pending is None or pending.event.is_set():
-                # A late original receipt is retained as evidence. A read-only
-                # Writer status query fences the queue and resolves the wait.
-                return
-            command = pending.envelope["payload"]
-            if not self._matching_command(payload, command):
-                return
-            if self._monotonic() >= pending.deadline:
-                self._fail_pending_locked("Device acknowledgement arrived after deadline; result unknown.", recoverable=True)
-                return
-            status = payload["status"]
-            self._last_result = dict(payload)
-            try:
-                if status == "unknown" or (status == "failed" and payload.get("recoverable") is True):
-                    self._begin_write_recovery_locked(pending, payload.get("error") or "Device communication interrupted.")
-                    pending.error = ProcessWritePending(self._write_recovery)
-                elif status != "success":
-                    raise ProcessConnectionError(f"Device write {status}: {payload.get('error') or 'No reason supplied.'}")
-                else:
-                    pending.result = self._validate_success(payload, command)
-                    self._last_error = None
-            except (ProcessConnectionError, ProcessSafetyError) as exc:
-                pending.error = exc
-                self._last_error = str(exc)
-                if status == "success":
-                    self._last_result = {**payload, "status": "failed", "error": str(exc)}
+            pending=self._pending
+            if pending is None or pending.event.is_set():return
+            command=pending.envelope['payload']
+            if not self._matching_command(payload,command):return
+            self._last_result=copy.deepcopy(payload)
+            if payload.get('status')=='success':
+                try:
+                    pending.result=self._validate_success(payload,command)
+                except Exception as exc:
+                    pending.error=ProcessWriteError(str(exc),command_sent=pending.sent)
+            else:
+                pending.error=ProcessWriteError(payload.get('error') or 'Writer returned a failure.',
+                    write_outcome=payload.get('status','unknown'),command_sent=pending.sent)
             pending.event.set()
             self._condition.notify_all()
 
-    def status(self) -> Mapping[str, Any]:
+
+    def status(self):
         with self._condition:
-            age_s = (self._clock_ns() - self._latest_ns) / 1_000_000_000 if self._latest is not None else None
-            negative_age_s = ((self._clock_ns() - self._negative_ns) / 1_000_000_000
-                              if self._negative_sample is not None else None)
-            waiting = (self._connected and self._hard_telemetry_error is None and (
-                self._timeout_sample is not None or negative_age_s is not None))
-            wait_metadata = ((ProcessDataTimeoutPending(**self._timeout_sample).to_dict()
-                              if self._timeout_sample is not None else self._last_invalid_state)
-                             if waiting else None)
-            return {
-                "class": f"{type(self).__module__}.{type(self).__qualname__}",
-                "safe_noop": False, "transport": "rabbitmq", "connected": self._connected,
-                "device_id": self.config.device_id,
-                "node_ids": dict(self.config.node_ids),
-                "read_count": self._read_count, "write_count": self._write_count,
-                "reconnect_count": self._reconnect_count, "invalid_message_count": self._invalid_count,
-                "last_state": self._latest.to_dict() if self._latest is not None else None,
-                "last_read_at": self._latest.read_at if self._latest is not None else None,
-                "collection_timestamp_ns": self._latest_ns if self._latest is not None else None,
-                "last_used_timestamp_ns": self._last_read_ns,
-                "sample_age_s": age_s,
-                "waiting_for_data": waiting,
-                "wait_reason": wait_metadata.get("reason") if wait_metadata else None,
-                "waiting_since": self._waiting_since if waiting else None,
-                "last_invalid_state": dict(self._last_invalid_state) if self._last_invalid_state else None,
-                "sample_valid": (self._connected and self._hard_telemetry_error is None
-                                 and self._timeout_sample is None and self._negative_sample is None
-                                 and self._read_error is None
-                                 and age_s is not None and age_s >= 0),
-                "hard_data_error": self._hard_telemetry_error,
-                "missing_fields": [name for name in FIELDS if name not in self._newest_fields],
-                "last_command": dict(self._last_command) if self._last_command else None,
-                "last_write_result": dict(self._last_result) if self._last_result else None,
-                "write_in_flight": self._pending is not None and not self._pending.event.is_set(),
-                "write_recovery": copy.deepcopy(self._write_recovery),
-                "reconnecting": not self._connected and self._thread is not None and not self._stop.is_set(),
-                "last_write_at": self._last_write_at, "last_error": self._last_error,
-                "audit_error": self._audit_error,
-                "audit_enabled": self.audit_writer is not None,
-                "audit_failure_count": self._audit_failures.get(self._context[0], 0) if self._context else 0,
-                "safe_jacket_range_K": [self.config.jacket_min_K, self.config.jacket_max_K],
-            }
+            return {'enabled':True,'transport':'rabbitmq','connected':self._connected,
+                'read_count':self._read_count,'write_count':self._write_count,
+                'reconnect_count':self._reconnect_count,'last_error':self._last_error,
+                'waiting_for_data':False,'write_recovery':None,'readback_required':False,
+                'unread_fields':sorted(self._field_results),'last_command':copy.deepcopy(self._last_command),
+                'last_result':copy.deepcopy(self._last_result),'last_write_at':self._last_write_at,
+                'audit_failure_count':sum(self._audit_failures.values()),'audit_error':self._audit_error,
+                'limitations':['Telegraf delivery is not synchronous OPC UA readValue.',
+                              'Writer-side validation and command expiry remain external.']}
 
 
 # Keep the concise spelling available for composition and external integrations.
+    def read_process_field(self, name):
+        try:
+            return self._read_field(name)
+        except Exception as exc:
+            if name in ('T', 'T_j'):
+                error = ControllerReadError('Output argument "value" not assigned a value in read_value.')
+                error.reference_identifier = 'MATLAB:unassignedOutputs'
+                raise error from exc
+            raise
+
+
+    def _read_field(self, name):
+        deadline = self._monotonic()+self.config.startup_timeout_s
+        with self._condition:
+            while name not in self._field_results:
+                if self._stop.is_set() or not self._connected:
+                    raise ControllerReadError('Process message bus is disconnected; no OPC UA read result is available.')
+                remaining = deadline-self._monotonic()
+                if remaining<=0:
+                    raise ControllerReadError(f'No unread Telegraf result for {name}; OPC UA call outcome is unobserved.')
+                self._condition.wait(remaining)
+            result,stamp = self._field_results.pop(name)
+            if isinstance(result,Exception):
+                raise result
+            self._read_count += 1
+            self._last_read_ns = stamp
+            self._last_read_generation = self._generation
+            if result is None or (isinstance(result,(tuple,list)) and len(result)==0):
+                return MATLAB_EMPTY
+            return result
+
+
+    def read_initial_field(self, name):
+        return self._read_field(name)
+
+
 RabbitProcessAdapter = RabbitMqProcessAdapter

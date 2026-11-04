@@ -2,7 +2,7 @@
 
 已完成现场安装和测试后的日常开关机、当前 `process-io` 开关、Central 数据源
 状态卡片及管理入口，见 [实验室日常操作](lab-daily-operation-zh.md)。下文保留
-首次安装基线，涉及旧环境变量时请先对照该日常说明和 [Process I/O](process-io.md)。
+首次安装基线，涉及旧环境变量时请先对照该日常说明和当前 `.env.example`。
 
 适用基线为 `final` 分支的 `d561aee`。本流程按 2026 年 10 月 13 日首次上机准备，主线采用 Windows 64 位电脑、PowerShell、Docker Desktop 的 Linux 容器。实验室系统、网络、OPC UA 地址和设备允许的控制范围需要现场填写；文中的示例地址不是已确认的设备地址。如果安装的是更新提交，先核对配置和迁移说明。
 

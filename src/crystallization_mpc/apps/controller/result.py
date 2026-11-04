@@ -1,22 +1,18 @@
-"""Validated return contract for one Controller algorithm step."""
+"""Observational values returned after the source Controller statements."""
 
 from __future__ import annotations
 
-import math
+import copy
 from dataclasses import dataclass
-from numbers import Real
 from typing import Any, ClassVar, Mapping
-
-from crystallization_mpc.infra.numeric import decode_numeric
 
 
 @dataclass(frozen=True)
 class ControllerStepResult:
-    """One optional result returned by ``ControllerAdapter.step``.
+    """A view of calculated values, without an extra numerical admission rule.
 
-    The field names follow the values calculated by the control algorithm.
-    An algorithm adapter returns ``None`` until it has a real result; the
-    framework never manufactures a control output for the no-op adapter.
+    The original loop carries its values to the subsequent G, display and
+    write statements. This container must not reject or coerce them sooner.
     """
 
     valid: bool = True
@@ -84,29 +80,6 @@ class ControllerStepResult:
             if not self.error.strip():
                 raise ValueError("Controller result error cannot be empty.")
 
-        has_numeric = False
-        for name in self.NUMERIC_FIELDS:
-            value = getattr(self, name)
-            if value is None:
-                continue
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise ValueError(f"Controller result {name} must be a number or null.")
-            has_numeric = True
-        if self.valid:
-            if self.error is not None:
-                raise ValueError("A valid Controller result cannot include an error.")
-            if self.T_j_set is None:
-                raise ValueError(
-                    "A valid Controller result requires a calculated T_j_set."
-                )
-        else:
-            if self.error is None:
-                raise ValueError("An invalid Controller result requires an error.")
-            if has_numeric:
-                raise ValueError(
-                    "An invalid Controller result must use null calculated values."
-                )
-
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "valid": self.valid,
@@ -114,9 +87,7 @@ class ControllerStepResult:
         }
         result.update(
             {
-                name: float(getattr(self, name))
-                if getattr(self, name) is not None
-                else None
+                name: copy.deepcopy(getattr(self, name))
                 for name in self.NUMERIC_FIELDS
             }
         )
@@ -138,10 +109,7 @@ class ControllerStepResult:
             raise ValueError(
                 f"Unknown Controller result field(s): {', '.join(unknown)}."
             )
-        numeric = {
-            name: decode_numeric(value[name], name) if value.get(name) is not None else None
-            for name in cls.NUMERIC_FIELDS
-        }
+        numeric = {name: copy.deepcopy(value.get(name)) for name in cls.NUMERIC_FIELDS}
         return cls(
             valid=value.get("valid", True),
             error=value.get("error"),

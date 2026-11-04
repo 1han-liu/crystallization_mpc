@@ -118,7 +118,7 @@ CONTROLLER_PROCESS_WRITE_ENABLED=false
 
 若模拟器确需使用不同的 endpoint、namespace 或节点标识，请交付准确映射，再统一调整配置；不要只改 Telegraf 而漏改 writer 或 Controller。修改通信配置前由集成方结束活动实验。上述片段先关闭写回，用于初始读取；只读联调完成并结束该实验后，再改为 `CONTROLLER_PROCESS_WRITE_ENABLED=true` 并重新应用 Compose 配置。
 
-模拟器由组员单独启动，项目 Compose 连接这里配置的 `OPCUA_ENDPOINT`，不会自动创建模拟器。集成方还需启用正式 Controller 算法、发布有效参数并从 Central 启动实验；步骤和状态查询命令见 [过程读写接入说明](process-io.md#对接组员模拟器并验收)。
+模拟器由组员单独启动，项目 Compose 连接这里配置的 `OPCUA_ENDPOINT`，不会自动创建模拟器。集成方还需启用正式 Controller 算法、发布有效参数并从 Central 启动实验；服务启动和数据状态查看见 [实验室日常操作](lab-daily-operation-zh.md)。
 
 ## 6 联调验收
 
@@ -144,4 +144,4 @@ CONTROLLER_PROCESS_WRITE_ENABLED=false
 - 五值初始读取结果，以及向 `T_j_set` 写 `37.0` 后再次读到 `37.0` 的结果。
 - 在联调中修改 `T` 的方法，以及是否允许 OPC UA 客户端写入；`count_middle` 如开始模拟真实计数，应补充其统计定义。
 
-组员可使用项目已有依赖 `asyncua` 的 `Server` 或其他兼容的 OPC UA Server 实现上述接口；具体实现由组员维护。更多链路配置见 [过程读写接入说明](process-io.md)。浓度约定见 [参数元数据](../param_meta.yaml) 中的 `c_init` 和 [Controller 接口约定](controller-reference-validation.md)。
+组员可使用项目已有依赖 `asyncua` 的 `Server` 或其他兼容的 OPC UA Server 实现上述接口；具体实现由组员维护。日常服务操作见 [实验室日常操作](lab-daily-operation-zh.md)。浓度约定见 [参数元数据](../param_meta.yaml) 中的 `c_init` 和 [Controller 接口约定](controller-reference-validation.md)。

@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Query, HTTPException, Body
 
 from crystallization_mpc.apps.controller.service import ControllerService
-from crystallization_mpc.infra.numeric import encode_nonfinite
+from crystallization_mpc.apps.controller.numeric import encode_nonfinite
 
 
 service = ControllerService()
@@ -55,6 +55,18 @@ def confirm_process_recovery(payload: dict[str, Any] = Body(...)) -> dict[str, A
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@web_app.post("/api/controller/refresh")
+def request_controller_refresh(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    with service._lock:
+        return service.request_refresh(payload.get("event_id"))
+
+
+@web_app.post("/api/controller/modified")
+def modify_controller_workspace(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    with service._lock:
+        return service.submit_operator_map(payload.get("values", {}), event_id=payload.get("event_id"))
 
 
 __all__ = ["service", "web_app"]

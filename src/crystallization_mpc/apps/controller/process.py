@@ -11,7 +11,6 @@ from numbers import Real
 from typing import Any, Callable, Mapping
 
 from crystallization_mpc.messaging.schema import utc_ts
-from crystallization_mpc.infra.numeric import decode_numeric
 
 CELSIUS_TO_KELVIN = 273.15
 
@@ -24,27 +23,12 @@ class ProcessConnectionError(ProcessAdapterError):
     """The process communication channel could not supply a valid result."""
 
 
-class ControllerReadError(ProcessConnectionError):
-    """A read attempt failed; the GUI-style loop warns and tries its next cycle.
-
-    This is not a device-write receipt, a completed measurement, or permission
-    to substitute historical values. ``stage`` identifies the failing read.
-    """
-
-    def __init__(self, message: str, *, stage: str = "process_read") -> None:
-        self.stage = stage
-        self.partial_process_values: dict[str, float] = {}
-        super().__init__(message)
-
-
 class ProcessSafetyError(ProcessAdapterError):
     """A process value or requested setpoint violated a safety constraint."""
 
 
 class ProcessMeasurementPending(ProcessSafetyError):
-    """Legacy waiting vocabulary, retained for archives and older adapters.
-
-    Current measurement reads do not emit this for negative concentration.
+    """A fresh, otherwise valid complete round has negative concentration.
 
     This exception is never a write receipt: when raised by a write method it
     guarantees that the corresponding command has not been published.
@@ -135,21 +119,16 @@ class ProcessState:
     T_j: float
     c: float
     count_middle: float
-    T_j_set: float | None
+    T_j_set: float
     read_at: str
     source_timestamps: Mapping[str, str | None] = field(default_factory=dict)
     server_timestamps: Mapping[str, str | None] = field(default_factory=dict)
     status_codes: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in ("T", "T_j", "c", "count_middle"):
-            # A measurement is passed to the same numerical stage as MATLAB,
-            # including negative values and IEEE NaN/Inf. Types remain scalar.
-            object.__setattr__(self, name, _measurement_number(getattr(self, name), name))
-        if self.T_j_set is not None:
-            object.__setattr__(self, "T_j_set", _measurement_number(self.T_j_set, "T_j_set"))
-        if not str(self.read_at).strip():
-            raise ValueError("Process read_at is required.")
+        # Measurement semantics belong to the actual source calculation. A
+        # representation container must not reject NaN/Inf/negative inputs.
+        pass
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -157,7 +136,7 @@ class ProcessState:
             "T_j": float(self.T_j),
             "c": float(self.c),
             "count_middle": float(self.count_middle),
-            "T_j_set": float(self.T_j_set) if self.T_j_set is not None else None,
+            "T_j_set": float(self.T_j_set),
             "read_at": self.read_at,
             "source_timestamps": dict(self.source_timestamps),
             "server_timestamps": dict(self.server_timestamps),
@@ -206,10 +185,6 @@ class ProcessAdapter(ABC):
     @abstractmethod
     def read_state(self) -> ProcessState:
         """Read one complete, validated equipment snapshot."""
-
-    def read_initial_state(self) -> ProcessState:
-        """Read activation values; adapters without a separate path stay compatible."""
-        return self.read_state()
 
     @abstractmethod
     def write_jacket_setpoint(self, setpoint_K: float) -> ProcessWriteResult:
@@ -326,8 +301,6 @@ class OpcUaProcessAdapter(ProcessAdapter):
         self.last_error: str | None = None
         self.last_state: ProcessState | None = None
         self.last_write: ProcessWriteResult | None = None
-        self._last_field_values: dict[str, float] = {}
-        self._initial_setpoint_reading: dict[str, Any] | None = None
 
     def connect(self) -> None:
         with self._lock:
@@ -369,40 +342,13 @@ class OpcUaProcessAdapter(ProcessAdapter):
                 except Exception:
                     pass
 
-    def read_initial_state(self) -> ProcessState:
-        with self._lock:
-            # MATLAB clears its experiment lists before the direct initial
-            # reads. A new initialization does not inherit empty-value fallback.
-            self._last_field_values.clear()
-            self._initial_setpoint_reading = None
-            return self._read_process_state(initial=True)
-
     def read_state(self) -> ProcessState:
-        return self._read_process_state(initial=False)
-
-    def _read_process_state(self, *, initial: bool) -> ProcessState:
         with self._lock:
             try:
-                # MATLAB checks connection status before reading. It does not
-                # retry the failed read within the same control iteration.
-                if not self._connected:
-                    if self._client is not None:
-                        self.reconnect_count += 1
-                    self.connect()
-                state = self._read_state_connected(initial=initial)
-            except ProcessSafetyError as exc:
-                self.last_error = str(exc)
-                raise
-            except ControllerReadError as exc:
-                self.last_error = str(exc)
-                raise
+                state = self._with_one_reconnect(self._read_state_connected, "read")
             except Exception as exc:
                 self.last_error = str(exc)
-                # A timeout alone does not establish that a session closed.
-                # An explicit connection failure is observed by the next read.
-                if isinstance(exc, (ConnectionError, EOFError)):
-                    self._connected = False
-                raise ControllerReadError(f"OPC UA process read failed: {exc}") from exc
+                raise
             self.read_count += 1
             self.last_read_at = state.read_at
             self.last_state = state
@@ -448,42 +394,17 @@ class OpcUaProcessAdapter(ProcessAdapter):
             f"OPC UA {name} failed after reconnect: {errors[-1]}"
         ) from errors[-1]
 
-    def _read_state_connected(self, *, initial: bool) -> ProcessState:
-        readings: dict[str, Any] = {}
-        partial: dict[str, float] = {}
-        names = (("T", "T_j", "T_j_set", "c", "count_middle") if initial else
-                 ("T", "T_j", "c", "count_middle"))
-        for name in names:
-            try:
-                readings[name] = self._read_node(name, measurement=True, empty_fallback=not initial)
-            except ProcessSafetyError:
-                raise
-            except Exception as exc:
-                error = exc if isinstance(exc, ControllerReadError) else ControllerReadError(str(exc))
-                error.partial_process_values = dict(partial)
-                if isinstance(exc, (ConnectionError, EOFError)):
-                    self._connected = False
-                if error is exc:
-                    raise
-                raise error from exc
-            partial[name] = float(readings[name]["value"]) + (
-                CELSIUS_TO_KELVIN if name in ("T", "T_j", "T_j_set") else 0.0
-            )
-            if initial and name == "T_j_set":
-                # Source assignment has already happened even if a later
-                # initial c/count read throws and initialization cannot finish.
-                self._initial_setpoint_reading = dict(readings[name])
-        if not initial and self._initial_setpoint_reading is not None:
-            # The GUI runtime measurement reads only four fields. Preserve the
-            # actual initial setpoint and its provenance without another read.
-            readings["T_j_set"] = dict(self._initial_setpoint_reading)
+    def _read_state_connected(self) -> ProcessState:
+        readings = {
+            name: self._read_node(name)
+            for name in ("T", "T_j", "c", "count_middle", "T_j_set")
+        }
         return ProcessState(
             T=readings["T"]["value"] + CELSIUS_TO_KELVIN,
             T_j=readings["T_j"]["value"] + CELSIUS_TO_KELVIN,
             c=readings["c"]["value"],
             count_middle=readings["count_middle"]["value"],
-            T_j_set=(readings["T_j_set"]["value"] + CELSIUS_TO_KELVIN
-                     if "T_j_set" in readings else None),
+            T_j_set=readings["T_j_set"]["value"] + CELSIUS_TO_KELVIN,
             read_at=utc_ts(),
             source_timestamps={
                 name: values["source_timestamp"]
@@ -498,29 +419,16 @@ class OpcUaProcessAdapter(ProcessAdapter):
             },
         )
 
-    def _read_node(self, name: str, *, measurement: bool = False,
-                   empty_fallback: bool = True) -> dict[str, Any]:
+    def _read_node(self, name: str) -> dict[str, Any]:
         data_value = self._nodes[name].read_data_value()
         status = data_value.StatusCode
         if not status.is_good():
             raise ProcessConnectionError(
                 f"OPC UA node {name} returned bad status {status}."
             )
-        raw = None if data_value.Value is None else data_value.Value.Value
-        empty = raw is None or (isinstance(raw, (list, tuple)) and not raw)
-        if empty and empty_fallback and name in ("c", "count_middle"):
-            if name not in self._last_field_values:
-                raise ControllerReadError(f"OPC UA node {name} returned empty before any prior value.")
-            value = self._last_field_values[name]
-        elif empty:
-            raise ControllerReadError(f"OPC UA node {name} returned no value.")
-        else:
-            value = _measurement_number(raw, name) if measurement else _finite_number(raw, name)
-            if empty_fallback and name in ("c", "count_middle"):
-                # Initial readValue results are scalar workspace variables;
-                # initialize_lists leaves the runtime c/count lists empty.
-                # Only a successfully executed runtime read supplies list(end).
-                self._last_field_values[name] = value
+        if data_value.Value is None:
+            raise ProcessSafetyError(f"OPC UA node {name} returned no value.")
+        value = _finite_number(data_value.Value.Value, name)
         return {
             "value": value,
             "status_code": str(status),
@@ -592,13 +500,6 @@ def _default_client_factory(endpoint: str, timeout_s: float) -> Any:
     return Client(endpoint, timeout=timeout_s)
 
 
-def _measurement_number(value: Any, name: str) -> float:
-    try:
-        return decode_numeric(value, name)
-    except (OverflowError, TypeError, ValueError) as exc:
-        raise ProcessSafetyError(f"{name} must be a numeric measurement scalar.") from exc
-
-
 def _finite_number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ProcessSafetyError(f"{name} must be a real number.")
@@ -635,10 +536,38 @@ __all__ = [
     "ProcessAdapter",
     "ProcessAdapterError",
     "ProcessConnectionError",
-    "ControllerReadError",
     "ProcessSafetyError",
     "ProcessMeasurementPending",
     "ProcessDataTimeoutPending",
     "ProcessState",
     "ProcessWriteResult",
 ]
+
+# Internal numerical workspace compatibility; the transport above is e4.
+from ._source_values import (
+    MatlabSpecialValue, MATLAB_EMPTY, MATLAB_EMPTY_CELL, MATLAB_UNDEFINED,
+    is_matlab_empty, matlab_value_document,
+)
+
+class ControllerReadError(ProcessConnectionError):
+    """A read attempt failed; the GUI-style loop warns and tries its next cycle.
+
+    This is not a device-write receipt, a completed measurement, or permission
+    to substitute historical values. ``stage`` identifies the failing read.
+    """
+
+    def __init__(self, message: str, *, stage: str = "process_read") -> None:
+        self.stage = stage
+        self.partial_process_values: dict[str, Any] = {}
+        self.partial_assignments: list[dict[str, Any]] = []
+        super().__init__(message)
+
+
+class ProcessWriteError(ProcessConnectionError):
+    """One write attempt ended; its outcome is historical, never a resume gate."""
+
+    def __init__(self, message: str, *, write_outcome: str = "unknown",
+                 command_sent: bool | None = None) -> None:
+        self.write_outcome = write_outcome
+        self.command_sent = command_sent
+        super().__init__(message)

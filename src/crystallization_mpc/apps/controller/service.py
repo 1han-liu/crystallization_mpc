@@ -1,14 +1,15 @@
-"""RabbitMQ-facing Controller lifecycle and input validation service."""
+"""MATLAB GUI execution order behind the existing Controller wire interface."""
 
 from __future__ import annotations
 
 from crystallization_mpc.infra.runtime_history import RuntimeHistory
-from crystallization_mpc.infra.numeric import encode_nonfinite, decode_nonfinite
+from crystallization_mpc.apps.controller.numeric import encode_nonfinite, decode_nonfinite
 
 import copy
 import json
 import logging
 import math
+import numpy as np
 import os
 import threading
 import time
@@ -82,6 +83,8 @@ from crystallization_mpc.messaging.run_parameters import (
 )
 from crystallization_mpc.messaging.schema import utc_ts
 
+from .algorithm._logical import source_if as _source_truth
+
 ROLE = "controller"
 CONTROLLER_STATE_FILENAME = ".controller_runtime_state.json"
 logger = logging.getLogger(__name__)
@@ -100,7 +103,7 @@ ConsumerRunner = Callable[..., None]
 
 
 class ControllerService(OnlineParametersMixin):
-    """Validate bus messages and forward only valid samples to an adapter."""
+    """Translate wire commands, then execute source assignments and loop stages."""
 
     def __init__(
         self,
@@ -138,16 +141,13 @@ class ControllerService(OnlineParametersMixin):
         self.last_valid_sample: GrowthRateSamplePayload | None = None
         self.last_valid_sample_received_monotonic: float | None = None
         self.last_valid_sample_arrival_age_s: float | None = None
-        # Keep the last established G timestamp for diagnostics. Missing or
-        # stale G now pauses this run until fresh valid input arrives.
+        # Producer timestamps are observational; a source G read occurs after control.
         self.growth_wait: dict[str, Any] | None = None
         self._growth_recovery_pending = False
         self.growth_stream_last_valid_at: str | None = None
         self._growth_stream_last_valid_monotonic: float | None = None
         self._growth_stream_arrival_age_s: float | None = None
-        # A running live experiment starts with GSensor explicitly disabled.
-        # The cache remains unusable until Central's ordered activation command,
-        # a matching GSensor status acknowledgement, and a fresh valid sample.
+        # G_active follows operator assignment; producer status is observational.
         self.gsensor_desired_enabled = False
         self.gsensor_enabled = False
         self.gsensor_measurement_ready = False
@@ -171,6 +171,7 @@ class ControllerService(OnlineParametersMixin):
         self.last_message_result: dict[str, Any] | None = None
         self.last_error: str | None = None
         self.last_read_warning: dict[str, Any] | None = None
+        self.last_write_warning = None
         self.received_message_count = 0
         self.accepted_message_count = 0
         self.rejected_message_count = 0
@@ -218,7 +219,7 @@ class ControllerService(OnlineParametersMixin):
                 logger.warning("Could not initialize Controller InfluxDB writer: %s", exc)
         if isinstance(self.process_adapter, RabbitProcessAdapter):
             self.process_adapter.audit_writer = self.measurement_writer
-            self.process_adapter.audit_required = self.settings.influx_enabled
+            self.process_adapter.audit_required = False
         self.seed_event_count = 0
         self.duplicate_seed_event_count = 0
         self.last_seed_event: dict[str, Any] | None = None
@@ -249,8 +250,14 @@ class ControllerService(OnlineParametersMixin):
             if self.settings.experiment_root
             else None
         )
-        if self.state_path is not None:
-            self._restore_persisted_state()
+        # A new process corresponds to MATLAB clear; archives never activate it.
+        self._adapter_configured = False
+        self._parameters_received = False
+        self._modified_queue = []
+        self.controller_active = self.controller_active_old = False
+        self._activation_wall_time = None
+        self._last_iteration_start = None
+        self._refresh_receipt_event_id = None
         self.runtime_history = RuntimeHistory(system_path(self.settings.experiment_root, ".controller_runtime_history.json")) if self.state_path else None
         for entry in self.runtime_events.values():
             self._archive_runtime_event(entry["command"], entry["result"])
@@ -262,7 +269,7 @@ class ControllerService(OnlineParametersMixin):
             self.runtime_history.save({"command": command, "status": result["status"],
                                        "result": result, "persistence": self.recovery_status})
             self.runtime_history_error = None
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
             self.runtime_history_error = f"Runtime history persistence failed: {type(exc).__name__}"
 
     def runtime_history_page(self, run_id: str, before: int | None = None,
@@ -421,569 +428,29 @@ class ControllerService(OnlineParametersMixin):
             },
         }
 
-    def _try_persist_state_locked(self) -> bool:
-        # An unreadable/incompatible archive is evidence, not a fresh state file.
-        # In particular, shutdown and rejected messages must not overwrite it.
+    def _try_persist_state_locked(self):
+        # Observation only. Failure cannot revoke assignments, require restart,
+        # clear filters, or prevent the next source iteration.
         if self.state_path is None:
             return True
-        if self.recovery_status == "error" or self._persistence_halted:
-            return False
+        temporary = None
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            document = self._state_document_locked()
-            temporary = self.state_path.with_name(
-                f".{self.state_path.name}.{uuid4().hex}.tmp"
-            )
-            try:
-                serialized = json.dumps(
-                        encode_nonfinite(document),
-                        indent=2,
-                        ensure_ascii=False,
-                        allow_nan=False,
-                    ) + "\n"
-                with temporary.open("w", encoding="utf-8") as stream:
-                    stream.write(serialized)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.state_path)
-                if self.recovery_status == "persistence_error":
-                    self.recovery_status = "saved"
-                    self.recovery_error = None
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
+            temporary = self.state_path.with_name(f'.{self.state_path.name}.{uuid4().hex}.tmp')
+            data = encode_nonfinite(self._state_document_locked())
+            temporary.write_text(json.dumps(data,allow_nan=False,indent=2)+'\n')
+            os.replace(temporary,self.state_path)
+            self.recovery_status, self.recovery_error = 'saved', None
+            return True
         except Exception as exc:
-            self.recovery_status = "persistence_error"
-            self.recovery_error = str(exc)
-            logger.exception("Could not persist Controller runtime state.")
+            self.recovery_status, self.recovery_error = 'persistence_error', str(exc)
+            logger.warning('Controller observation archive unavailable: %s',exc)
             return False
-        return True
+        finally:
+            if temporary is not None and temporary.exists():
+                try: temporary.unlink()
+                except OSError: pass
 
-    def _restore_persisted_state(self) -> None:
-        assert self.state_path is not None
-        if not self.state_path.is_file():
-            self.recovery_status = "not_available"
-            return
-        try:
-            document = decode_nonfinite(json.loads(self.state_path.read_text(encoding="utf-8")))
-            if not isinstance(document, dict):
-                raise ValueError("Controller runtime state must be an object.")
-            schema_version = document.get("schema_version")
-            if type(schema_version) is not int or schema_version not in {1, 2}:
-                raise ValueError("Unsupported Controller runtime-state schema.")
-            state = ControllerState(str(document.get("state") or ""))
-            restore_active_checkpoint = state in {
-                ControllerState.RUNNING, ControllerState.RECOVERY_REQUIRED,
-            }
-            hold = document.get("safety_hold")
-            if hold is not None:
-                if (not isinstance(hold, dict)
-                        or hold.get("reason") not in {"controller_restart", "growth_timeout", "gsensor_error"}
-                        or not isinstance(hold.get("detail"), str)):
-                    raise ValueError("Controller safety hold metadata is invalid.")
-                _timestamp_value(hold.get("occurred_at"), "safety_hold.occurred_at")
-            self.safety_hold = copy.deepcopy(hold)
-            legacy_inactive_state = schema_version == 1
-            if legacy_inactive_state and state not in {
-                ControllerState.IDLE, ControllerState.CONFIGURED, ControllerState.STOPPED,
-            }:
-                raise ValueError(
-                    "Legacy Controller checkpoints may only be recovered while idle, "
-                    "configured, or stopped; automatic experiment resume is not supported."
-                )
-            parameters = document.get("parameters")
-            if not isinstance(parameters, dict):
-                raise ValueError("Controller recovery parameters must be an object.")
-            counts = document.get("counts") or {}
-            if not isinstance(counts, dict):
-                raise ValueError("Controller recovery counts must be an object.")
-            seed_events = document.get("seed_events") or {}
-            if not isinstance(seed_events, dict):
-                raise ValueError("Controller recovery seed events must be an object.")
-            adaptation = document.get("adaptation") or {}
-            if not isinstance(adaptation, dict):
-                raise ValueError("Controller recovery adaptation must be an object.")
-            self.last_fit_success_at = adaptation.get("last_success_at")
-            control_output = document.get("control_output") or {}
-            if not isinstance(control_output, dict):
-                raise ValueError("Controller recovery control output must be an object.")
-
-            self.state = state
-            self.parameters = copy.deepcopy(parameters)
-            self._configured_parameter_sections = copy.deepcopy(document.get("parameter_sections"))
-            parameter_version = document.get("parameter_version")
-            self.parameter_version = (
-                int(parameter_version) if parameter_version is not None else None
-            )
-            self.current_run_id = document.get("current_run_id")
-            self.started_at = document.get("started_at")
-            self.stopped_at = document.get("stopped_at")
-            last_frame_seq = document.get("last_frame_seq")
-            self.last_frame_seq = (
-                int(last_frame_seq) if last_frame_seq is not None else None
-            )
-            self.last_sample = copy.deepcopy(document.get("last_sample"))
-            last_valid_sample = document.get("last_valid_sample")
-            self.last_valid_sample = (
-                GrowthRateSamplePayload.from_mapping(last_valid_sample)
-                if isinstance(last_valid_sample, Mapping)
-                else None
-            )
-            gsensor = document.get("gsensor") or {}
-            if not isinstance(gsensor, Mapping):
-                raise ValueError("Controller recovery GSensor state must be an object.")
-            control_revision = gsensor.get("control_revision", 0)
-            initialization_generation = gsensor.get("initialization_generation", 0)
-            alignment_revision = gsensor.get("alignment_revision", 0)
-            sample_floor = gsensor.get("sample_floor_frame_seq", 0)
-            for name, value in (
-                ("control_revision", control_revision),
-                ("initialization_generation", initialization_generation),
-                ("alignment_revision", alignment_revision),
-                ("sample_floor_frame_seq", sample_floor),
-            ):
-                if type(value) is not int or value < 0:
-                    raise ValueError(f"Controller recovery GSensor {name} is invalid.")
-            control_event_id = gsensor.get("control_event_id")
-            if control_event_id is not None and (
-                not isinstance(control_event_id, str) or not control_event_id.strip()
-            ):
-                raise ValueError("Controller recovery GSensor event ID is invalid.")
-            last_command_enabled = gsensor.get("last_command_enabled")
-            if last_command_enabled is not None and type(last_command_enabled) is not bool:
-                raise ValueError("Controller recovery GSensor command state is invalid.")
-            for name in (
-                "last_command_requested_at",
-                "transition_occurred_at",
-                "last_status_at",
-            ):
-                timestamp = gsensor.get(name)
-                if timestamp is not None:
-                    _timestamp_value(timestamp, f"gsensor.{name}")
-            self.gsensor_control_revision = control_revision
-            self.gsensor_control_event_id = control_event_id
-            self.gsensor_last_command_enabled = last_command_enabled
-            self.gsensor_last_command_requested_at = gsensor.get(
-                "last_command_requested_at"
-            )
-            self.gsensor_initialization_generation = initialization_generation
-            self.gsensor_alignment_revision = alignment_revision
-            method = gsensor.get("alignment_method")
-            if method is not None:
-                from crystallization_mpc.messaging.parameter_policy import validate_parameter_changes
-                validate_parameter_changes({"gsensor": {"alignment_method": method}}, allow_historical_alignment=True)
-            self.gsensor_alignment_method = method
-            self.gsensor_sample_floor_frame_seq = max(
-                sample_floor,
-                self.last_frame_seq or 0,
-            )
-            self.gsensor_transition_occurred_at = gsensor.get(
-                "transition_occurred_at"
-            )
-            self.gsensor_last_status_at = gsensor.get("last_status_at")
-            waiting = gsensor.get("growth_wait")
-            if waiting is not None:
-                if (not isinstance(waiting, dict)
-                        or waiting.get("reason") not in {"growth_data_timeout", "waiting_for_fresh_valid_sample"}):
-                    raise ValueError("Controller recovery G wait metadata is invalid.")
-                _timestamp_value(waiting.get("waiting_since"), "growth_wait.waiting_since")
-                if waiting.get("last_valid_at") is not None:
-                    _timestamp_value(waiting["last_valid_at"], "growth_wait.last_valid_at")
-            pending_growth_recovery = gsensor.get("growth_recovery_pending", False)
-            if type(pending_growth_recovery) is not bool:
-                raise ValueError("Controller recovery G recovery flag is invalid.")
-            self.growth_wait = copy.deepcopy(waiting)
-            self._growth_recovery_pending = pending_growth_recovery
-            self.growth_stream_last_valid_at = gsensor.get("stream_last_valid_at")
-            if self.growth_stream_last_valid_at is not None:
-                _timestamp_value(self.growth_stream_last_valid_at, "gsensor.stream_last_valid_at")
-            self._growth_stream_last_valid_monotonic = None
-            self._growth_stream_arrival_age_s = None
-            desired_enabled = gsensor.get("desired_enabled", False)
-            if type(desired_enabled) is not bool:
-                raise ValueError("Controller recovery GSensor desired state is invalid.")
-            # Permission can survive a Controller-only restart while the GSensor
-            # process keeps running. Availability and sample freshness cannot.
-            self.gsensor_desired_enabled = desired_enabled and not legacy_inactive_state
-            self.gsensor_enabled = False
-            self.gsensor_measurement_ready = False
-            self.gsensor_gate_reason = (
-                "restart_waiting_for_fresh_status"
-                if self.gsensor_desired_enabled
-                else "disabled"
-            )
-            restart_barrier = _utc_timestamp(self._wall_clock())
-            prior_barrier = self.gsensor_transition_occurred_at
-            if prior_barrier is None or _timestamp_value(
-                restart_barrier,
-                "restart barrier",
-            ) >= _timestamp_value(prior_barrier, "saved GSensor transition occurred_at"):
-                self.gsensor_transition_occurred_at = restart_barrier
-            self.gsensor_last_status_at = None
-            self.last_valid_sample = None
-            self.last_valid_sample_received_monotonic = None
-            self.last_valid_sample_arrival_age_s = None
-            self.last_message = copy.deepcopy(document.get("last_message"))
-            self.last_message_result = copy.deepcopy(
-                document.get("last_message_result")
-            )
-            self.last_error = document.get("last_error")
-            warning = document.get("last_read_warning")
-            if warning is not None and not isinstance(warning, dict):
-                raise ValueError("Controller last read warning must be an object or null.")
-            self.last_read_warning = copy.deepcopy(warning)
-            self.received_message_count = int(counts.get("received", 0))
-            self.accepted_message_count = int(counts.get("accepted", 0))
-            self.rejected_message_count = int(counts.get("rejected", 0))
-            self.valid_sample_count = int(counts.get("valid", 0))
-            self.invalid_sample_count = int(counts.get("invalid", 0))
-            self.duplicate_sample_count = int(counts.get("duplicate", 0))
-            self.missing_frame_count = int(counts.get("missing", 0))
-            self.adapter_error_count = int(counts.get("adapter_error", 0))
-            self.process_error_count = int(counts.get("process_error", 0))
-            self.control_tick_count = int(counts.get("control_tick", 0))
-            self.control_tick_error_count = int(counts.get("control_tick_error", 0))
-            scheduler = document.get("scheduler") or {}
-            if not isinstance(scheduler, dict):
-                raise ValueError("Controller recovery scheduler must be an object.")
-            saved_age = scheduler.get("last_growth_sample_age_s")
-            self.last_growth_sample_age_s = (
-                float(saved_age) if saved_age is not None else None
-            )
-            process_io = document.get("process_io") or {}
-            if not isinstance(process_io, dict):
-                raise ValueError("Controller recovery process_io must be an object.")
-            self.last_process_error = process_io.get("last_error")
-            self.last_process_state = copy.deepcopy(process_io.get("last_state"))
-            self.last_process_write = copy.deepcopy(process_io.get("last_write"))
-            waiting = process_io.get("waiting")
-            if waiting is not None:
-                if (not isinstance(waiting, dict)
-                        or waiting.get("reason") not in {
-                            "negative_concentration", "process_data_timeout",
-                            "process_transport_wait", "process_write_unconfirmed",
-                        }):
-                    raise ValueError("Controller process waiting metadata is invalid.")
-                if waiting["reason"] == "negative_concentration":
-                    if (isinstance(waiting.get("raw_c"), bool)
-                            or not isinstance(waiting.get("raw_c"), (int, float))
-                            or not math.isfinite(waiting["raw_c"]) or waiting["raw_c"] >= 0):
-                        raise ValueError("Controller negative-concentration metadata is invalid.")
-                    _timestamp_value(waiting.get("read_at"), "process waiting read_at")
-                else:
-                    # An absence of measurements is never a synthetic sample.
-                    if "raw_c" in waiting or "read_at" in waiting:
-                        raise ValueError("Timeout waiting metadata cannot contain a process measurement.")
-                    if waiting.get("last_valid_read_at") is not None:
-                        _timestamp_value(waiting["last_valid_read_at"], "process waiting last_valid_read_at")
-                _timestamp_value(waiting.get("waiting_since"), "process waiting waiting_since")
-            self.process_wait = copy.deepcopy(waiting)
-            write_wait = process_io.get("write_wait")
-            if write_wait is not None:
-                if not isinstance(write_wait, dict):
-                    raise ValueError("Controller write waiting metadata is invalid.")
-                command = write_wait.get("command")
-                if (not isinstance(command, dict) or command.get("run_id") != self.current_run_id
-                        or not isinstance(command.get("command_id"), str)
-                        or type(command.get("tick_seq")) is not int):
-                    raise ValueError("Controller unresolved write belongs to another experiment.")
-                from crystallization_mpc.apps.opcua_writer.commands import WriteCommand
-                from crystallization_mpc.messaging.schema import build_envelope
-                WriteCommand.from_envelope(build_envelope(
-                    src="controller", dst="opcua_writer", msg_type="command",
-                    name="process.setpoint.write", seq=command["tick_seq"], payload=command,
-                    correlation_id=command["command_id"]))
-            # A real process restart still requires End; never resume writes here.
-            self.process_write_wait = copy.deepcopy(write_wait)
-            wait_count = process_io.get("wait_count", 0)
-            activation_pending = process_io.get("activation_pending", False)
-            if type(wait_count) is not int or wait_count < 0 or type(activation_pending) is not bool:
-                raise ValueError("Controller process waiting counters are invalid.")
-            self.process_wait_count = wait_count
-            self.process_activation_pending = activation_pending
-            client_unassigned = process_io.get("activation_client_unassigned", False)
-            if type(client_unassigned) is not bool:
-                raise ValueError("Controller activation client state is invalid.")
-            self.activation_client_unassigned = client_unassigned
-            self.control_output_count = int(control_output.get("count", 0))
-            self.invalid_control_output_count = int(
-                control_output.get("invalid_count", 0)
-            )
-            last_control_output = control_output.get("last")
-            if last_control_output is not None:
-                if not isinstance(last_control_output, dict):
-                    raise ValueError(
-                        "Controller last control output must be an object or null."
-                    )
-                result_document = last_control_output.get("result")
-                if not isinstance(result_document, Mapping):
-                    raise ValueError(
-                        "Controller last control output is missing its result object."
-                    )
-                ControllerStepResult.from_mapping(result_document)
-            self.last_control_output = copy.deepcopy(last_control_output)
-            self.influx_write_success_count = int(
-                control_output.get("influx_write_success", 0)
-            )
-            self.influx_write_failure_count = int(
-                control_output.get("influx_write_failure", 0)
-            )
-            self.last_influx_write_at = control_output.get("last_influx_write_at")
-            persisted_influx_error = control_output.get("last_influx_error")
-            if self.influx_initialization_error is None:
-                self.last_influx_error = persisted_influx_error
-            self.seed_event_count = int(seed_events.get("count", 0))
-            self.duplicate_seed_event_count = int(
-                seed_events.get("duplicate_count", 0)
-            )
-            last_seed_event = seed_events.get("last")
-            if last_seed_event is not None and not isinstance(last_seed_event, dict):
-                raise ValueError("Controller last seed event must be an object or null.")
-            self.last_seed_event = copy.deepcopy(last_seed_event)
-            processed_seed_event_ids = seed_events.get("processed_event_ids") or []
-            if not isinstance(processed_seed_event_ids, list) or not all(
-                isinstance(event_id, str) and event_id.strip()
-                for event_id in processed_seed_event_ids
-            ):
-                raise ValueError(
-                    "Controller processed seed event IDs must be a list of strings."
-                )
-            self._processed_seed_event_ids = set(processed_seed_event_ids)
-            adaptation_enabled = adaptation.get("enabled", False)
-            if not isinstance(adaptation_enabled, bool):
-                raise ValueError(
-                    "Controller recovery adaptation enabled must be a boolean."
-                )
-            self.adaptation_enabled = adaptation_enabled
-            self.adaptation_mode = str(adaptation.get("mode", "E_A"))
-            # Reuse the shared contract to validate both mode and strict bool.
-            ControllerAdaptationPayload(
-                run_id=str(self.current_run_id or "recovery"),
-                event_id="recovery-validation",
-                enabled=self.adaptation_enabled,
-                mode=self.adaptation_mode,
-                requested_at=str(document.get("updated_at") or "recovery"),
-            )
-            self.adaptation_event_count = int(adaptation.get("event_count", 0))
-            self.duplicate_adaptation_event_count = int(
-                adaptation.get("duplicate_count", 0)
-            )
-            last_adaptation_event = adaptation.get("last_event")
-            if last_adaptation_event is not None and not isinstance(
-                last_adaptation_event, dict
-            ):
-                raise ValueError(
-                    "Controller last adaptation event must be an object or null."
-                )
-            self.last_adaptation_event = copy.deepcopy(last_adaptation_event)
-            processed_adaptation_event_ids = (
-                adaptation.get("processed_event_ids") or []
-            )
-            if not isinstance(processed_adaptation_event_ids, list) or not all(
-                isinstance(event_id, str) and event_id.strip()
-                for event_id in processed_adaptation_event_ids
-            ):
-                raise ValueError(
-                    "Controller processed adaptation event IDs must be a list of strings."
-                )
-            self._processed_adaptation_event_ids = set(
-                processed_adaptation_event_ids
-            )
-
-            if restore_active_checkpoint:
-                if not self.current_run_id or self.parameter_version is None:
-                    raise ValueError("Running Controller recovery state is incomplete.")
-                _timestamp_value(self.started_at, "recovered started_at")
-                adapter_document = document.get("adapter")
-                adapter_state = (
-                    adapter_document.get("state")
-                    if isinstance(adapter_document, dict)
-                    else None
-                )
-                if not isinstance(adapter_state, dict):
-                    raise ValueError(
-                        "The configured Controller adapter does not provide restart state."
-                    )
-                if self.process_activation_pending:
-                    # No measurement, filter or control cycle existed yet.
-                    # Validate a configured-but-never-started snapshot exactly;
-                    # container recovery still requires an explicit End.
-                    if (self.process_wait is None or self.control_tick_count != 0
-                            or self.control_output_count != 0 or self.last_control_output is not None
-                            or self.last_process_state is not None):
-                        raise ValueError("Pending process activation has control history.")
-                    self.adapter.configure(copy.deepcopy(self.parameters), str(self.current_run_id))
-                    self.adapter.set_adaptation(self.adaptation_enabled, self.adaptation_mode, None)
-                    restored = self.adapter.export_state() == adapter_state
-                else:
-                    restore_adapter = (self.adapter.restore_held_state
-                                       if state == ControllerState.RECOVERY_REQUIRED
-                                       else self.adapter.restore_state)
-                    restored = restore_adapter(
-                        copy.deepcopy(self.parameters),
-                        str(self.current_run_id),
-                        copy.deepcopy(adapter_state),
-                    )
-                if not restored:
-                    raise ValueError(
-                        "The configured Controller adapter cannot restore a running experiment. "
-                        "Its checkpoint content is incomplete, invalid, or incompatible. "
-                        "Preserve the checkpoint and create a new experiment in a new session "
-                        "directory; do not substitute the latest process temperature."
-                    )
-                # The checkpoint owns algorithm adaptation state. Overwriting
-                # it here would hide corruption before consistency checks.
-                restored_configuration = self.adapter.runtime_configuration()
-                if restored_configuration is not None and (
-                        restored_configuration.get("adaptation_enabled") != self.adaptation_enabled
-                        or restored_configuration.get("adaptation_mode") != self.adaptation_mode):
-                    raise ValueError("Adaptation state disagrees with recovered algorithm.")
-                # Restoring numerical state is not permission to control the
-                # process. Keep every filter/integral/fitting-segment value for
-                # inspection and archival, without connecting equipment or
-                # arming a deadline. An explicit identity-matched End Experiment
-                # must close this interrupted run before a new run can start.
-                self._run_started_monotonic = None
-                self._next_tick_monotonic = None
-            runtime = document.get("runtime_controls")
-            actual_configuration = self.adapter.runtime_configuration() if restore_active_checkpoint else None
-            if runtime is not None:
-                if not isinstance(runtime, dict):
-                    raise ValueError("Invalid runtime controls recovery document.")
-                if legacy_inactive_state:
-                    # v1 persisted the applied revision and event journal, but
-                    # predates deferred refresh/pending state. Only an inactive
-                    # checkpoint may adopt the empty v2 refresh state. Preserve
-                    # its history, validate all existing values below, and never
-                    # configure the algorithm or connect the process on this path.
-                    runtime = copy.deepcopy(runtime)
-                    runtime.setdefault("pending", None)
-                    runtime.setdefault("refresh", {
-                        "state": "completed", "event_id": None,
-                        "count": 0, "segment_id": 0,
-                    })
-                    if runtime["pending"] is not None or (
-                        isinstance(runtime["refresh"], dict)
-                        and runtime["refresh"].get("state") == "pending"
-                    ):
-                        raise ValueError("An inactive legacy checkpoint cannot contain a pending refresh.")
-                revision = runtime.get("revision")
-                if type(revision) is not int or revision < 0:
-                    raise ValueError("Invalid runtime controls revision.")
-                saved_configuration = runtime.get("configuration")
-                if saved_configuration is not None:
-                    saved_configuration = validate_runtime_changes(saved_configuration)
-                    if restore_active_checkpoint and saved_configuration != actual_configuration:
-                        raise ValueError("Runtime controls disagree with recovered algorithm state.")
-                events = runtime.get("events")
-                if not isinstance(events, dict):
-                    raise ValueError("Invalid runtime event journal.")
-                for event_id, entry in events.items():
-                    event = parse_runtime_command(entry["command"], allow_historical_alignment=True)
-                    if event_id != event.event_id or event.run_id != self.current_run_id:
-                        raise ValueError("Runtime event journal belongs to another run.")
-                    if not isinstance(entry.get("result"), dict):
-                        raise ValueError("Runtime event result is missing.")
-                self.runtime_revision = revision
-                self.runtime_configuration_current = copy.deepcopy(saved_configuration)
-                self.runtime_events = copy.deepcopy(events)
-                self.runtime_last_result = copy.deepcopy(runtime.get("last_result"))
-                self._restore_online_parameter_document(document)
-                pending = runtime.get("pending")
-                refresh = runtime.get("refresh")
-                if not isinstance(refresh, dict) or refresh.get("state") not in {"pending", "completed", "failed"}:
-                    raise ValueError("Invalid runtime refresh recovery state.")
-                for key in ("count", "segment_id"):
-                    if type(refresh.get(key)) is not int or refresh[key] < 0:
-                        raise ValueError("Invalid runtime refresh counter.")
-                if pending is not None:
-                    if not isinstance(pending, dict):
-                        raise ValueError("Invalid pending runtime command.")
-                    pending_command = ControllerRuntimeUpdatePayload.from_mapping(pending["command"])
-                    pending_entry = events.get(pending_command.event_id)
-                    if (not restore_active_checkpoint or pending_command.run_id != self.current_run_id
-                            or pending_command.expected_revision != revision
-                            or pending_entry is None or pending_entry["result"].get("status") != "pending"
-                            or pending_entry["command"] != pending_command.to_dict()
-                            or refresh.get("state") != "pending"
-                            or refresh.get("event_id") != pending_command.event_id):
-                        raise ValueError("Pending runtime command disagrees with checkpoint.")
-                    candidate = dict(self.adapter.validate_runtime_update(pending_command.changes))
-                    if candidate != pending.get("configuration"):
-                        raise ValueError("Pending runtime candidate disagrees with checkpoint.")
-                elif any(entry["result"].get("status") == "pending"
-                         and (self.run_parameter_pending is None
-                              or event_id != self.run_parameter_pending["command"]["event_id"])
-                         for event_id, entry in events.items()):
-                    raise ValueError("Runtime journal has an orphaned pending command.")
-                if pending is not None and self.run_parameter_pending is not None:
-                    raise ValueError("Checkpoint contains two pending runtime updates.")
-                actual_refresh = self.adapter.refresh_status() or {}
-                if restore_active_checkpoint and (
-                        actual_refresh.get("count", 0) != refresh["count"]
-                        or actual_refresh.get("segment_id", 0) != refresh["segment_id"]):
-                    raise ValueError("Runtime refresh counters disagree with recovered algorithm.")
-                if restore_active_checkpoint:
-                    last_completed = actual_refresh.get("last_event")
-                    if refresh["count"] > 0:
-                        if not isinstance(last_completed, Mapping):
-                            raise ValueError("Algorithm refresh receipt is missing.")
-                        completed_id = last_completed.get("event_id")
-                        completed = events.get(completed_id, {}).get("result", {})
-                        if ((completed.get("status") != "applied" and not completed.get("controller_applied"))
-                                or completed.get("refreshed") is not True
-                                or completed.get("refresh_count") != refresh["count"]
-                                or completed.get("segment_id") != refresh["segment_id"]
-                                or completed.get("effective_tick") != last_completed.get("effective_tick")
-                                or completed.get("elapsed_s") != last_completed.get("elapsed_s")
-                                or completed.get("configuration") != actual_configuration):
-                            raise ValueError("Runtime journal disagrees with algorithm refresh receipt.")
-                        if refresh.get("state") == "completed" and any(
-                                refresh.get(key) != last_completed.get(key)
-                                for key in ("event_id", "effective_tick", "elapsed_s")):
-                            raise ValueError("Runtime refresh receipt disagrees with algorithm boundary.")
-                    elif last_completed is not None:
-                        raise ValueError("Unexpected algorithm refresh receipt before any refresh.")
-                    # Metadata-only changes consume a common configuration
-                    # revision without claiming a numerical filter refresh.
-                    committed = [entry["result"] for entry in events.values()
-                                 if entry["result"].get("controller_applied") is True
-                                 or (entry["result"].get("status") == "applied"
-                                     and entry["result"].get("no_change") is False)]
-                    if sorted(item.get("revision") for item in committed) != list(range(1, revision + 1)):
-                        raise ValueError("Runtime revision disagrees with its committed journal.")
-                    if sum(item.get("refreshed") is True for item in committed) != refresh["count"]:
-                        raise ValueError("Runtime refresh count disagrees with its committed journal.")
-                self.runtime_pending = copy.deepcopy(pending)
-                self.runtime_refresh = copy.deepcopy(refresh)
-            else:
-                raise ValueError("Controller checkpoint is missing runtime refresh state.")
-            if restore_active_checkpoint:
-                self.state = ControllerState.RECOVERY_REQUIRED
-                self.recovery_status = "confirmation_required"
-                if self.safety_hold is None:
-                    self.safety_hold = {
-                        "reason": "controller_restart", "occurred_at": _utc_timestamp(self._wall_clock()),
-                        "detail": "Controller restarted during an experiment; End this run before creating a new run.",
-                    }
-            else:
-                self.recovery_status = "restored"
-            self.recovery_error = None
-        except Exception as exc:
-            self.state = ControllerState.ERROR
-            self._next_tick_monotonic = None
-            try:
-                self.adapter.stop()
-            except Exception:
-                logger.exception("Could not stop adapter after failed recovery.")
-            try:
-                self.process_adapter.disconnect()
-            except Exception:
-                logger.exception("Could not disconnect process after failed recovery.")
-            self.last_error = f"Controller recovery failed: {exc}"
-            self.recovery_status = "error"
-            self.recovery_error = str(exc)
-            logger.exception("Could not restore Controller runtime state.")
 
     def start(self, *, scheduler_enabled: bool = True, consumer_enabled: bool = True) -> None:
         """Start the consumer, optionally leaving ticks to an isolated test clock."""
@@ -1047,10 +514,9 @@ class ControllerService(OnlineParametersMixin):
 
         while not self._control_stop.is_set():
             with self._lock:
-                self._check_growth_timeout_locked()
                 deadline = (
                     self._next_tick_monotonic
-                    if self.state == ControllerState.RUNNING
+                    if self._parameters_received
                     else None
                 )
             if deadline is None:
@@ -1058,8 +524,7 @@ class ControllerService(OnlineParametersMixin):
                 self._control_wakeup.clear()
                 continue
             delay = max(0.0, deadline - self._monotonic_clock())
-            # Watch the established live-G stream between control deadlines;
-            # no optimizer or process step is called by this short wait.
+            # The source interval is measured from the previous iteration start.
             if self._control_wakeup.wait(min(delay, 0.25)):
                 self._control_wakeup.clear()
                 continue
@@ -1142,13 +607,6 @@ class ControllerService(OnlineParametersMixin):
         payload = message.get("payload")
         if not isinstance(payload, Mapping):
             raise ValueError("Message payload must be an object.")
-        if (self.state == ControllerState.RECOVERY_REQUIRED
-                and not (msg_type == "command" and name == EXPERIMENT_STOP_COMMAND and source == "central")):
-            raise ValueError(
-                "Controller is in a persistent safety hold and requires confirmation. "
-                "Use End Experiment for the matching run before creating a new run; automatic or same-run resume is disabled."
-            )
-
         if msg_type == "params" and name == PARAMS_UPDATE_MESSAGE:
             if source != "central":
                 raise ValueError("params.update must come from Central.")
@@ -1212,39 +670,41 @@ class ControllerService(OnlineParametersMixin):
 
         raise ValueError(f"Unsupported Controller message: {msg_type}/{name}.")
 
-    def _apply_parameters(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        version = _positive_int(payload.get("version"), "version")
-        params = payload.get("params")
-        if not isinstance(params, Mapping):
-            raise ValueError("params.update payload.params must be an object.")
-        normalized = {str(key): copy.deepcopy(value) for key, value in params.items()}
-        sections = copy.deepcopy(payload.get("parameter_sections"))
-        normalized = self._complete_startup_parameters(normalized, sections)
-
-        with self._lock:
-            if self.state == ControllerState.RECOVERY_REQUIRED:
-                raise ValueError("End the interrupted experiment before changing Controller parameters.")
-            if self.recovery_status == "error":
-                raise ValueError(self._recovery_failure_reason_locked())
-            if self.state != ControllerState.RUNNING and self._has_unended_started_run_locked():
-                raise ValueError("End the failed experiment before changing Controller parameters; old parameters cannot resume it.")
-            if self.state == ControllerState.RUNNING:
-                if (version == self.parameter_version and normalized == self.parameters
-                        and (sections is None or sections == self._configured_parameter_sections)):
-                    return {"accepted": True, "duplicate": True, "kind": "params"}
-                raise ValueError("Controller parameters cannot change during an experiment.")
-            self._reset_run_parameters(sections, parameters=normalized)
-            self.parameters = normalized
-            self.parameter_version = version
-            self._configured_parameter_sections = sections
+    def _apply_parameters(self, payload):
+        from .algorithm.parameters import build_parameters, parameters_to_workspace
+        supplied = payload.get('params')
+        if not isinstance(supplied, Mapping):
+            raise TypeError('params.update requires an object.')
+        self.parameter_version = payload.get('version')
+        self._configured_parameter_sections = copy.deepcopy(payload.get('parameter_sections'))
+        # Central's unchanged flat startup format is a template projection. Native
+        # nested/dotted workspace maps are assigned without default repair.
+        if 'params' in supplied:
+            workspace = copy.deepcopy(dict(supplied))
+        else:
+            flat = self._complete_startup_parameters(supplied, self._configured_parameter_sections)
+            workspace = parameters_to_workspace(build_parameters(flat))
+        if not self._adapter_configured:
+            defaults = dict(controller_active=False, controller_refresh_request=False,
+                            add_seed_request=False, mark_seed=False, adaptive_disp=False,
+                            pop_up_and_save_variables_refresh_request=False, inline_display=False,
+                            adaptive=False, adaptive_mode='E_A', G_active=False)
+            defaults.update(workspace)
+            self.adapter.configure(defaults, self.current_run_id or 'gui-workspace')
+            self._adapter_configured = True
+            self.controller_active = self.controller_active_old = False
+        else:
+            self.adapter.apply_modified(workspace)
+        self._sync_workspace()
+        self._reset_run_parameters(self._configured_parameter_sections, parameters=self.parameters)
+        self._parameters_received = True
+        if self.state == ControllerState.IDLE:
             self.state = ControllerState.CONFIGURED
+        self._next_tick_monotonic = self._monotonic_clock() + self._get_dt()
+        self._control_wakeup.set()
+        return {'accepted': True, 'kind': 'params', 'parameter_version': self.parameter_version,
+                'parameter_count': len(self.parameters)}
 
-        return {
-            "accepted": True,
-            "kind": "params",
-            "parameter_version": version,
-            "parameter_count": len(normalized),
-        }
 
     def _recovery_failure_reason_locked(self) -> str:
         return f"Controller recovery failed: {self.recovery_error}"
@@ -1259,581 +719,90 @@ class ControllerService(OnlineParametersMixin):
             return False
         return True
 
-    def _start_experiment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        _positive_int(payload.get("parameter_version"), "parameter_version")
+    def _start_experiment(self, payload):
         command = ExperimentStartPayload.from_mapping(payload)
         with self._lock:
-            if self.state == ControllerState.RECOVERY_REQUIRED:
-                raise ValueError("End the interrupted experiment before starting a new run; same-run resume is disabled.")
-            if self.recovery_status == "error":
-                raise ValueError(
-                    "Preserve the failed checkpoint and create a new experiment in a new "
-                    "session directory before restarting Controller."
-                )
-            if self.parameter_version is None:
-                raise ValueError("Controller has not received params.update.")
-            if command.parameter_version != self.parameter_version:
-                raise ValueError(
-                    "experiment.start parameter_version does not match Controller params."
-                )
-            if self.current_run_id == command.run_id:
-                if self.state == ControllerState.RUNNING:
-                    if _timestamp_utc(command.started_at, "started_at") != _timestamp_utc(self.started_at, "started_at"):
-                        raise ValueError("experiment.start does not match the running experiment start identity.")
-                    return {"accepted": True, "duplicate": True, "kind": "start"}
-                if self.state == ControllerState.STOPPED or self.stopped_at is not None:
-                    raise ValueError("A stopped experiment cannot be restarted.")
-            if self.state != ControllerState.RUNNING and self._has_unended_started_run_locked():
-                raise ValueError("End the failed experiment before starting a new run; same-run resume is disabled.")
-            if self.current_run_id and self.state == ControllerState.RUNNING:
-                raise ValueError("Controller is already running another experiment.")
-            run_type = str(
-                self.parameters.get("run_type", self.parameters.get("exp_sim", "experiment"))
-            )
-            if run_type == "experiment" and not self.settings.process_enabled:
-                raise ValueError(
-                    "Experiment mode requires CONTROLLER_PROCESS_ENABLED=true for process reads."
-                )
-
-            self.current_run_id = command.run_id
-            self.started_at = command.started_at
-            self.stopped_at = None
-            self.safety_hold = None
-            self.growth_wait = None
-            self._growth_recovery_pending = False
-            self.growth_stream_last_valid_at = None
-            self._growth_stream_last_valid_monotonic = None
-            self._growth_stream_arrival_age_s = None
-            self.last_frame_seq = None
-            self.last_sample = None
-            self.last_valid_sample = None
-            self.last_valid_sample_received_monotonic = None
-            self.last_valid_sample_arrival_age_s = None
-            self.gsensor_desired_enabled = False
-            self.gsensor_enabled = False
-            self.gsensor_measurement_ready = False
-            self.gsensor_control_revision = 0
-            self.gsensor_control_event_id = None
-            self.gsensor_last_command_enabled = None
-            self.gsensor_last_command_requested_at = None
-            self.gsensor_initialization_generation = 0
-            self.gsensor_alignment_revision = 0
-            self.gsensor_alignment_method = None
-            self.gsensor_sample_floor_frame_seq = 0
-            self.gsensor_transition_occurred_at = command.started_at
-            self.gsensor_last_status_at = None
-            self.gsensor_gate_reason = "disabled"
-            self.control_tick_count = 0
-            self.control_tick_error_count = 0
-            self.last_read_warning = None
-            self.last_growth_sample_age_s = None
-            self.valid_sample_count = 0
-            self.invalid_sample_count = 0
-            self.duplicate_sample_count = 0
-            self.missing_frame_count = 0
-            self.last_control_output = None
-            self.control_output_count = 0
-            self.invalid_control_output_count = 0
-            self.process_error_count = 0
-            self.last_process_error = None
-            self.last_process_state = None
-            self.last_process_write = None
-            self.process_wait = None
-            self.process_write_wait = None
-            self.process_wait_count = 0
-            self.process_activation_pending = False
-            self.activation_client_unassigned = False
-            self.influx_write_success_count = 0
-            self.influx_write_failure_count = 0
-            self.last_influx_write_at = None
-            self.last_influx_error = self.influx_initialization_error
-            self.seed_event_count = 0
-            self.duplicate_seed_event_count = 0
-            self.last_seed_event = None
-            self._processed_seed_event_ids.clear()
-            self.adaptation_enabled = command.adaptation_enabled
-            self.adaptation_mode = command.adaptation_mode
-            self.last_fit_success_at = None
-            self.adaptation_event_count = 0
-            self.duplicate_adaptation_event_count = 0
-            self.last_adaptation_event = None
-            self._processed_adaptation_event_ids.clear()
-            self.runtime_revision = 0
-            self.runtime_events.clear()
-            self.runtime_last_result = None
-            self.runtime_pending = None
-            self.runtime_refresh = {"state": "completed", "event_id": None,
-                                    "count": 0, "segment_id": 0}
-            self.runtime_configuration_current = None
-            self._reset_run_parameters(self._configured_parameter_sections)
-
-            try:
-                self.adapter.configure(copy.deepcopy(self.parameters), command.run_id)
-                self.adapter.set_adaptation(
-                    self.adaptation_enabled,
-                    self.adaptation_mode,
-                    None,
-                )
-            except Exception as exc:
-                self.adapter_error_count += 1
-                self.state = ControllerState.ERROR
-                raise RuntimeError(f"Controller adapter configure failed: {exc}") from exc
-            try:
-                # initialize_controller clears its lists/ii before reading the
-                # process. A failed initial read does not undo that prefix.
-                self.adapter.start()
-            except Exception as exc:
-                self.adapter_error_count += 1
-                self.state = ControllerState.ERROR
-                raise RuntimeError(f"Controller adapter start failed: {exc}") from exc
-            activation_started = self._monotonic_clock()
-            activation_state = None
-            if self.settings.process_enabled:
-                activation_connection = True
-                try:
-                    self.process_adapter.connect()
-                    activation_connection = False
-                    if run_type == "experiment":
-                        activation_state = self.process_adapter.read_initial_state()
-                        if not isinstance(activation_state, ProcessState):
-                            raise TypeError("Process activation requires ProcessState.")
-                        activation_state.__post_init__()
-                except (ControllerReadError, ProcessConnectionError, TimeoutError, ConnectionError) as exc:
-                    # This initial read lives inside the GUI main try. The
-                    # active-old flag has already changed, but the refresh
-                    # request has not yet been set: do not retry initialization
-                    # or silently build a filter on the next successful read.
-                    self.adapter.record_activation_read_failure(exc)
-                    self.activation_client_unassigned = activation_connection
-                    self.process_error_count += 1
-                    self.last_process_error = str(exc)
-                    activation_stage = "activation_connection" if activation_connection else "activation_read"
-                    self.last_read_warning = {"tick_seq": 0, "elapsed_s": 0.0,
-                        "stage": activation_stage, "message": str(exc), "occurred_at": utc_ts()}
-                    logger.warning("Controller %s: %s", activation_stage, exc)
-                except Exception as exc:
-                    self.process_error_count += 1
-                    self.last_process_error = str(exc)
-                    self.process_adapter.disconnect()
-                    self.state = ControllerState.ERROR
-                    raise RuntimeError(
-                        f"Controller process activation failed: {exc}"
-                    ) from exc
-            try:
-                if activation_state is not None:
-                    self.last_process_state = activation_state.to_dict()
-                    self.adapter.initialize_process_state(activation_state)
-            except ControllerInputValueError as exc:
-                if not self.adapter.initialization_pending():
-                    self.adapter_error_count += 1
-                    self.state = ControllerState.ERROR
-                    self.process_adapter.disconnect()
-                    raise RuntimeError(f"Controller adapter start failed: {exc}") from exc
-                # In the GUI, successful initialization reads precede the
-                # refresh flag. A failed constructor leaves that flag set;
-                # later loops retry it using the SAME cached initial values.
-                self.last_read_warning = {"tick_seq": 0, "elapsed_s": 0.0,
-                    "stage": exc.stage, "message": str(exc), "occurred_at": utc_ts()}
-                logger.warning("Controller %s: %s", exc.stage, exc)
-            except Exception as exc:
-                self.adapter_error_count += 1
-                try:
-                    self.adapter.stop()
-                except Exception:
-                    logger.exception("Could not stop adapter after failed activation.")
-                self.process_adapter.disconnect()
-                self.state = ControllerState.ERROR
-                raise RuntimeError(f"Controller adapter start failed: {exc}") from exc
+            if not self._adapter_configured:
+                raise ValueError('Controller has not received initial parameters.')
+            if self.controller_active and self.current_run_id != command.run_id:
+                raise ValueError('Start belongs to another active experiment.')
+            if self.controller_active and self.current_run_id == command.run_id:
+                return {'accepted': True, 'duplicate': True, 'kind': 'start'}
+            self.current_run_id, self.started_at, self.stopped_at = command.run_id, command.started_at, None
+            kernel = getattr(self.adapter, 'controller', None)
+            if kernel is not None:
+                kernel.run_id = self.current_run_id
+            self.controller_active = True
+            self.adapter.apply_modified({'controller_active': True, 'adaptive': command.adaptation_enabled,
+                                         'adaptive_mode': command.adaptation_mode})
+            self._sync_workspace()
             self.state = ControllerState.RUNNING
-            configuration = self.adapter.runtime_configuration()
-            self.runtime_configuration_current = (
-                copy.deepcopy(dict(configuration)) if configuration is not None else None
-            )
-            now = self._monotonic_clock()
-            self._run_started_monotonic = activation_started
-            self._next_tick_monotonic = now + float(self.parameters.get("dt", 5.0))
+            self._next_tick_monotonic = self._monotonic_clock() + self._interval()
             self._control_wakeup.set()
+            return {'accepted': True, 'kind': 'start', 'run_id': command.run_id}
 
-        return {"accepted": True, "kind": "start", "run_id": command.run_id}
 
-    def _stop_experiment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _stop_experiment(self, payload):
         command = ExperimentStopPayload.from_mapping(payload)
         with self._lock:
-            if self.current_run_id is None:
-                raise ValueError("Controller has no current experiment.")
             if command.run_id != self.current_run_id:
-                raise ValueError("experiment.stop run_id does not match current experiment.")
-            confirming_recovery = self.state == ControllerState.RECOVERY_REQUIRED
-            ending_failed_run = self.state != ControllerState.RUNNING and self._has_unended_started_run_locked()
-            confirming_interruption = confirming_recovery or ending_failed_run
-            if confirming_interruption:
-                if _timestamp_utc(payload.get("experiment_started_at"), "experiment_started_at") != _timestamp_utc(self.started_at, "started_at"):
-                    raise ValueError("Ending an interrupted experiment requires its matching experiment_started_at identity.")
-                if _timestamp_value(command.stopped_at, "stopped_at") < _timestamp_value(self.started_at, "started_at"):
-                    raise ValueError("experiment.stop cannot predate the interrupted experiment start.")
-            if self.state == ControllerState.STOPPED:
-                self._mark_archive_finalized(command.run_id)
-                return {"accepted": True, "duplicate": True, "kind": "stop"}
-            self._reject_pending_runtime_locked("Experiment stopped before refresh.")
-            try:
-                self.adapter.stop()
-            except Exception as exc:
-                self.adapter_error_count += 1
-                self.state = (ControllerState.RECOVERY_REQUIRED if confirming_recovery
-                              else ControllerState.ERROR)
-                raise RuntimeError(f"Controller adapter stop failed: {exc}") from exc
-            finally:
-                try:
-                    self.process_adapter.disconnect()
-                except Exception as exc:
-                    self.process_error_count += 1
-                    if confirming_recovery:
-                        self.state = ControllerState.RECOVERY_REQUIRED
-                    raise RuntimeError(f"Controller process disconnect failed: {exc}") from exc
-            previous_process_wait = self.process_wait
-            previous_process_write_wait = self.process_write_wait
-            previous_activation_pending = self.process_activation_pending
+                raise ValueError('Stop belongs to another experiment.')
+            self.controller_active = self.controller_active_old = False
+            self.adapter.apply_modified({'controller_active': False})
+            self.adapter.stop()
             self.state = ControllerState.STOPPED
-            self.process_wait = None
-            self.process_write_wait = None
-            self.process_activation_pending = False
-            if confirming_interruption:
-                self.recovery_status = "restored"
-                self.recovery_error = None
-            previous_stopped_at = self.stopped_at
             self.stopped_at = command.stopped_at
-            self._invalidate_growth_input_locked(
-                reason="experiment_stopped",
-                frame_seq=self.last_frame_seq,
-                occurred_at=command.stopped_at,
-            )
-            self.gsensor_desired_enabled = False
-            self.gsensor_enabled = False
-            self._next_tick_monotonic = None
-            self._control_wakeup.set()
+            # Source stop toggles activation; it does not destroy the workspace.
+            self._modified_queue.clear()
+            self.runtime_pending = None
+            self.process_wait = self.process_write_wait = None
+            self._try_persist_state_locked()
+            try:
+                self._mark_archive_finalized(command.run_id)
+            except Exception as exc:
+                logger.warning('Experiment archive finalization unavailable: %s', exc)
+            return {'accepted': True, 'kind':'stop', 'run_id':command.run_id}
 
-            if confirming_interruption and not self._try_persist_state_locked():
-                # A successful method return is not enough to release the
-                # restart latch. Keep the run blocked if its explicit End
-                # could not be committed. No old params/start replay may
-                # turn this failed End into permission to control again.
-                self.state = ControllerState.RECOVERY_REQUIRED if confirming_recovery else ControllerState.ERROR
-                self.process_wait = previous_process_wait
-                self.process_write_wait = previous_process_write_wait
-                self.process_activation_pending = previous_activation_pending
-                self.stopped_at = previous_stopped_at
-                self.recovery_status = "confirmation_required" if confirming_recovery else "persistence_error"
-                end_error = self.recovery_error
-                # This was an End-commit failure, not failed checkpoint
-                # recovery. on_message records it as last_error. If saving
-                # the retained hold also fails, persistence sets its own
-                # recovery error again; never leave a stale recovery error
-                # after that save succeeds.
-                self.recovery_error = None
-                raise RuntimeError(
-                    "Ending the interrupted experiment could not be persisted; retry End for this same run."
-                    + (f" {end_error}" if end_error else "")
-                )
-
-            self._mark_archive_finalized(command.run_id)
-
-        return {"accepted": True, "kind": "stop", "run_id": command.run_id}
 
     def _mark_archive_finalized(self, run_id: str) -> None:
         mark_finalized(self.settings.experiment_root, run_id, "controller", self.control_tick_count,
                        enqueue_failures=self.influx_write_failure_count + int(self.process_adapter.status().get("audit_failure_count", 0)),
                        persistence_enabled=self.measurement_writer is not None)
 
-    def _add_seed(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        event = ControllerAddSeedPayload.from_mapping(payload)
-        with self._lock:
-            if self.current_run_id is None:
-                raise ValueError("Controller has no current experiment.")
-            if event.run_id != self.current_run_id:
-                raise ValueError(
-                    "controller.add_seed run_id does not match current experiment."
-                )
-            if event.event_id in self._processed_seed_event_ids:
-                self.duplicate_seed_event_count += 1
-                return {
-                    "accepted": True,
-                    "duplicate": True,
-                    "kind": "seed_event",
-                    "event_id": event.event_id,
-                }
-            if self.state != ControllerState.RUNNING:
-                raise ValueError("Controller is not running an experiment.")
+    def _add_seed(self, payload):
+        if payload.get('run_id') != self.current_run_id:
+            raise ValueError('Seed message belongs to another experiment.')
+        self.seed_event_count += 1
+        self.last_seed_event = copy.deepcopy(dict(payload))
+        return self.submit_operator_map({'add_seed_request': True}, event_id=payload.get('event_id'), command=payload)
 
-            event_document = event.to_dict()
-            try:
-                self.adapter.add_seed(copy.deepcopy(event_document))
-            except Exception as exc:
-                self.adapter_error_count += 1
-                self.state = ControllerState.ERROR
-                raise RuntimeError(
-                    f"Controller adapter Add Seed failed: {exc}"
-                ) from exc
 
-            self._processed_seed_event_ids.add(event.event_id)
-            self.seed_event_count += 1
-            self.last_seed_event = event_document
+    def _set_adaptation(self, payload):
+        return self._update_runtime({'run_id':payload.get('run_id'),'event_id':payload.get('event_id'),
+            'changes':{'adaptation_enabled':payload.get('enabled'),'adaptation_mode':payload.get('mode')},
+            'requested_at':payload.get('requested_at')})
 
-        return {
-            "accepted": True,
-            "kind": "seed_event",
-            "event_id": event.event_id,
-            "adapter_called": True,
-        }
 
-    def _set_adaptation(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        event = ControllerAdaptationPayload.from_mapping(payload)
-        with self._lock:
-            if self.current_run_id is None:
-                raise ValueError("Controller has no current experiment.")
-            if event.run_id != self.current_run_id:
-                raise ValueError(
-                    "controller.adaptation.set run_id does not match current experiment."
-                )
-            if (event.event_id in self._processed_adaptation_event_ids
-                    and event.event_id not in self.runtime_events):
-                self.duplicate_adaptation_event_count += 1
-                return {
-                    "accepted": True,
-                    "duplicate": True,
-                    "kind": "adaptation",
-                    "event_id": event.event_id,
-                }
-            if self.state != ControllerState.RUNNING:
-                raise ValueError("Controller is not running an experiment.")
+    def _update_runtime(self, payload):
+        if payload.get('run_id') != self.current_run_id:
+            raise ValueError('Runtime message belongs to another experiment.')
+        aliases = {'control_target':'target','adaptation_enabled':'adaptive','adaptation_mode':'adaptive_mode'}
+        values = {aliases.get(k,k):copy.deepcopy(v) for k,v in payload.get('changes',{}).items()}
+        # target_set is an independent MATLAB workspace variable. Translate the
+        # unchanged UI's named active setpoint into that supplied assignment.
+        target = values.get('target', self.parameters.get('target'))
+        if f'{target}_set' in values:
+            values['target_set'] = values[f'{target}_set']
+        elif 'target' in values:
+            values['target_set'] = self.parameters.get(f'{target}_set')
+        return self.submit_operator_map(values, event_id=payload.get('event_id'), command=payload)
 
-            # Compatibility transport only: same atomic path and unsupported-
-            # adapter rejection as the new runtime command.
-            prior = self.runtime_events.get(event.event_id)
-            revision = (
-                prior["command"]["expected_revision"] if prior else self.runtime_revision
-            )
-            result = self._update_runtime(ControllerRuntimeUpdatePayload(
-                event.run_id, event.event_id, revision,
-                {"adaptation_enabled": event.enabled, "adaptation_mode": event.mode},
-                event.requested_at,
-            ).to_dict())
-            if result.get("duplicate"):
-                self.duplicate_adaptation_event_count += 1
-            return result
 
-    def _update_runtime(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        event = ControllerRuntimeUpdatePayload.from_mapping(payload)
-        with self._lock:
-            if event.run_id != self.current_run_id:
-                raise ValueError("Runtime run_id does not match current experiment.")
-            command = event.to_dict()
-            prior = self.runtime_events.get(event.event_id)
-            if prior:
-                if prior["command"] != command:
-                    raise ValueError("Runtime event_id was reused with different content.")
-                result = {**copy.deepcopy(prior["result"]), "duplicate": True}
-                self.runtime_last_result = result
-                return result
-            before = copy.deepcopy(self.runtime_configuration_current)
-            result = {
-                "kind": "runtime", "event_id": event.event_id, "run_id": event.run_id,
-                "requested_at": event.requested_at, "processed_at": utc_ts(),
-                "revision": self.runtime_revision, "before": before,
-            }
-            try:
-                if self.state != ControllerState.RUNNING:
-                    raise ValueError("Controller is not running an experiment.")
-                if event.expected_revision != self.runtime_revision:
-                    raise ValueError("Runtime configuration revision conflict.")
-                if before is None:
-                    raise ValueError("This Controller adapter does not support runtime updates.")
-                if not self.adapter.supports_runtime_refresh():
-                    raise ValueError("This Controller adapter does not support runtime refresh.")
-                if (type(self.adapter).rollback_runtime_refresh is ControllerAdapter.rollback_runtime_refresh
-                        or type(self.adapter).commit_runtime_refresh is ControllerAdapter.commit_runtime_refresh):
-                    raise ValueError("This Controller adapter does not support atomic runtime refresh.")
-                if self.runtime_pending is not None or self.run_parameter_pending is not None:
-                    raise ValueError("Another runtime refresh is pending.")
-                after = dict(self.adapter.validate_runtime_update(event.changes))
-            except (ValueError, TypeError, NotImplementedError) as exc:
-                result.update(accepted=False, status="rejected", reason=str(exc),
-                              configuration=before, refreshed=False)
-            else:
-                if before == after:
-                    result.update(accepted=True, status="applied", configuration=before,
-                                  effective_tick=self.control_tick_count, no_change=True,
-                                  refreshed=False, applied_at=utc_ts())
-                else:
-                    result.update(accepted=True, status="pending", configuration=before,
-                                  pending_configuration=after, no_change=False,
-                                  refreshed=False)
-                    self.runtime_pending = {"command": command, "configuration": after}
-                    self.runtime_refresh.update(state="pending", event_id=event.event_id,
-                                                reason="runtime_configuration_changed")
-            self.runtime_events[event.event_id] = {
-                "command": command, "result": copy.deepcopy(result),
-            }
-            self.runtime_last_result = copy.deepcopy(result)
-            if not self._try_persist_state_locked():
-                self._runtime_persistence_failure_locked(event.event_id)
-                return copy.deepcopy(self.runtime_last_result)
-            return result
-
-    def _reject_pending_runtime_locked(self, reason: str) -> None:
-        """Produce a terminal result without pretending the staged patch applied."""
-        if self.run_parameter_pending is not None:
-            self._reject_run_parameters(reason)
-        if self.runtime_pending is None:
-            return
-        event_id = self.runtime_pending["command"]["event_id"]
-        try:
-            self.adapter.rollback_runtime_refresh(event_id)
-            if dict(self.adapter.runtime_configuration() or {}) != self.runtime_configuration_current:
-                raise RuntimeError("Algorithm configuration did not roll back.")
-            if (self.adapter.refresh_status() or {}).get("count", 0) != self.runtime_refresh["count"]:
-                raise RuntimeError("Algorithm refresh counter did not roll back.")
-        except Exception as exc:
-            reason = f"{reason} Numerical rollback failed: {exc}"
-            self._persistence_halted = True
-            self.state = ControllerState.ERROR
-            self._next_tick_monotonic = None
-        entry = self.runtime_events[event_id]
-        entry["result"].update(accepted=False, status="rejected", reason=reason,
-                               refreshed=False, processed_at=utc_ts(),
-                               configuration=copy.deepcopy(self.runtime_configuration_current))
-        entry["result"].pop("pending_configuration", None)
-        self.runtime_last_result = copy.deepcopy(entry["result"])
+    def _reject_pending_runtime_locked(self, reason):
+        self._modified_queue.clear()
         self.runtime_pending = None
-        self.runtime_refresh.update(state="failed", event_id=event_id, reason=reason)
-        self._archive_runtime_event(entry["command"], entry["result"])
+        self.run_parameter_pending = None
 
-    def _runtime_persistence_failure_locked(self, event_id: str) -> None:
-        reason = "Runtime refresh checkpoint persistence failed; Controller stopped."
-        # A rollback or disconnect failure must not reopen persistence of a
-        # partially committed refresh or replace its primary checkpoint error.
-        self._persistence_halted = True
-        self.state = ControllerState.ERROR
-        self._next_tick_monotonic = None
-        self.last_error = reason
-        if self.runtime_pending is not None:
-            self._reject_pending_runtime_locked(reason)
-        else:
-            try:
-                self.adapter.rollback_runtime_refresh(event_id)
-            except Exception as exc:
-                reason = f"{reason} Numerical rollback failed: {exc}"
-                logger.exception("Could not roll back refresh after checkpoint failure.")
-            entry = self.runtime_events[event_id]
-            entry["result"].update(accepted=False, status="rejected", reason=reason,
-                                  refreshed=False, configuration=copy.deepcopy(self.runtime_configuration_current))
-            entry["result"].pop("applied_at", None)
-            self.runtime_last_result = copy.deepcopy(entry["result"])
-            self.runtime_refresh.update(state="failed", event_id=event_id, reason=reason)
-            self._archive_runtime_event(entry["command"], entry["result"])
-        self.last_error = reason
-        try:
-            self.process_adapter.disconnect()
-        except Exception as exc:
-            self.process_error_count += 1
-            self.last_process_error = f"{reason}; disconnect failed: {exc}"
-            logger.exception("Could not disconnect process after refresh checkpoint failure.")
-
-    def _complete_pending_runtime_locked(self, tick: ControllerTickInput,
-                                         output: ControllerStepResult | None) -> None:
-        if self.run_parameter_pending is not None:
-            self._complete_run_parameter_tick(tick, output)
-            return
-        if self.runtime_pending is None:
-            return
-        pending = self.runtime_pending
-        command = pending["command"]
-        event_id = command["event_id"]
-        refresh = self.adapter.refresh_status() or {}
-        event = refresh.get("last_event") or {}
-        actual = self.adapter.runtime_configuration()
-        if (output is None or not output.valid or event.get("event_id") != event_id
-                or event.get("effective_tick") != tick.tick_seq
-                or event.get("elapsed_s") != tick.elapsed_s
-                or dict(actual or {}) != pending["configuration"]
-                or refresh.get("count") != self.runtime_refresh["count"] + 1
-                or refresh.get("segment_id") != self.runtime_refresh["segment_id"] + 1):
-            raise RuntimeError("Controller adapter did not complete the pending runtime refresh.")
-        before = copy.deepcopy(self.runtime_configuration_current)
-        revision_before = self.runtime_revision
-        adaptation_before = (self.adaptation_enabled, self.adaptation_mode,
-                             self.adaptation_event_count, copy.deepcopy(self.last_adaptation_event))
-        self.runtime_revision += 1
-        self.runtime_configuration_current = copy.deepcopy(pending["configuration"])
-        self.adaptation_enabled = self.runtime_configuration_current["adaptation_enabled"]
-        self.adaptation_mode = self.runtime_configuration_current["adaptation_mode"]
-        if {"adaptation_enabled", "adaptation_mode"} & command["changes"].keys():
-            self.adaptation_event_count += 1
-            self._processed_adaptation_event_ids.add(event_id)
-            self.last_adaptation_event = {"run_id": command["run_id"], "event_id": event_id,
-                                         "enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
-                                         "requested_at": command["requested_at"]}
-        result = self.runtime_events[event_id]["result"]
-        result.update(accepted=True, status="applied", configuration=copy.deepcopy(self.runtime_configuration_current),
-                      revision=self.runtime_revision, effective_tick=tick.tick_seq,
-                      elapsed_s=tick.elapsed_s, no_change=False, refreshed=True,
-                      applied_at=utc_ts(), refresh_count=refresh["count"], segment_id=refresh["segment_id"])
-        result.pop("pending_configuration", None)
-        self.runtime_pending = None
-        prior_refresh = copy.deepcopy(self.runtime_refresh)
-        self.runtime_refresh = {"state": "completed", "event_id": event_id,
-                                "count": refresh["count"], "segment_id": refresh["segment_id"],
-                                "effective_tick": tick.tick_seq, "elapsed_s": tick.elapsed_s,
-                                "reason": "runtime_configuration_changed"}
-        self.runtime_last_result = copy.deepcopy(result)
-        if not self._try_persist_state_locked():
-            self.runtime_revision = revision_before
-            self.runtime_configuration_current = before
-            (self.adaptation_enabled, self.adaptation_mode, self.adaptation_event_count,
-             self.last_adaptation_event) = adaptation_before
-            self._processed_adaptation_event_ids.discard(event_id)
-            result["revision"] = revision_before
-            self.runtime_refresh = prior_refresh
-            self._runtime_persistence_failure_locked(event_id)
-            raise RuntimeError(self.last_error)
-        self.adapter.commit_runtime_refresh(event_id)
-        self._archive_runtime_event(command, result)
-
-    def _enter_safety_hold_locked(self, reason: str, detail: str, *, boundary: str = "notification") -> None:
-        """Latch a fault without advancing or resetting numerical state."""
-        # Close the scheduler before calling rollback or persistence hooks.
-        # Even a failing hook must not leave a running, unobserved experiment.
-        self.state = ControllerState.RECOVERY_REQUIRED
-        self.recovery_status = "confirmation_required"
-        self.recovery_error = None
-        self.safety_hold = {"reason": reason, "detail": detail, "boundary": boundary,
-                            "occurred_at": _utc_timestamp(self._wall_clock())}
-        self.last_error = detail
-        self._next_tick_monotonic = None
-        self._control_wakeup.set()
-        try:
-            # A staged refresh must not be committed by a later message.
-            self._reject_pending_runtime_locked(detail)
-        except Exception as exc:
-            self._persistence_halted = True
-            self.recovery_error = f"Safety hold runtime rejection failed: {exc}"
-            logger.exception("Safety hold could not reject a pending runtime change.")
-        finally:
-            # The rollback helper may set ERROR. A latched safety fault remains
-            # an operator-confirmed hold; keep its actual failure separately.
-            self.state = ControllerState.RECOVERY_REQUIRED
-            self._next_tick_monotonic = None
-        if self._persistence_halted:
-            self.recovery_error = self.recovery_error or str(
-                (self.runtime_last_result or {}).get("reason") or "Checkpoint persistence halted."
-            )
-            self.safety_hold["rollback_error"] = self.recovery_error
-        # A failed save still leaves the in-memory latch closed. The previous
-        # RUNNING checkpoint also becomes a hold on restart, never auto-resumes.
-        try:
-            self._try_persist_state_locked()
-        except Exception as exc:
-            self.recovery_error = f"Safety hold checkpoint failed: {exc}"
-            logger.exception("Safety hold checkpoint raised unexpectedly.")
 
     def _check_growth_timeout_locked(self, *, now: float | None = None, boundary: str = "watchdog") -> bool:
         """Compatibility status hook; MATLAB has no live-G age watchdog.
@@ -1881,303 +850,46 @@ class ControllerService(OnlineParametersMixin):
             if current is None or candidate >= current:
                 self.gsensor_transition_occurred_at = occurred_at
 
-    def _set_gsensor_enabled(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        enabled: bool,
-    ) -> dict[str, Any]:
-        command = GsensorActivationPayload.from_mapping(payload)
-        _timestamp_value(command.requested_at, "requested_at")
-        with self._lock:
-            if self.state != ControllerState.RUNNING:
-                raise ValueError("Controller is not running an experiment.")
-            if command.run_id != self.current_run_id:
-                raise ValueError("GSensor activation run_id does not match current experiment.")
-            if command.experiment_started_at != self.started_at:
-                raise ValueError(
-                    "GSensor activation experiment_started_at does not match current experiment."
-                )
-            if command.revision < self.gsensor_control_revision:
-                raise ValueError("GSensor activation revision is stale.")
-            if command.revision == self.gsensor_control_revision:
-                if (
-                    command.event_id == self.gsensor_control_event_id
-                    and enabled == self.gsensor_last_command_enabled
-                ):
-                    return {
-                        "accepted": True,
-                        "duplicate": True,
-                        "kind": "gsensor_activation",
-                        "enabled": self.gsensor_enabled,
-                        "requested_enabled": self.gsensor_desired_enabled,
-                        "measurement_ready": self.gsensor_measurement_ready,
-                        "control_revision": self.gsensor_control_revision,
-                    }
-                raise ValueError("GSensor activation revision conflicts with its prior event.")
-            if command.event_id == self.gsensor_control_event_id:
-                raise ValueError("A new GSensor activation revision requires a new event_id.")
+    def _set_gsensor_enabled(self, payload, *, enabled):
+        if payload.get('run_id') != self.current_run_id:
+            raise ValueError('G activation belongs to another experiment.')
+        self.gsensor_desired_enabled = enabled
+        self.gsensor_control_revision = payload.get('revision',self.gsensor_control_revision)
+        self.gsensor_control_event_id = payload.get('event_id')
+        self.gsensor_last_command_enabled = enabled
+        self.gsensor_last_command_requested_at = payload.get('requested_at')
+        self.adapter.set_g_active(enabled)
+        return {'accepted':True,'kind':'gsensor_activation','enabled':self.gsensor_enabled,
+                'requested_enabled':enabled,'measurement_ready':self.gsensor_measurement_ready,
+                'control_revision':self.gsensor_control_revision,'control_event_id':self.gsensor_control_event_id}
 
-            self.gsensor_control_revision = command.revision
-            self.gsensor_control_event_id = command.event_id
-            self.gsensor_last_command_enabled = enabled
-            self.gsensor_last_command_requested_at = command.requested_at
-            self.gsensor_desired_enabled = enabled
-            self.growth_wait = None
-            self.growth_stream_last_valid_at = None
-            self._growth_stream_last_valid_monotonic = None
-            self._growth_stream_arrival_age_s = None
-            # Keep a pending recovery baseline when disabling after a gap.
-            # Central's request closes the gate immediately. Enabling still
-            # requires a matching GSensor status acknowledgement.
-            self.gsensor_enabled = False
-            self._invalidate_growth_input_locked(
-                reason="awaiting_gsensor_status" if enabled else "disabled",
-                frame_seq=self.last_frame_seq,
-                occurred_at=command.requested_at,
-            )
-            return {
-                "accepted": True,
-                "kind": "gsensor_activation",
-                "enabled": False,
-                "requested_enabled": enabled,
-                "measurement_ready": False,
-                "control_revision": command.revision,
-                "control_event_id": command.event_id,
-            }
 
-    def _accept_growth_status(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        status = GrowthRateStatusPayload.from_mapping(payload)
-        required = {
-            "enabled": status.enabled,
-            "control_revision": status.control_revision,
-            "experiment_started_at": status.experiment_started_at,
-            "initialization_generation": status.initialization_generation,
-            "alignment_revision": status.alignment_revision,
-            "measurement_ready": status.measurement_ready,
-            "frame_seq": status.frame_seq,
-        }
-        missing = [name for name, value in required.items() if value is None]
-        if missing:
-            raise ValueError(
-                "growth_rate.status is missing live identity field(s): "
-                + ", ".join(missing)
-            )
-        status_time = _timestamp_value(status.occurred_at, "occurred_at")
-        with self._lock:
-            if self.state != ControllerState.RUNNING:
-                raise ValueError("Controller is not running an experiment.")
-            if status.run_id != self.current_run_id:
-                raise ValueError("growth_rate.status run_id does not match current experiment.")
-            if status.experiment_started_at != self.started_at:
-                raise ValueError(
-                    "growth_rate.status experiment_started_at does not match current experiment."
-                )
-            if (status.parameter_revision or 0) != self.measurement_parameter_revision:
-                raise ValueError("growth_rate.status measurement parameter revision is stale or unexpected.")
-            if status.control_revision != self.gsensor_control_revision:
-                raise ValueError("growth_rate.status control revision is stale or unexpected.")
-            if self.gsensor_control_revision > 0:
-                if status.control_event_id != self.gsensor_control_event_id:
-                    raise ValueError("growth_rate.status control event does not match current request.")
-            elif status.control_event_id is not None:
-                raise ValueError("growth_rate.status has an unexpected control event.")
-            if status.enabled and not self.gsensor_desired_enabled:
-                raise ValueError("growth_rate.status reports enabled without current authorization.")
-            if status.measurement_ready and not status.enabled:
-                raise ValueError("growth_rate.status cannot be ready while GSensor is disabled.")
-            if self.gsensor_transition_occurred_at is not None and status_time < _timestamp_value(
-                self.gsensor_transition_occurred_at,
-                "saved GSensor transition occurred_at",
-            ):
-                raise ValueError("growth_rate.status predates the active transition barrier.")
-            if self.gsensor_last_status_at is not None and status_time < _timestamp_value(
-                self.gsensor_last_status_at,
-                "saved GSensor status occurred_at",
-            ):
-                raise ValueError("growth_rate.status is older than the last accepted status.")
-            assert status.initialization_generation is not None
-            assert status.alignment_revision is not None
-            if (
-                status.initialization_generation < self.gsensor_initialization_generation
-                or status.alignment_revision < self.gsensor_alignment_revision
-            ):
-                raise ValueError("growth_rate.status processing context regressed.")
+    def _accept_growth_status(self, payload):
+        if payload.get('run_id') != self.current_run_id:
+            raise ValueError('G status belongs to another experiment.')
+        self.gsensor_enabled = bool(payload.get('enabled',False))
+        self.gsensor_measurement_ready = bool(payload.get('measurement_ready',False))
+        self.gsensor_last_status_at = payload.get('occurred_at')
+        self.gsensor_initialization_generation = payload.get('initialization_generation',0)
+        self.gsensor_alignment_revision = payload.get('alignment_revision',0)
+        self.gsensor_alignment_method = payload.get('alignment_method')
+        self.gsensor_gate_reason = payload.get('status','unknown')
+        # Producer status has no corresponding source control-flow statement.
+        # A failed G read will fail at read_growth_rate, after control calculation.
+        return {'accepted':True,'kind':'growth_status','controls_changed':False}
 
-            if status.status.value == "error" and self._uses_live_growth_locked():
-                if self.gsensor_last_status_at is not None and status_time <= _timestamp_value(
-                        self.gsensor_last_status_at, "saved GSensor status occurred_at"):
-                    raise ValueError("Terminal GSensor status must be newer than the last accepted status.")
-                if status.frame_seq < max(self.last_frame_seq or 0, self.gsensor_sample_floor_frame_seq):
-                    raise ValueError("Terminal GSensor status frame is older than the accepted stream.")
-                if status_time > self._wall_clock() + 1.0:
-                    raise ValueError("Terminal GSensor status is future-dated.")
-                self.gsensor_last_status_at = status.occurred_at
-                self._enter_safety_hold_locked("gsensor_error",
-                    f"GSensor reported a terminal error: {status.error}. "
-                    "Use End Experiment for this run, then create a new run.")
-                return {"accepted": True, "kind": "growth_status", "safety_hold": "gsensor_error"}
 
-            context_changed = (
-                status.initialization_generation
-                != self.gsensor_initialization_generation
-                or status.alignment_revision != self.gsensor_alignment_revision
-            )
-            self.gsensor_initialization_generation = status.initialization_generation
-            self.gsensor_alignment_revision = status.alignment_revision
-            if status.alignment_method is not None:
-                self.gsensor_alignment_method = status.alignment_method
-            self.gsensor_last_status_at = status.occurred_at
-            self.gsensor_enabled = bool(status.enabled)
-            if context_changed or not status.enabled or not status.measurement_ready:
-                reason = (
-                    "processing_context_changed"
-                    if context_changed
-                    else "gsensor_not_enabled"
-                    if not status.enabled
-                    else "measurement_not_ready"
-                )
-                self._invalidate_growth_input_locked(
-                    reason=reason,
-                    frame_seq=status.frame_seq,
-                    occurred_at=status.occurred_at,
-                )
-                if status.enabled and status.measurement_ready:
-                    self.gsensor_measurement_ready = True
-                    self.gsensor_gate_reason = "waiting_for_fresh_valid_sample"
-            else:
-                # Same-context ready notices are emitted before samples. They
-                # acknowledge availability but must not move replay barriers.
-                self.gsensor_measurement_ready = True
-                self.gsensor_gate_reason = (
-                    "ready"
-                    if self.last_valid_sample is not None
-                    else "waiting_for_fresh_valid_sample"
-                )
-            return {
-                "accepted": True,
-                "kind": "growth_status",
-                "enabled": self.gsensor_enabled,
-                "measurement_ready": self.gsensor_measurement_ready,
-                "control_revision": self.gsensor_control_revision,
-                "initialization_generation": self.gsensor_initialization_generation,
-                "alignment_revision": self.gsensor_alignment_revision,
-            }
+    def _accept_sample(self, payload):
+        if payload.get('run_id') != self.current_run_id:
+            raise ValueError('G sample belongs to another experiment.')
+        self.last_sample = copy.deepcopy(dict(payload))
+        from ._source_values import SourceGrowthSample
+        self.last_valid_sample = SourceGrowthSample(payload)
+        self.last_frame_seq = payload.get('frame_seq')
+        self.valid_sample_count += int(payload.get('valid',True))
+        self.invalid_sample_count += int(not payload.get('valid',True))
+        return {'accepted':True,'kind':'sample','controls_changed':False}
 
-    def _accept_sample(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        _positive_int(payload.get("frame_seq"), "frame_seq")
-        sample = GrowthRateSamplePayload.from_mapping(payload)
-        processed_time = _timestamp_value(sample.processed_at, "processed_at")
-        with self._lock:
-            if self.state != ControllerState.RUNNING:
-                raise ValueError("Controller is not running an experiment.")
-            if sample.run_id != self.current_run_id:
-                raise ValueError("growth_rate.sample run_id does not match current experiment.")
-            identity = {
-                "experiment_started_at": sample.experiment_started_at,
-                "control_revision": sample.control_revision,
-                "initialization_generation": sample.initialization_generation,
-                "alignment_revision": sample.alignment_revision,
-            }
-            missing = [name for name, value in identity.items() if value is None]
-            if missing:
-                raise ValueError(
-                    "growth_rate.sample is missing live identity field(s): "
-                    + ", ".join(missing)
-                )
-            if sample.experiment_started_at != self.started_at:
-                raise ValueError(
-                    "growth_rate.sample experiment_started_at does not match current experiment."
-                )
-            if (sample.parameter_revision or 0) != self.measurement_parameter_revision:
-                raise ValueError("growth_rate.sample measurement parameter revision is stale or unexpected.")
-            if self.measurement_parameter_revision > 0 and not math.isclose(
-                    float(sample.dt_s), float(self._active_parameter("dt_G", 15.0)), rel_tol=0, abs_tol=1e-9):
-                raise ValueError("growth_rate.sample sampling interval disagrees with its parameter revision.")
-            if not self.gsensor_desired_enabled or not self.gsensor_enabled:
-                raise ValueError("growth_rate.sample arrived while GSensor is disabled or unacknowledged.")
-            if sample.control_revision != self.gsensor_control_revision:
-                raise ValueError("growth_rate.sample control revision is stale.")
-            if sample.initialization_generation != self.gsensor_initialization_generation:
-                raise ValueError("growth_rate.sample initialization generation is stale.")
-            if sample.alignment_revision != self.gsensor_alignment_revision:
-                raise ValueError("growth_rate.sample alignment revision is stale.")
-            diagnostic_at_transition = (
-                not sample.valid
-                and not self.gsensor_measurement_ready
-                and sample.frame_seq == self.gsensor_sample_floor_frame_seq
-            )
-            if not self.gsensor_measurement_ready and not diagnostic_at_transition:
-                raise ValueError("growth_rate.sample arrived before measurement became ready.")
-            if (
-                sample.frame_seq < self.gsensor_sample_floor_frame_seq
-                or (
-                    sample.frame_seq == self.gsensor_sample_floor_frame_seq
-                    and not diagnostic_at_transition
-                )
-            ):
-                raise ValueError("growth_rate.sample frame is behind the active transition floor.")
-            if (
-                not diagnostic_at_transition
-                and self.gsensor_transition_occurred_at is not None
-                and processed_time <= _timestamp_value(
-                    self.gsensor_transition_occurred_at,
-                    "saved GSensor transition occurred_at",
-                )
-            ):
-                raise ValueError("growth_rate.sample predates the active transition barrier.")
-            arrival_age = max(0.0, self._wall_clock() - processed_time)
-            if self.last_frame_seq is not None and sample.frame_seq <= self.last_frame_seq:
-                self.duplicate_sample_count += 1
-                return {
-                    "accepted": False,
-                    "duplicate": True,
-                    "kind": "sample",
-                    "frame_seq": sample.frame_seq,
-                }
-            # Notice a preceding gap, but permit a fresh identity-matched
-            # frame to reopen this same run's control gate.
-            self._check_growth_timeout_locked()
-            if self.last_frame_seq is not None and sample.frame_seq > self.last_frame_seq + 1:
-                self.missing_frame_count += sample.frame_seq - self.last_frame_seq - 1
-
-            self.last_frame_seq = sample.frame_seq
-            self.last_sample = sample.to_dict()
-            if not sample.valid:
-                self.invalid_sample_count += 1
-                self.last_valid_sample = None
-                self.last_valid_sample_received_monotonic = None
-                self.last_valid_sample_arrival_age_s = None
-                self.last_growth_sample_age_s = None
-                if self.gsensor_measurement_ready:
-                    self.gsensor_gate_reason = "waiting_for_fresh_valid_sample"
-                return {
-                    "accepted": True,
-                    "kind": "sample",
-                    "valid": False,
-                    "frame_seq": sample.frame_seq,
-                    "adapter_called": False,
-                }
-            self.last_valid_sample = sample
-            self.last_valid_sample_received_monotonic = self._monotonic_clock()
-            self.last_valid_sample_arrival_age_s = arrival_age
-            self.growth_stream_last_valid_at = sample.processed_at
-            self._growth_stream_last_valid_monotonic = self.last_valid_sample_received_monotonic
-            self._growth_stream_arrival_age_s = arrival_age
-            self.gsensor_gate_reason = "ready"
-            self.growth_wait = None
-            self.valid_sample_count += 1
-            self._control_wakeup.set()
-
-        result = {
-            "accepted": True,
-            "kind": "sample",
-            "valid": True,
-            "frame_seq": sample.frame_seq,
-            "adapter_called": False,
-            "cached": True,
-        }
-        return result
 
     def _uses_live_growth_locked(self) -> bool:
         source = self.parameters.get(
@@ -2191,541 +903,182 @@ class ControllerService(OnlineParametersMixin):
             return True
         return str(source).strip().lower() not in {"simulation", "simulated"}
 
-    def _growth_input_availability_locked(
-        self,
-        *,
-        now: float | None = None,
-    ) -> tuple[bool, str, float | None]:
-        if self.state != ControllerState.RUNNING:
-            return False, "not_running", None
+    def _growth_input_availability_locked(self, *, now=None):
+        # Observation only: producer health/ages cannot install a control gate.
         if not self._uses_live_growth_locked():
-            return True, "simulated_source", None
+            return True, 'simulated_source', None
         if not self.gsensor_desired_enabled:
-            return False, "disabled", None
-        if not self.gsensor_enabled:
-            return False, self.gsensor_gate_reason or "awaiting_gsensor_status", None
-        if not self.gsensor_measurement_ready:
-            return False, self.gsensor_gate_reason or "measurement_not_ready", None
-        if self.last_valid_sample is None:
-            return False, "waiting_for_fresh_valid_sample", None
-        if (self.last_valid_sample_received_monotonic is None
-                or self.last_valid_sample_arrival_age_s is None):
-            return True, "ready", None
-        now_value = self._monotonic_clock() if now is None else float(now)
-        age = self.last_valid_sample_arrival_age_s + max(
-            0.0,
-            now_value - self.last_valid_sample_received_monotonic,
-        )
-        return True, "ready", age
+            return False, 'disabled', None
+        return self.last_sample is not None, 'delivered_message' if self.last_sample is not None else 'no_message', None
 
-    def _audit_process_wait_locked(self, stage: str, metadata: Mapping[str, Any]) -> None:
-        if self.measurement_writer is None:
-            return
-        try:
-            write_process_event(self.measurement_writer, {
-                "command_id": f"process-input:{self.current_run_id}:{self.process_wait_count}:{stage}",
-                "run_id": self.current_run_id, "run_started_at": self.started_at,
-                "tick_seq": self.control_tick_count, "status": stage,
-                "process_wait": copy.deepcopy(dict(metadata)),
-            }, "controller", stage)
-        except Exception as exc:
-            self.influx_write_failure_count += 1
-            self.last_influx_error = f"Process waiting audit failed: {type(exc).__name__}"
-            logger.exception("Could not persist process waiting audit event.")
 
-    def _read_growth_sample_locked(self) -> GrowthRateSamplePayload:
-        """Read the G mailbox at MATLAB's post-control, pre-fitting boundary.
-
-        A successfully delivered unchanged value remains readable. Absence of
-        a mailbox value is an application read exception, not proof that a
-        synchronous OPC UA read timed out. Identity/version checks remain at
-        message admission; no age threshold is applied here.
-        """
+    def _read_growth_sample_locked(self):
         if self.last_sample is None:
-            raise ControllerReadError("No G value has been received for this experiment.", stage="growth_read")
-        return GrowthRateSamplePayload.from_mapping(self.last_sample)
+            raise ControllerReadError('No G message was delivered; this is not an observed OPC UA timeout.',stage='growth_read')
+        return copy.deepcopy(self.last_sample)
 
-    def _record_read_exception_locked(
-        self, tick: ControllerTickInput, error: Exception, *, now: float,
-        stage: str = "process_read", numerical_prefix_recorded: bool = False,
-    ) -> dict[str, Any]:
-        """MATLAB GUI catch: warn, retain completed work, continue next loop."""
-        if not numerical_prefix_recorded:
-            try:
-                self.adapter.record_read_failure(tick, error)
-            except Exception as record_error:
-                self._record_failed_tick_locked(tick, str(record_error))
-                raise RuntimeError(str(record_error)) from record_error
-        self.control_tick_error_count += 1
-        if stage == "process_read":
-            self.process_error_count += 1
-            self.last_process_error = str(error)
-        self.last_error = None
-        self.last_read_warning = {
-            "tick_seq": tick.tick_seq, "elapsed_s": tick.elapsed_s,
-            "stage": stage, "message": str(error), "occurred_at": utc_ts(),
-        }
-        self._last_committed_diagnostics = None
-        self._last_diagnostics_capture_error = "read_exception"
-        logger.warning("Controller %s at cycle %s: %s", stage, tick.tick_seq, error)
-        # interval_sleep sleeps only the unspent part of dt. A long read does
-        # not add another whole delay, and there is no escalating backoff.
-        self._next_tick_monotonic = now + float(self._active_parameter("dt", 5.0))
-        if not self._try_persist_state_locked():
-            self.state = ControllerState.ERROR
-            self._next_tick_monotonic = None
-            raise RuntimeError("Could not persist Controller read-exception state.")
-        return {"executed": False,
-                "reason": ("growth_measurement_error" if stage == "growth_filter" else
-                           "read_exception" if stage in {"process_read", "growth_read"} else "input_value_error"),
-                "stage": stage,
-                "tick_seq": tick.tick_seq, "elapsed_s": tick.elapsed_s,
-                "output_generated": False, "process_write_attempted": False}
 
-    def _wait_for_process_locked(
-        self, pending: ProcessMeasurementPending, *, now: float,
-        executed: bool = False,
-    ) -> dict[str, Any]:
-        """Recoverable input loss pauses control, never the experiment identity."""
-        entering = self.process_wait is None or self.process_wait.get("reason") != pending.reason
-        self.process_wait_count += 1
-        metadata = pending.to_dict()
-        if self.process_wait is not None:
-            metadata["waiting_since"] = self.process_wait["waiting_since"]
-        self.process_wait = metadata
-        self.last_process_error = None
-        self.last_process_state = None
-        self.last_error = None
-        if entering:
-            self._audit_process_wait_locked("measurement_wait", metadata)
-        # Waiting polls do not consume algorithm tick IDs, logical elapsed
-        # time, parameter transactions, or controller_measurement rows.
-        self._next_tick_monotonic = now + min(float(self._active_parameter("dt", 5.0)), 1.0)
-        if not self._try_persist_state_locked():
-            self.state = ControllerState.ERROR
-            self._next_tick_monotonic = None
-            self.last_error = "Could not persist Controller process waiting state."
-            raise RuntimeError(self.last_error)
-        return {"executed": executed, "reason": "waiting_process_data",
-                "waiting_for_data": True, "wait_reason": pending.reason,
-                "tick_seq": self.control_tick_count, "output_generated": executed,
-                "process_write_attempted": False}
+    def confirm_process_recovery(self, payload):
+        return {'accepted':False,'reason':'Controller has no cross-cycle write-confirmation state.'}
 
-    def _rollback_uncommitted_write_patch_locked(self, tick: ControllerTickInput) -> None:
-        """Keep an uncommitted edit Pending without replaying a completed tick."""
-        if tick.runtime_update is None:
-            return
-        event_id = tick.runtime_update["event_id"]
-        if (self.runtime_pending is None
-                and (self.run_parameter_pending is None
-                     or self.run_parameter_pending.get("controller_applied"))):
-            return
-        if not self.adapter.rollback_runtime_refresh(event_id):
-            raise RuntimeError("Could not roll back the staged edit after write timeout.")
-        if dict(self.adapter.runtime_configuration() or {}) != self.runtime_configuration_current:
-            raise RuntimeError("Staged edit rollback did not restore the active configuration.")
-        refresh = self.adapter.refresh_status() or {}
-        if (refresh.get("count", 0) != self.runtime_refresh["count"]
-                or refresh.get("segment_id", 0) != self.runtime_refresh["segment_id"]):
-            raise RuntimeError("Staged edit rollback did not restore refresh counters.")
 
-    def _wait_for_write_locked(self, snapshot: Mapping[str, Any], *, now: float,
-                               executed: bool = False) -> dict[str, Any]:
-        previous = self.process_write_wait or {}
-        self.process_write_wait = {**previous, **copy.deepcopy(dict(snapshot))}
-        if self.process_wait is None:
-            self.process_wait = {
-                "reason": "process_write_unconfirmed",
-                "waiting_since": _utc_timestamp(self._wall_clock()),
-            }
-            self._audit_process_wait_locked("write_wait", self.process_wait)
-        self.process_wait_count += 1
-        self.last_error = None
-        self.last_process_error = None
-        self._next_tick_monotonic = now + min(float(self._active_parameter("dt", 5.0)), 1.0)
-        if not self._try_persist_state_locked():
-            self.state = ControllerState.ERROR
-            self._next_tick_monotonic = None
-            self.last_error = "Could not persist Controller write waiting state."
-            raise RuntimeError(self.last_error)
-        return {"executed": executed, "reason": "waiting_process_write",
-                "waiting_for_data": True, "tick_seq": self.control_tick_count,
-                "process_write_attempted": bool(executed and snapshot.get("command_sent", snapshot.get("sent", False))),
-                "process_write_succeeded": None}
-
-    def confirm_process_recovery(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Operator attestation only; the Writer must confirm before resuming."""
+    def _control_tick_once(self, *, now=None):
         with self._lock:
-            if (self.state != ControllerState.RUNNING or payload.get("run_id") != self.current_run_id
-                    or payload.get("confirmation") is not True):
-                raise ValueError("Confirm the current running experiment and device state first.")
-            waiting = self.process_write_wait or {}
-            command = waiting.get("command") or {}
-            if (not waiting.get("pending", True) or not waiting.get("manual_confirmation_required")
-                    or payload.get("command_id") != command.get("command_id")):
-                raise ValueError("This experiment has no matching write awaiting manual confirmation.")
-            snapshot = self.process_adapter.confirm_write_recovery()
-            self.process_write_wait = {**waiting, **copy.deepcopy(dict(snapshot))}
-            if not self._try_persist_state_locked():
-                self.state = ControllerState.ERROR
-                self._next_tick_monotonic = None
-                raise RuntimeError("Could not persist the device-state confirmation request.")
-            self._control_wakeup.set()
-            return {"accepted": True, "pending": True, "run_id": self.current_run_id,
-                    "command_id": command["command_id"]}
-
-    def _control_tick_once(self, *, now: float | None = None) -> dict[str, Any]:
-        """Execute one scheduler tick; exposed for deterministic integration tests."""
-
-        with self._lock:
-            if self.state != ControllerState.RUNNING:
-                return {"executed": False, "reason": "not_running"}
-            now_value = self._monotonic_clock() if now is None else float(now)
-            if self.adapter.initialization_pending():
-                try:
-                    self.adapter.retry_initialization()
-                except ControllerInputValueError as exc:
-                    self.last_read_warning = {"tick_seq": self.control_tick_count,
-                        "elapsed_s": self._run_elapsed_s, "stage": exc.stage,
-                        "message": str(exc), "occurred_at": utc_ts()}
-                    logger.warning("Controller %s: %s", exc.stage, exc)
-                    self._next_tick_monotonic = now_value + float(self._active_parameter("dt", 5.0))
-                    if not self._try_persist_state_locked():
-                        self.state = ControllerState.ERROR
-                        self._next_tick_monotonic = None
-                        raise RuntimeError("Could not persist Controller initialization exception.")
-                    return {"executed": False, "reason": "initialization_exception",
-                            "stage": exc.stage, "tick_seq": self.control_tick_count,
-                            "process_write_attempted": False}
-                except Exception as exc:
-                    self.state = ControllerState.ERROR
-                    self._next_tick_monotonic = None
-                    self.last_error = f"Controller initialization failed: {exc}"
-                    self._try_persist_state_locked()
-                    raise RuntimeError(self.last_error) from exc
-            if self.process_write_wait is not None:
-                try:
-                    snapshot = self.process_adapter.write_recovery_status()
-                    if not isinstance(snapshot, Mapping):
-                        raise TypeError("Write recovery status must be an object.")
-                    self.process_write_wait.update(copy.deepcopy(dict(snapshot)))
-                    if snapshot.get("pending", True):
-                        return self._wait_for_write_locked(snapshot, now=now_value)
-                    if not self.process_write_wait.get("reconciled"):
-                        self.process_write_wait["reconciled"] = True
-                        self._audit_process_wait_locked("write_reconciled", self.process_wait or {})
-                except Exception as exc:
-                    self.state = ControllerState.ERROR
-                    self._next_tick_monotonic = None
-                    self.last_error = f"Controller write reconciliation failed: {exc}"
-                    self._try_persist_state_locked()
-                    raise RuntimeError(self.last_error) from exc
-            self._last_committed_diagnostics = None
-            self._last_diagnostics_capture_error = None
-            dt = float(self._active_parameter("dt", 5.0))
-            if not math.isfinite(dt) or dt <= 0:
-                self._reject_pending_runtime_locked("Controller parameter dt is invalid.")
-                self.state = ControllerState.ERROR
-                self._next_tick_monotonic = None
-                self._try_persist_state_locked()
-                raise RuntimeError("Controller parameter dt must be finite and positive.")
-            tick_seq = self.control_tick_count + 1
-            run_type = self.parameters.get("run_type", self.parameters.get("exp_sim"))
-            elapsed = (now_value - self._run_started_monotonic
-                       if run_type == "experiment" and self._run_started_monotonic is not None
-                       else self._run_elapsed_s + dt)
-            # MATLAB increments ii and records time before reading the process.
-            self.control_tick_count = tick_seq
-            self._run_elapsed_s = elapsed
-            sample = (GrowthRateSamplePayload.from_mapping(self.last_sample)
-                      if self.last_sample is not None and (
-                          not self._uses_live_growth_locked() or self.gsensor_desired_enabled
-                      ) else None)
-            growth_available, growth_reason, age = self._growth_input_availability_locked(
-                now=now_value
-            )
-            observed_growth_age = age
-            self.last_growth_sample_age_s = observed_growth_age
-
-            # Prepare an attempt before I/O, including failed reads, just as
-            # the GUI records its cycle and time before measurement.
-            tick = ControllerTickInput(
-                tick_seq=tick_seq,
-                controller_dt_s=dt,
-                elapsed_s=elapsed,
-                growth_sample=sample,
-                growth_sample_age_s=age if sample is not None else None,
-                growth_reader=(self._read_growth_sample_locked
-                               if self._uses_live_growth_locked() and self.gsensor_desired_enabled else None),
-                runtime_update=(
-                    {"event_id": self.runtime_pending["command"]["event_id"],
-                     "changes": copy.deepcopy(self.runtime_pending["command"]["changes"])}
-                    if self.runtime_pending is not None else self._parameter_tick_patch()
-                ),
-                control_hold_reason=("parameter_confirmation" if self._parameter_confirmation_holds_control() else None),
-            )
-            process_state: ProcessState | None = None
-            # Baseline recovery belongs only to the separate Writer outcome
-            # protocol, never to measurement read or numeric-input exceptions.
-            recovering_process = self.process_write_wait is not None
-            recovering_input = recovering_process
-            if self.settings.process_enabled:
-                if self.activation_client_unassigned:
-                    # Failed create_nodes never assigned uaClient in a fresh
-                    # GUI workspace. Later loops fail at uaClient.Status;
-                    # they do not call create_nodes/connect again.
-                    return self._record_read_exception_locked(tick, ControllerReadError(
-                        "The initial process client was not assigned; uaClient.Status is undefined."
-                    ), now=now_value)
-                try:
-                    candidate = self.process_adapter.read_state()
-                    if not isinstance(candidate, ProcessState):
-                        raise TypeError("Fresh process measurement must be a ProcessState.")
-                    candidate.__post_init__()
-                    current_process_state = candidate.to_dict()
-                except (ControllerReadError, TimeoutError, ConnectionError) as exc:
-                    return self._record_read_exception_locked(tick, exc, now=now_value)
-                except ProcessMeasurementPending as exc:
-                    # Legacy adapters may still expose a waiting exception.
-                    # It is not a numeric-value policy or permission to freeze
-                    # the cycle, create a recovery baseline, or invent data.
-                    return self._record_read_exception_locked(tick, exc, now=now_value)
-                except Exception as exc:
-                    self.control_tick_count = tick_seq
-                    self._run_elapsed_s = elapsed
-                    self.process_error_count += 1
-                    self.control_tick_error_count += 1
-                    self.last_process_error = str(exc)
-                    error = f"Controller process read failed: {exc}"
-                    self._record_failed_tick_locked(tick, error)
-                    raise RuntimeError(error) from exc
-                process_state = candidate
-                self.last_process_state = current_process_state
-                self.last_process_error = None
-                tick = replace(tick, process_state=process_state)
-            self.control_tick_count = tick_seq
-            self._run_elapsed_s = elapsed
-            if recovering_input:
-                # A baseline-only recovery is not a parameter application
-                # boundary. Keep prepared edits for the next measured tick.
-                tick = replace(tick, runtime_update=None)
-            else:
-                tick = self._revalidate_prepared_parameters(tick, process_state)
+            if not self._parameters_received:
+                return {'executed':False,'reason':'initial_parameter_phase'}
+            now = self._monotonic_clock() if now is None else now
+            self._last_iteration_start = now
+            stage, tick = 'receive_modified', None
+            kernel = getattr(self.adapter,'controller',None)
             try:
-                if self.process_activation_pending:
-                    self.adapter.start()
-                    self.adapter.initialize_process_state(process_state)
-                    self.process_activation_pending = False
-                elif recovering_input and process_state is not None:
-                    self.adapter.resume_process_state(process_state)
-                if recovering_input:
-                    # Establish a fresh post-gap measurement baseline, with
-                    # no actuator command even when writes are enabled.
-                    tick = replace(tick, control_hold_reason=(
-                        "process_data_recovery" if recovering_process else "growth_data_recovery"))
-                fit_snapshot_before, _ = self._adaptation_snapshot_locked()
-                fits_before = (fit_snapshot_before or {}).get("fit_count")
-                output = self.adapter.step(tick)
-                fit_snapshot_after, _ = self._adaptation_snapshot_locked()
-                fits_after = (fit_snapshot_after or {}).get("fit_count")
-                if (isinstance(fits_before, int) and not isinstance(fits_before, bool)
-                        and isinstance(fits_after, int) and not isinstance(fits_after, bool)
-                        and fits_after > fits_before):
-                    self.last_fit_success_at = utc_ts()
-                if output is not None and not isinstance(output, ControllerStepResult):
-                    raise TypeError(
-                        "Controller adapter step() must return ControllerStepResult or None."
-                    )
-                if recovering_input and (output is None or not output.valid):
-                    raise RuntimeError("Recovery baseline did not produce a valid measured result.")
-                if recovering_process:
-                    recovered_wait = self.process_wait
-                    self.process_wait = None
-                    self._audit_process_wait_locked("measurement_resumed", recovered_wait)
-                    if self.process_write_wait is not None:
-                        self.process_adapter.clear_write_recovery()
-                        self.process_write_wait = None
-            except (ControllerReadError, ControllerInputValueError) as exc:
-                partial = getattr(exc, "partial_result", None)
-                if tick.runtime_update is not None and partial is not None:
-                    try:
-                        self._complete_pending_runtime_locked(tick, partial)
-                    except Exception as commit_exc:
-                        self._record_failed_tick_locked(tick, str(commit_exc), process_state=process_state)
-                        raise RuntimeError(str(commit_exc)) from commit_exc
-                return self._record_read_exception_locked(
-                    tick, exc, now=now_value, stage=exc.stage,
-                    numerical_prefix_recorded=True,
-                )
-            except Exception as exc:
-                self.adapter_error_count += 1
-                self.control_tick_error_count += 1
-                error = f"Controller adapter step failed: {exc}"
-                self._record_failed_tick_locked(tick, error, process_state=process_state)
-                raise RuntimeError(error) from exc
-
-            output_status: dict[str, Any] | None = None
-            if output is not None:
-                process_write: ProcessWriteResult | None = None
-                # Equipment writes require an explicit real-experiment mode.
-                # Legacy snapshots use exp_sim; a missing/unknown mode must not
-                # acquire write permission from the environment switches alone.
-                run_type = self.parameters.get("run_type", self.parameters.get("exp_sim"))
-                process_write_requested = bool(
-                    run_type == "experiment"
-                    and self.settings.process_enabled
-                    and self.settings.process_write_enabled
-                    and not recovering_input
-                    and output.valid
-                    and output.T_j_set is not None
-                )
-                process_write_attempted = False
-                if process_write_requested:
-                    try:
-                        self.process_adapter.set_command_context(
-                            self.current_run_id, self.started_at, tick_seq
-                        )
-                        process_write_attempted = True
-                        process_write = self.process_adapter.write_jacket_setpoint(
-                            output.T_j_set
-                        )
-                    except ControllerReadError as exc:
-                        # The write was not sent; this is an input read failure,
-                        # not an unresolved device command.
-                        self._complete_pending_runtime_locked(tick, output)
-                        self._record_control_output_locked(
-                            tick, output, process_state=process_state,
-                            process_write_attempted=False,
-                        )
-                        return self._record_read_exception_locked(
-                            tick, exc, now=now_value, stage=exc.stage,
-                            numerical_prefix_recorded=True,
-                        )
-                    except ProcessWritePending as exc:
-                        # The numerical attempt is recorded once. Only an
-                        # uncommitted parameter transaction is rolled back;
-                        # it retains its event ID and Pending receipt.
-                        try:
-                            self._rollback_uncommitted_write_patch_locked(tick)
-                            snapshot = exc.to_dict()
-                            self.process_write_wait = copy.deepcopy(snapshot)
-                            self.process_write_wait["computed_tick"] = tick.tick_seq
-                            self.process_write_wait["computation_completed"] = True
-                            self.process_write_wait["runtime_patch_rolled_back"] = tick.runtime_update is not None
-                            self._record_control_output_locked(
-                                tick, output, process_state=process_state,
-                                process_write_attempted=bool(snapshot.get("command_sent", snapshot.get("sent", True))),
-                                process_write_error=str(exc),
-                            )
-                        except Exception as commit_exc:
-                            self._record_failed_tick_locked(tick, str(commit_exc), process_state=process_state)
-                            raise RuntimeError(str(commit_exc)) from commit_exc
-                        return self._wait_for_write_locked(self.process_write_wait, now=now_value, executed=True)
-                    except ProcessMeasurementPending as exc:
-                        # The adapter guarantees this type means no command
-                        # was published. Keep the completed numerical tick and
-                        # its parameter receipt; do not invent a device write.
-                        try:
-                            self._complete_pending_runtime_locked(tick, output)
-                            self._record_control_output_locked(
-                                tick, output, process_state=process_state,
-                                process_write_attempted=False,
-                            )
-                        except Exception as commit_exc:
-                            self.control_tick_error_count += 1
-                            error = f"Controller refresh failed: {commit_exc}"
-                            self._record_failed_tick_locked(tick, error, process_state=process_state)
-                            raise RuntimeError(error) from commit_exc
-                        return self._wait_for_process_locked(exc, now=now_value, executed=True)
-                    except Exception as exc:
-                        self.process_error_count += 1
-                        self.control_tick_error_count += 1
-                        self.last_process_error = str(exc)
-                        error = f"Controller process write failed: {exc}"
-                        self._record_failed_tick_locked(
-                            tick, error, process_state=process_state, process_write=process_write,
-                            process_write_attempted=process_write_attempted,
-                            process_write_error=str(exc) if process_write_attempted else None,
-                        )
-                        raise RuntimeError(error) from exc
+                self._receive_modified()
+                stage = 'activation'
+                from .algorithm._logical import source_if, source_not
+                changed = source_if(np.not_equal(self.controller_active, self.controller_active_old))
+                if changed:
+                    # check_component_active returns its old flag only after
+                    # evaluating the actual active flag successfully.
+                    activate = source_if(self.controller_active)
+                    self.controller_active_old = copy.deepcopy(self.controller_active)
+                    if activate:
+                        self._activate()
                     else:
-                        self.last_process_write = process_write.to_dict()
-                        self.last_process_error = None
+                        self.adapter.stop()
+                else:
+                    source_if(source_not(self.controller_active))
+                self._observe_controller_state()
+                stage = 'refresh'
+                before_refresh = getattr(kernel, 'refresh_count', 0)
+                self.adapter.prepare_iteration()
+                self._sync_workspace()
+                if getattr(kernel, 'refresh_count', 0) > before_refresh:
+                    event = self.runtime_events.get(self._refresh_receipt_event_id)
+                    if event is not None:
+                        event['result'].update(status='applied', phase='applied', refreshed=True,
+                            effective_tick=self.control_tick_count+1, refresh_count=self.runtime_refresh.get('count'))
+                        self.runtime_last_result = copy.deepcopy(event['result'])
+                        self._archive_runtime_event(event['command'], event['result'])
+                    self._refresh_receipt_event_id = None
+                if not source_if(self.controller_active == 1):
+                    return {'executed':False,'reason':'controller_inactive'}
+                dt = self._get_dt()
+                mode = self.parameters.get('run_type')
+                elapsed = (self._wall_clock()-self._activation_wall_time if mode=='experiment'
+                           and self._activation_wall_time is not None else self._run_elapsed_s+dt)
+                stage = 'process_read'
+                reader = None
+                state = None
+                if mode == 'experiment':
+                    reader = getattr(self.process_adapter,'read_process_field',None)
+                    if not callable(reader):
+                        # Keep allocation/time before the legacy aggregate call.
+                        def reader(name):
+                            nonlocal state
+                            if state is None: state = self.process_adapter.read_state()
+                            value = getattr(state,name)
+                            return value-self.parameters['C2K'] if name in ('T','T_j') else value
+                tick = ControllerTickInput(self.control_tick_count+1,dt,elapsed,
+                    process_reader=reader,
+                    growth_reader=self._read_growth_sample_locked if self._uses_live_growth_locked() else None)
+                output = self.adapter.step(tick)
+                self._sync_workspace()
+                if output is None:
+                    return {'executed':False,'reason':'no_source_output','tick_seq':self.control_tick_count}
+                stage = 'record'
                 try:
-                    if not recovering_input:
-                        self._complete_pending_runtime_locked(tick, output)
+                    result = self._record_control_output_locked(tick,output,process_state=state)
                 except Exception as exc:
-                    self.control_tick_error_count += 1
-                    error = f"Controller refresh failed: {exc}"
-                    self._record_failed_tick_locked(
-                        tick, error, process_state=process_state, process_write=process_write,
-                        process_write_attempted=process_write_attempted,
-                    )
-                    raise RuntimeError(error) from exc
-                output_status = self._record_control_output_locked(
-                    tick,
-                    output,
-                    process_state=process_state,
-                    process_write=process_write,
-                    process_write_attempted=process_write_attempted,
-                )
-            elif not recovering_input and (self.runtime_pending is not None or self._parameter_tick_patch() is not None):
-                self._reject_pending_runtime_locked("Controller refresh produced no output.")
-                self.state = ControllerState.ERROR
-                self._next_tick_monotonic = None
-                self._try_persist_state_locked()
-                raise RuntimeError("Controller refresh produced no output.")
-            if self.state == ControllerState.RUNNING:
-                previous_deadline = self._next_tick_monotonic or now_value
-                next_dt = float(self._active_parameter("dt", 5.0))
-                self._next_tick_monotonic = max(previous_deadline + next_dt, now_value + next_dt)
-            self._try_persist_state_locked()
-            result = {
-                "executed": True,
-                "tick_seq": tick_seq,
-                "growth_frame_seq": sample.frame_seq if sample is not None else None,
-                "growth_sample_age_s": observed_growth_age,
-                "growth_input_available": growth_available,
-                "growth_input_reason": growth_reason,
-                "output_generated": output is not None,
-            }
-            if output_status is not None:
-                result.update(output_status)
-            return result
-
-    def _record_failed_tick_locked(
-        self, tick: ControllerTickInput, error: str, *, process_state: ProcessState | None = None,
-        process_write: ProcessWriteResult | None = None, process_write_attempted: bool = False,
-        process_write_error: str | None = None,
-    ) -> None:
-        """Retain a failed cycle and its actual I/O, without filter-success proof."""
-        self.state = ControllerState.ERROR
-        self._next_tick_monotonic = None
-        self.last_error = error
-        try:
-            self._reject_pending_runtime_locked(error)
-        except Exception:
-            self._persistence_halted = True
-            logger.exception("Could not reject runtime change after failed Controller tick.")
-        try:
-            self.process_adapter.disconnect()
-        except Exception as exc:
-            self.process_error_count += 1
-            self.last_process_error = f"{self.last_process_error or error}; disconnect failed: {exc}"
-            logger.exception("Could not disconnect process after failed Controller tick.")
-        try:
-            self._record_control_output_locked(
-                tick, ControllerStepResult(valid=False, error=error), process_state=process_state,
-                process_write=process_write, process_write_attempted=process_write_attempted,
-                process_write_error=process_write_error,
-            )
-        finally:
-            try:
-                self._try_persist_state_locked()
+                    logger.warning('Controller observation unavailable: %s',exc)
+                    result = {'output_generated':True,'influxdb_written':False,'observation_error':str(exc)}
+                if mode == 'experiment':
+                    stage = 'process_write'
+                    try:
+                        self.process_adapter.set_command_context(self.current_run_id,self.started_at,tick.tick_seq)
+                        written = self.process_adapter.write_jacket_setpoint(output.T_j_set)
+                    except Exception as exc:
+                        result.update(self._observe_write_outcome(tick,outcome=getattr(exc,'write_outcome','unknown'),
+                            attempted=getattr(exc,'command_sent',True) is not False,error=str(exc)))
+                        self._warn(exc,stage,tick)
+                    else:
+                        result.update(self._observe_write_outcome(tick,outcome='success',attempted=True,result=written))
+                return {'executed':True,'tick_seq':self.control_tick_count,**result}
             except Exception as exc:
-                self.recovery_status = "persistence_error"
-                self.recovery_error = str(exc)
-                logger.exception("Could not persist failed Controller tick.")
+                self._sync_workspace()
+                if stage=='activation':
+                    self.adapter.record_activation_read_failure(exc)
+                self._observe_controller_state()
+                self._warn(exc,getattr(exc,'stage',stage),tick)
+                return {'executed':False,'reason':'source_exception','stage':getattr(exc,'stage',stage),
+                        'tick_seq':self.control_tick_count,'output_generated':False,'process_write_attempted':False}
+            finally:
+                self.process_wait = self.process_write_wait = None
+                self._next_tick_monotonic = now + self._interval()
+                self._try_persist_state_locked()
+
+
+    def _record_write_outcome_locked(
+        self, tick: ControllerTickInput, *, outcome: str, attempted: bool,
+        result: ProcessWriteResult | None = None, error: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the write after the numerical point, without changing that point."""
+        occurred_at = utc_ts()
+        if error is not None:
+            self.process_error_count += 1
+            self.last_process_error = error
+            self.last_write_warning = {
+                "run_id": self.current_run_id, "tick_seq": tick.tick_seq,
+                "elapsed_s": tick.elapsed_s, "stage": "process_write",
+                "message": error, "occurred_at": occurred_at, "outcome": outcome,
+            }
+            logger.warning("Controller device write at cycle %s: %s; next cycle continues.", tick.tick_seq, error)
+        else:
+            self.last_process_write = result.to_dict() if result is not None else None
+            self.last_process_error = None
+            self.last_write_warning = None
+        if self.last_control_output is not None:
+            self.last_control_output.update(
+                process_write_attempted=attempted, process_write_status=outcome,
+                process_write=result.to_dict() if result is not None else None,
+                process_write_error=error,
+            )
+        # A separate execution event preserves the pre-write calculation's
+        # timestamp, covariance snapshot and applied parameter revision.
+        if self.measurement_writer is not None:
+            command: dict[str, Any] = {}
+            try:
+                candidate = self.process_adapter.status().get("last_command")
+                if (isinstance(candidate, Mapping) and candidate.get("run_id") == self.current_run_id
+                        and candidate.get("tick_seq") == tick.tick_seq):
+                    command = dict(candidate)
+            except Exception:
+                pass
+            payload = {
+                **command, "command_id": command.get("command_id") or f"write-observation:{self.current_run_id}:{tick.tick_seq}",
+                "run_id": self.current_run_id, "run_started_at": self.started_at,
+                "tick_seq": tick.tick_seq, "status": outcome, "observed_at": occurred_at,
+                "write_attempted": attempted, "error": error,
+                "write_result": result.to_dict() if result is not None else None,
+            }
+            try:
+                write_process_event(self.measurement_writer, payload, "controller", "cycle_write_outcome")
+            except Exception as exc:
+                self.influx_write_failure_count += 1
+                self.last_influx_error = str(exc)
+                logger.warning("Could not archive device write outcome at cycle %s: %s", tick.tick_seq, exc)
+        return {
+            "process_write_attempted": attempted, "process_write_status": outcome,
+            "process_write_succeeded": True if outcome == "success" else None if outcome == "unknown" else False,
+        }
+
+
+    def _observe_write_outcome(self, tick, *, outcome, attempted, **kwargs):
+        try:
+            return self._record_write_outcome_locked(tick, outcome=outcome, attempted=attempted, **kwargs)
+        except Exception as exc:
+            logger.warning("Device outcome observation unavailable: %s", exc)
+            return {"process_write_attempted": attempted, "process_write_status": outcome,
+                    "process_write_succeeded": outcome == "success"}
+
 
     def _record_control_output_locked(
         self,
@@ -2746,8 +1099,8 @@ class ControllerService(OnlineParametersMixin):
         elif process_write_error is not None:
             diagnostic_error = "process_write_failed"
         else:
-            # _control_tick_once reaches this point only after its pending
-            # runtime refresh has been durably persisted and committed.
+            # Source calculations precede device writes. Diagnostics observe
+            # the completed calculation without imposing a commit condition.
             diagnostics, diagnostic_error = capture_controller_diagnostics(
                 self.adapter, run_id=str(self.current_run_id), tick=tick
             )
@@ -2889,6 +1242,9 @@ class ControllerService(OnlineParametersMixin):
                     and not self.settings.process_write_enabled
                 ),
                 "configured": bool(self.settings.rabbit_url and self.settings.rabbit_exchange),
+                "transport": "rabbitmq",
+                "write_enabled": self.parameters.get("run_type") == "experiment",
+                "shadow_mode": False,
                 "service_error_count": self.process_error_count,
                 "service_last_error": self.last_process_error,
                 "waiting_for_data": waiting,
@@ -3084,6 +1440,190 @@ class ControllerService(OnlineParametersMixin):
                 "last_control_output": copy.deepcopy(self.last_control_output),
                 "integrations": self._integration_status_locked(),
             }
+
+
+    def _sync_workspace(self):
+        kernel = getattr(self.adapter, "controller", None)
+        if kernel is not None:
+            self.parameters = copy.deepcopy(dict(kernel.params))
+        try:
+            config = self.adapter.runtime_configuration()
+        except Exception:
+            # A partial/empty map is still a successful map2base assignment.
+            # A missing variable must fail when the source actually uses it,
+            # not while formatting an optional status projection.
+            config = None
+        if isinstance(config, Mapping):
+            self.runtime_configuration_current = dict(config)
+            self.adaptation_enabled = config.get("adaptation_enabled", self.adaptation_enabled)
+            self.adaptation_mode = config.get("adaptation_mode", self.adaptation_mode)
+        try:
+            workspace = self._workspace()
+        except Exception as exc:
+            workspace = {}
+            logger.warning('Workspace observation unavailable: %s', exc)
+        if "controller_active" in workspace and not isinstance(workspace["controller_active"], dict):
+            self.controller_active = workspace["controller_active"]
+        if "G_active" in workspace and not isinstance(workspace["G_active"], dict):
+            self.gsensor_desired_enabled = workspace["G_active"]
+        # Web experiment identity annotates this workspace; it never selects
+        # an alternate control branch or restores an archived experiment.
+        raw = getattr(kernel, "_root_workspace", {}) if kernel is not None else {}
+        if "run_id" in raw:
+            self.current_run_id = raw["run_id"]
+            kernel.run_id = raw["run_id"]
+        if "experiment_started_at" in raw:
+            self.started_at = raw["experiment_started_at"]
+        try:
+            refresh = self.adapter.refresh_status()
+        except Exception as exc:
+            refresh = None
+            logger.warning('Refresh observation unavailable: %s', exc)
+        if isinstance(refresh, Mapping):
+            self.runtime_refresh = copy.deepcopy(dict(refresh))
+        if kernel is not None:
+            self.control_tick_count = kernel.frame_index
+            self._run_elapsed_s = kernel.elapsed_s
+
+
+    def _interval(self):
+        dt = self._get_dt()
+        mode = self.parameters.get("run_type", self.parameters.get("exp_sim"))
+        if mode == "simulation":
+            return dt / 10.0
+        if mode == "experiment":
+            return dt
+        raise UnboundLocalError("Unrecognized function or variable 'dt_sleep'.")
+
+
+    def _receive_modified(self):
+        if not self._modified_queue:
+            return
+        entry = self._modified_queue[0]
+        try:
+            self.adapter.apply_modified(entry['values'])
+        except Exception as exc:
+            # receive_modified catches map2base errors. Earlier assignments stay;
+            # the unacknowledged map remains available at the next source loop.
+            self._sync_workspace()
+            logger.warning('Receiving modified parameters failed: %s', exc)
+            return
+        self._modified_queue.pop(0)
+        self._sync_workspace()
+        explicit_refresh = _source_truth(entry['values'].get('controller_refresh_request', False))
+        if explicit_refresh:
+            self._refresh_receipt_event_id = entry['event_id']
+        event_id = entry['event_id']
+        if event_id is not None:
+            self.runtime_revision += 1
+            result = self.runtime_events[event_id]['result']
+            result.update(status='applied', phase='applied', controller_applied=True,
+                          revision=self.runtime_revision, effective_tick=self.control_tick_count + 1,
+                          elapsed_s=self._run_elapsed_s, applied_at=utc_ts(), refreshed=False,
+                          configuration=copy.deepcopy(self.runtime_configuration_current),
+                          parameter_values=self._actual_run_parameter_values())
+            if explicit_refresh:
+                result.update(status='pending', phase='requested', refreshed=False)
+            self.runtime_last_result = copy.deepcopy(result)
+            if entry['kind'] == 'parameters':
+                for section in ('shared','controller'):
+                    self.run_parameter_values[section].update(copy.deepcopy(entry['parameter_changes'].get(section,{})))
+                sensor = entry['parameter_changes'].get('gsensor', {})
+                if sensor:
+                    pending = {'command': entry['command'], 'changes': {'gsensor': copy.deepcopy(sensor)},
+                               'revision': self.runtime_revision, 'phase': 'prepare', 'controller_applied': True}
+                    self.run_parameter_pending = pending
+                    try:
+                        self._send_parameter_phase(pending, 'prepare')
+                    except Exception as exc:
+                        pending.update(phase='failed', transport_error=str(exc))
+                    if pending['phase'] == 'failed':
+                        result.update(status='rejected', phase='failed', reason=pending.get('transport_error'),
+                                      controller_applied=True, refreshed=False)
+                    else:
+                        result.update(status='pending', phase=pending['phase'], refreshed=False)
+                self.run_parameter_last_result = copy.deepcopy(result)
+            self._archive_runtime_event(entry['command'], result)
+        self.runtime_pending = copy.deepcopy(self._modified_queue[0]) if self._modified_queue else None
+
+
+    def submit_operator_map(self, values, *, event_id=None, command=None, parameter_changes=None, kind='runtime'):
+        if not isinstance(values, Mapping):
+            raise TypeError('Modified values must be a mapping.')
+        if event_id in self.runtime_events:
+            return {**copy.deepcopy(self.runtime_events[event_id]['result']), 'duplicate': True}
+        entry = {'values': copy.deepcopy(dict(values)), 'event_id': event_id,
+                 'command': copy.deepcopy(dict(command or {})),
+                 'parameter_changes': copy.deepcopy(dict(parameter_changes or {})), 'kind': kind}
+        self._modified_queue.append(entry)
+        result = {'accepted': True, 'status': 'pending', 'kind': kind, 'event_id': event_id,
+                  'run_id': self.current_run_id, 'revision': self.runtime_revision,
+                  'configuration': copy.deepcopy(self.runtime_configuration_current), 'refreshed': False}
+        if event_id is not None:
+            self.runtime_events[event_id] = {'command': entry['command'], 'result': copy.deepcopy(result)}
+        self.runtime_pending = copy.deepcopy(result)
+        return result
+
+
+    def _warn(self, error, stage, tick=None):
+        self.control_tick_error_count += 1
+        self.last_error = None
+        warning = {"run_id": self.current_run_id, "tick_seq": self.control_tick_count,
+                   "elapsed_s": self._run_elapsed_s, "stage": stage,
+                   "message": str(error), "occurred_at": utc_ts()}
+        if stage == "process_write": self.last_write_warning = warning
+        else: self.last_read_warning = warning
+        logger.warning("Controller %s: %s", stage, error)
+
+
+    def _get_dt(self):
+        from .process import is_matlab_empty
+        value = self.parameters["dt"]
+        if is_matlab_empty(value):
+            return np.asarray([])
+        return np.asarray(value) if isinstance(value, (list, tuple)) else value
+
+
+    def _workspace(self):
+        method = getattr(self.adapter, "workspace_snapshot", None)
+        return dict(method()) if callable(method) else {}
+
+
+    def request_refresh(self, event_id=None):
+        return self.submit_operator_map({'controller_refresh_request': True}, event_id=event_id)
+
+
+    def _activate(self):
+        self.adapter.start()
+        self._run_started_monotonic = self._monotonic_clock()
+        self._activation_wall_time = self._wall_clock()
+        self._run_elapsed_s = 0.0
+        self.control_tick_count = 0
+        if self.parameters.get('run_type') == 'experiment':
+            self.process_adapter.connect()
+            reader = getattr(self.process_adapter, 'read_initial_field', None)
+            if callable(reader):
+                for name in ('T','T_j','T_j_set','c','count_middle'):
+                    self.adapter.assign_initial_scalar(name, reader(name), raw_units=True)
+            else:
+                # Legacy third-party adapters expose only one snapshot. This is
+                # an interface limitation, never evidence of sequential OPC UA I/O.
+                state = self.process_adapter.read_state()
+                for name in ('T','T_j','T_j_set','c','count_middle'):
+                    self.adapter.assign_initial_scalar(name, getattr(state,name), raw_units=False)
+                self.last_process_state = state.to_dict()
+        self.adapter.complete_initialization()
+        self.adapter.request_refresh()
+
+
+    def _observe_controller_state(self):
+        # HTTP status has no counterpart in the source statement sequence.
+        # Converting an invalid source flag here must not rethrow from catch.
+        try:
+            self.state = (ControllerState.RUNNING if _source_truth(self.controller_active) else
+                          ControllerState.STOPPED if self.stopped_at is not None else ControllerState.CONFIGURED)
+        except (ValueError, TypeError):
+            pass
 
 
 def _configured_control_target(parameters: Mapping[str, Any]) -> str | None:

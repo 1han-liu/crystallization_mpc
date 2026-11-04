@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from crystallization_mpc.infra.numeric import decode_numeric, encode_nonfinite
-
 import math
 from dataclasses import dataclass
 from enum import Enum
@@ -268,16 +266,16 @@ class GrowthRateSamplePayload:
                 raise ValueError(f"{name} must be a nonnegative integer or null.")
 
         values = (self.G_u, self.G_u_KF, self.G_v, self.G_v_KF)
-        # These are the contents of a successfully delivered G map. Individual
-        # missing fields and IEEE values must reach the source calculation;
-        # the producer's validity label is metadata, not a numeric input gate.
-        for name, value in zip(("G_u", "G_u_KF", "G_v", "G_v_KF"), values):
-            if value is not None:
-                object.__setattr__(self, name, decode_numeric(value, name))
         if self.valid:
+            if any(value is None for value in values):
+                raise ValueError("A valid growth-rate sample requires all four G values.")
+            if not all(math.isfinite(float(value)) for value in values if value is not None):
+                raise ValueError("Growth-rate values must be finite.")
             if self.error is not None:
                 raise ValueError("A valid growth-rate sample cannot include an error.")
         else:
+            if any(value is not None for value in values):
+                raise ValueError("An invalid growth-rate sample must use null G values.")
             _required_text(self.error, "error")
 
     def to_dict(self) -> dict[str, Any]:
@@ -301,7 +299,7 @@ class GrowthRateSamplePayload:
             value = getattr(self, name)
             if value is not None:
                 payload[name] = value
-        return encode_nonfinite(payload)
+        return payload
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "GrowthRateSamplePayload":
@@ -551,7 +549,7 @@ def _optional_int(value: Any) -> int | None:
 def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
-    return decode_numeric(value)
+    return float(value)
 
 
 __all__ = [

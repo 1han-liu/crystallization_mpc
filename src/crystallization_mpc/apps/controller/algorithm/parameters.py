@@ -8,10 +8,6 @@ import math
 from typing import Any, Mapping
 
 
-MAX_SIMULATION_CRYSTALS = 1_000_000
-MAX_SIMULATION_JACKET_SUBSTEPS = 100_000
-
-
 BASELINE_DEFAULTS: dict[str, Any] = {
     "mode": "MPC",
     "run_type": "simulation",
@@ -100,6 +96,26 @@ ALIASES = {
 }
 
 
+SOURCE_MODEL_PARAMETERS = frozenset({"w_sigma", "w_G", "w_dT_dt", "rho_solute", "var_dT_dt", "var_dc_dt", "dT", "dc",
+    "R", "n", "E_A", "k_0", "n_proc", "E_A_proc", "k_0_proc", "tau_1", "tau_2", "T_R",
+    "K_P_dT_dt", "K_I_dT_dt", "K_P_T_sigma", "K_I_T_sigma", "K_P_T_G", "K_I_T_G",
+    "PI_mode", "K_u", "T_u", "K_P_target", "K_I_target", "K_P_T", "K_I_T"})
+
+
+def parameters_to_workspace(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Explicit default-template projection; never used by receive_modified.
+
+    Numerical unit fixtures may use build_parameters' canonical flat names;
+    the actual GUI protocol always supplies the separate params struct.
+    """
+    import copy
+    result = {key: copy.deepcopy(value) for key, value in parameters.items()
+              if key not in SOURCE_MODEL_PARAMETERS or key == "rho_solute"}
+    result["params"] = {key: copy.deepcopy(value) for key, value in parameters.items()
+                        if key in SOURCE_MODEL_PARAMETERS}
+    return result
+
+
 def _flatten_key(key: str) -> str:
     return key.removeprefix("params.")
 
@@ -123,28 +139,6 @@ def build_parameters(raw: Mapping[str, Any]) -> dict[str, Any]:
     result["run_type"] = str(result["run_type"])
     result["mode"] = str(result["mode"])
     result["target"] = str(result["target"])
-
-    if result["mode"] not in {"MPC", "PI"}:
-        raise ValueError("mode must be MPC or PI.")
-    if result["target"] not in {"sigma", "G"}:
-        raise ValueError("target must be sigma or G.")
-    if result["run_type"] not in {"experiment", "simulation"}:
-        raise ValueError("run_type must be experiment or simulation.")
-    if result["growth_rate_source"] not in {
-        "simulated",
-        "live_gsensor",
-        "presaved_images",
-    }:
-        raise ValueError("Unsupported growth_rate_source.")
-    if result["run_type"] == "experiment" and result["growth_rate_source"] != "live_gsensor":
-        raise ValueError("Experiment mode requires live_gsensor in v1.")
-
-    numeric_positive = ("dt", "dt_G", "R", "rho_solute", "m_solvent")
-    for key in numeric_positive:
-        value = float(result[key])
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{key} must be finite and positive.")
-        result[key] = value
 
     area_1 = 2.0 * float(result["m_solvent"]) / (
         float(result["rho_solvent"]) * float(result["r_reactor"])
@@ -186,13 +180,6 @@ def build_parameters(raw: Mapping[str, Any]) -> dict[str, Any]:
     ):
         result.setdefault(destination, result[f"{destination}_{suffix}"])
 
-    for key, value in list(result.items()):
-        if isinstance(value, bool) or isinstance(value, (str, list, tuple, dict)):
-            continue
-        if isinstance(value, (int, float)):
-            number = float(value)
-            if not math.isfinite(number):
-                raise ValueError(f"{key} must be finite.")
     return result
 
 
@@ -208,82 +195,23 @@ def calc_K_I_target(params: Mapping[str, Any]) -> float:
     return 0.0
 
 
-def _merge_runtime_parameters(current: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge canonical deltas while retaining fitted kinetics and startup aliases.
-
-    ``build_parameters`` intentionally accepts archived derived values at
-    startup.  Hot updates must invalidate only the derived values whose
-    dependencies changed, not rebuild everything from startup defaults.
-    """
+def merge_runtime_parameters(current: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
+    """Assign supplied members only, like map2base; derive on the GUI side."""
     result = dict(current)
     result.update(changes)
-    keys = set(changes)
-    if keys & {"m_solvent", "rho_solvent", "r_reactor"}:
-        result["area_1"] = 2 * float(result["m_solvent"]) / (float(result["rho_solvent"]) * float(result["r_reactor"]))
-    if "r_reactor" in keys:
-        result["area_2"] = math.pi * float(result["r_reactor"]) ** 2
-    if keys & {"m_solvent", "rho_solvent", "r_reactor", "c_p", "k"}:
-        result["tau_1"] = float(result["c_p"]) * float(result["m_solvent"]) / (float(result["k"]) * float(result["area_1"]))
-    if keys & {"m_solvent", "r_reactor", "c_p", "k_loss"}:
-        result["tau_2"] = float(result["c_p"]) * float(result["m_solvent"]) / (float(result["k_loss"]) * float(result["area_2"]))
-    if keys & {"K_u", "PI_mode"}:
-        result["K_P_target"] = calc_K_P_target(result)
-        result["K_I_target"] = calc_K_I_target(result)
-    if "R" in keys:
-        denominator = .035 ** 1.5 * math.exp(-120000 / float(result["R"]) / 306.15)
-        result["k_0_proc"] = 3e-8 / denominator
-    suffix = result["target"]
-    for alias in ("K_P_T", "K_I_T", "dT_dt_min", "dT_dt_max", "t_lag_threshold_perc"):
-        if f"{alias}_{suffix}" in keys:
-            result[alias] = result[f"{alias}_{suffix}"]
-    if f"{suffix}_set" in keys:
-        result["target_set"] = result[f"{suffix}_set"]
-    return build_parameters(result)
-
-
-def merge_runtime_parameters(current: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        result = _merge_runtime_parameters(current, changes)
-        validate_simulation_resources(result)
-        return result
-    except ArithmeticError as exc:
-        raise ValueError("Parameter changes produce undefined derived coefficients.") from exc
-
-
-def simulation_seed_count(params: Mapping[str, Any]) -> int:
-    mean, std = float(params["d_mean_seed"]), float(params["d_std_seed"])
-    volume = math.pi / 6 * (mean ** 3 + 3 * mean * std ** 2)
-    ratio = float(params["m_seed"]) / (float(params["rho_solute"]) * volume)
-    if not math.isfinite(ratio):
-        raise ValueError("Simulation seed population count must be finite.")
-    return max(1, int(round(ratio)))
-
-
-def validate_simulation_resources(params: Mapping[str, Any]) -> None:
-    """Reject (never clip) computationally infeasible internal simulation work."""
-    if params["run_type"] != "simulation":
-        return
-    if simulation_seed_count(params) > MAX_SIMULATION_CRYSTALS:
-        raise ValueError(f"Internal simulation supports at most {MAX_SIMULATION_CRYSTALS:,} crystals.")
-    substeps = float(params["dt"]) / float(params["dt_update"])
-    if not math.isfinite(substeps) or math.trunc(substeps) > MAX_SIMULATION_JACKET_SUBSTEPS:
-        raise ValueError(f"Internal simulation supports at most {MAX_SIMULATION_JACKET_SUBSTEPS:,} jacket substeps per cycle.")
+    return result
 
 
 def parameter_digest(params: Mapping[str, Any]) -> str:
-    payload = json.dumps(params, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    payload = json.dumps(params, sort_keys=True, separators=(",", ":"), allow_nan=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 __all__ = [
-    "BASELINE_DEFAULTS",
+    "BASELINE_DEFAULTS", "parameters_to_workspace", "SOURCE_MODEL_PARAMETERS",
     "build_parameters",
     "calc_K_I_target",
     "calc_K_P_target",
     "parameter_digest",
     "merge_runtime_parameters",
-    "simulation_seed_count",
-    "validate_simulation_resources",
-    "MAX_SIMULATION_CRYSTALS",
-    "MAX_SIMULATION_JACKET_SUBSTEPS",
 ]

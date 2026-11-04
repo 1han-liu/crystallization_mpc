@@ -6,22 +6,23 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from ._fminsearch import fminsearch_scalar
 from .thermodynamics import calc_G
 
 
 def calc_volume(size: Any) -> np.ndarray | float:
-    value = np.pi * np.asarray(size, dtype=float) ** 3 / 6.0
-    return float(value) if value.ndim == 0 else value
+    value = np.pi * np.asarray(size) ** 3 / 6.0
+    return value.item() if value.ndim == 0 else value
 
 
 def calc_surface_area(size: Any) -> np.ndarray | float:
-    value = np.pi * np.asarray(size, dtype=float) ** 2
-    return float(value) if value.ndim == 0 else value
+    value = np.pi * np.asarray(size) ** 2
+    return value.item() if value.ndim == 0 else value
 
 
 def calc_size_from_volume(volume: Any) -> np.ndarray | float:
-    value = np.cbrt(6.0 * np.asarray(volume, dtype=float) / np.pi)
-    return float(value) if value.ndim == 0 else value
+    value = np.emath.power(6.0 * np.asarray(volume) / np.pi, 1.0 / 3.0)
+    return value.item() if value.ndim == 0 else value
 
 
 def calc_next_crystallization_mass_balance(
@@ -32,21 +33,15 @@ def calc_next_crystallization_mass_balance(
     T: float,
     dt: float,
 ) -> tuple[float, np.ndarray]:
-    if m_solvent <= 0:
-        raise ValueError("m_solvent must be positive.")
-    sizes = np.asarray(size_list, dtype=float).reshape(-1)
-    if not np.isfinite(sizes).all() or np.any(sizes < 0):
-        raise ValueError("size_list must contain finite, nonnegative sizes.")
-    concentration = float(m_solute) / float(m_solvent)
+    sizes = np.asarray(size_list).reshape(-1)
+    concentration = np.divide(m_solute, m_solvent)
     growth = float(calc_G(params, concentration, float(T), is_model=True))
-    surface_area = np.asarray(calc_surface_area(sizes), dtype=float)
-    volume = np.asarray(calc_volume(sizes), dtype=float)
+    surface_area = np.asarray(calc_surface_area(sizes))
+    volume = np.asarray(calc_volume(sizes))
     delta_volume = surface_area * growth * float(dt)
-    m_solute_next = float(m_solute) - float(
-        np.sum(delta_volume * float(params["rho_solute"]))
-    )
-    concentration_next = float(np.real(m_solute_next / float(m_solvent)))
-    sizes_next = np.asarray(calc_size_from_volume(volume + delta_volume), dtype=float)
+    m_solute_next = m_solute - np.sum(delta_volume * float(params["rho_solute"]))
+    concentration_next = float(np.real(np.divide(m_solute_next, m_solvent)))
+    sizes_next = np.asarray(calc_size_from_volume(volume + delta_volume))
     return concentration_next, sizes_next
 
 
@@ -56,22 +51,23 @@ def create_size_list(
     mean_m: float,
     std_m: float,
     *,
-    rng: np.random.Generator,
+    rng,
 ) -> np.ndarray:
-    """Generate a deterministic Python simulation population with MATLAB mass semantics.
+    """Search population count with a fresh random population on every call.
 
-    MATLAB's `fminsearch` repeatedly draws random arrays during its objective,
-    so its seed population is materialized as fixture data for parity tests.
-    Production simulation uses the same normal size model and chooses the
-    population count from expected spherical mass.
+    The objective is intentionally stochastic, including draws for rejected
+    simplex candidates.  A final independent draw creates the returned seeds.
     """
+    def population(number):
+        count = int(np.trunc(number))
+        return float(mean_m) + float(std_m) * rng.standard_normal(count)
 
-    expected_volume = np.pi / 6.0 * (
-        mean_m**3 + 3.0 * mean_m * std_m**2
-    )
-    count = max(1, int(round(float(mass_kg) / (float(params["rho_solute"]) * expected_volume))))
-    sizes = rng.normal(float(mean_m), float(std_m), count)
-    return np.maximum(sizes, np.finfo(float).eps)
+    def objective(number):
+        sizes = population(number)
+        return (np.sum(np.asarray(calc_volume(sizes)) * float(params["rho_solute"])) - float(mass_kg)) ** 2
+
+    number = int(np.trunc(fminsearch_scalar(objective, 10000.0)))
+    return population(number)
 
 
 __all__ = [
