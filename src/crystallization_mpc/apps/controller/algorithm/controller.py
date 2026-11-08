@@ -15,10 +15,6 @@ from crystallization_mpc.apps.controller.process import (ControllerReadError, Pr
 from crystallization_mpc.apps.controller.tick import ControllerGrowthMeasurementError, ControllerInputValueError, ControllerTickInput
 from ._logical import source_if, source_not
 from crystallization_mpc.apps.controller.numeric import decode_nonfinite
-from crystallization_mpc.apps.controller._recovery import (
-    NumericalRecoveryError, finite_scalar, require_finite, validate_filter,
-    validate_measurement, validate_model_state,
-)
 from crystallization_mpc.messaging.parameter_policy import (
     parameter_defaults, derived_parameter_policies,
 )
@@ -150,13 +146,12 @@ class CrystallizationController:
         self._diagnostic_tick_data: dict[str, Any] | None = None
         self._diagnostic_snapshot: ControllerDiagnosticsSnapshot | None = None
         self._diagnostic_capture_failed = False
+        # Retain past rebuild events for archive compatibility only. Numerical
+        # exceptions no longer schedule filter reconstruction or data segments.
         self.recovery_events: list[dict[str, Any]] = []
-        self._main_recovery_pending: dict[str, Any] | None = None
-        self._g_recovery_pending: dict[str, Any] | None = None
         self._main_rebuild_count = self._g_rebuild_count = 0
-        self._fit_start_tick = self._g_derivative_start_tick = 1
         self._initial_read_observations: list[dict[str, Any]] = []
-        self._last_valid_command: float | None = None
+        self._last_valid_command: Any = None
 
     def _diagnostic_filters(self) -> dict[str, ExtendedKalmanFilter | None]:
         return {
@@ -221,7 +216,7 @@ class CrystallizationController:
 
     def _finish_diagnostics(
         self, *, T: float, c: float, T_j: float, G_measure: float | None,
-        refreshed: bool, growth_updated: bool, growth_reanchored: bool,
+        refreshed: bool, growth_updated: bool,
         projected: np.ndarray, dT_dt_request: float | None, T_j_set: float,
     ) -> None:
         try:
@@ -262,7 +257,6 @@ class CrystallizationController:
             lifecycle = {
                 "main": "refresh_init" if refreshed else "updated",
                 "G": ("refresh_init" if refreshed else
-                      "reanchored_updated" if growth_updated and growth_reanchored else
                       "updated" if growth_updated else "paused"),
                 **{name: "refresh_reserved" if refreshed else "reserved" for name in ("E_A", "k_0", "n")},
             }
@@ -398,9 +392,7 @@ class CrystallizationController:
         self._diagnostic_tick_data = None
         self._seed_generation_completed = False
         self.recovery_events = []
-        self._main_recovery_pending = self._g_recovery_pending = None
         self._main_rebuild_count = self._g_rebuild_count = 0
-        self._fit_start_tick = self._g_derivative_start_tick = 1
         self._initial_read_observations = []
         self._last_valid_command = None
         self.running = True
@@ -422,19 +414,15 @@ class CrystallizationController:
             value = MATLAB_EMPTY
         elif raw_units and name in {"T", "T_j", "T_j_set"}:
             value = value + self.params["C2K"]
-        validate_measurement(name, value, stage="initialization")
         self._root_workspace[name] = copy.deepcopy(value)
         if name == "T_j":
             self.control_T_j_reference_K = value
         if name == "T_j_set":
-            self._last_valid_command = float(value)
+            self._last_valid_command = copy.deepcopy(value)
         self._sync_parameter_view()
 
     def complete_initialization(self) -> None:
-        validate_model_state([self._root_workspace["T"], 0., self._root_workspace["c"], 0.],
-                             stage="initialization")
-        if not self._seed_generation_completed:
-            self._initialize_seed_population()
+        self._initialize_seed_population()
         self._activation_read_failure = None
 
     def _initialize_seed_population(self) -> None:
@@ -673,74 +661,11 @@ class CrystallizationController:
         }
 
     def recovery_status(self) -> dict[str, Any]:
-        return {"state": "waiting_for_measurement" if self._main_recovery_pending else
-                "waiting_for_G" if self._g_recovery_pending else "ready",
-                "main_pending": copy.deepcopy(self._main_recovery_pending),
-                "g_pending": copy.deepcopy(self._g_recovery_pending),
+        # Preserve the observation interface, without a pending-rebuild state.
+        return {"state": "ready", "main_pending": None, "g_pending": None,
                 "main_rebuild_count": self._main_rebuild_count,
                 "g_rebuild_count": self._g_rebuild_count,
                 "last_event": copy.deepcopy(self.recovery_events[-1]) if self.recovery_events else None}
-
-    def _request_numerical_recovery(self, module: str, reason: str, stage: str) -> None:
-        attribute = "_g_recovery_pending" if module == "G" else "_main_recovery_pending"
-        if getattr(self, attribute) is None:
-            event = {"module": module, "reason": reason, "stage": stage,
-                     "tick_seq": self.frame_index, "action": "requested"}
-            setattr(self, attribute, event)
-            self.recovery_events.append(copy.deepcopy(event))
-        self.last_control_hold_reason = reason if module == "main" else None
-        if module == "G":
-            self.last_adaptation_pause_reason = reason
-
-    def _recover_main(self, T: float, c: float) -> None:
-        pending = self._main_recovery_pending
-        self.ekf = construct_EKF(np.array([T, 0., c, 0.]), self._model_params, self.params["dt"])
-        self._bind_main_filter(self._model_params, self.params["dt"])
-        self._filter_dts["main"] = self.params["dt"]
-        self.int_e_target_dt = self.int_e_dT_dt_dt = self.int_e_T_dt = 0.
-        self._fit_start_tick = self.frame_index + 1
-        self._g_derivative_start_tick = self.frame_index + 1
-        self._g_recovery_pending = {"module": "G", "reason": "main_state_rebuilt",
-                                    "stage": "main_recovery", "tick_seq": self.frame_index}
-        self.num_adapt = 0
-        self._main_recovery_pending = None
-        self._main_rebuild_count += 1
-        self.refresh_count += 1
-        event = {"module": "main", "reason": pending["reason"], "action": "rebuilt",
-                 "tick_seq": self.frame_index, "initial_state": self.ekf.state.tolist(),
-                 "initial_covariance": self.ekf.covariance.tolist()}
-        self.recovery_events.append(event)
-        self.last_refresh_event = {"event_id": f"recovery-{self._main_rebuild_count}",
-            "effective_tick": self.frame_index, "elapsed_s": self.elapsed_s,
-            "reason": "numerical_recovery", "changes": {"cause": pending["reason"]}}
-        self._pending_refresh_initial_snapshot = {
-            name: {"state": filter_.state.tolist(), "covariance": filter_.covariance.tolist()}
-            for name, filter_ in self._diagnostic_filters().items() if filter_ is not None}
-        self._attach_diagnostic_observers()
-        self.last_control_hold_reason = "numerical_recovery_baseline"
-        # Hold the last real setpoint through the baseline cycle. This is
-        # command memory for subsequent integration, never a new sensor value
-        # or an additional device write.
-        if self._last_valid_command is not None:
-            self._put("T_j_set", self._last_valid_command)
-        self._put("dT_dt_set", 0.)
-
-    def _recover_growth(self, value: float) -> float:
-        pending = self._g_recovery_pending
-        self.ekf_G_measure = create_EKF_general(self.params["dt"], self.params["q2_G_measure"],
-            self.params["r_diag_G_measure"], np.array([value, 0., 0.]))
-        self._filter_dts["G_measure"] = self.params["dt"]
-        self._fit_start_tick = self._g_derivative_start_tick = self.frame_index
-        self._g_recovery_pending = None
-        self._g_rebuild_count += 1
-        self.num_adapt = 0
-        self.recovery_events.append({"module": "G", "reason": pending["reason"],
-            "action": "rebuilt", "tick_seq": self.frame_index,
-            "initial_state": self.ekf_G_measure.state.tolist(),
-            "initial_covariance": self.ekf_G_measure.covariance.tolist()})
-        self.last_adaptation_pause_reason = None
-        self._attach_diagnostic_observers()
-        return value
 
 
 
@@ -768,25 +693,9 @@ class CrystallizationController:
         stage = "process_read"
         candidate_result = None
         G_measure = G_measure_KF = None
-        main_snapshot = growth_snapshot = control_snapshot = None
-        growth_reanchored = False
         try:
             self._measure(tick_input)
             T, T_j, c = (self._at(name) for name in ("T", "T_j", "c"))
-            stage = "process_measurement"
-            for name in ("T", "T_j", "c"):
-                validate_measurement(name, self._at(name), stage=stage)
-            if self.params["run_type"] == "experiment":
-                validate_measurement("count_middle", self._at("count_middle"), stage=stage)
-            validate_model_state([T, 0., c, 0.], stage=stage)
-            if self._main_recovery_pending is not None:
-                self._recover_main(T, c)
-                for name, value in (("dT_dt", 0.), ("dc_dt", 0.), ("T_KF", T),
-                                    ("dT_dt_KF", 0.), ("c_KF", c), ("dc_dt_KF", 0.),
-                                    ("int_e_target_dt", 0.)):
-                    self._put(name, value)
-                # A baseline is not a computed control output or device write.
-                return None
             stage = "measurement_derivative"
             dT_dt = (T - self._at("T", self.frame_index - 1)) / dt if self.frame_index > 1 else 0.0
             self._put("dT_dt", dT_dt)
@@ -796,10 +705,7 @@ class CrystallizationController:
             if self.ekf is None:
                 raise ControllerInputValueError("Unrecognized function or variable 'EKF'.",
                     stage="main_filter", reference_identifier="MATLAB:UndefinedFunction")
-            validate_filter(self.ekf, module="main", stage=stage)
-            main_snapshot = self.ekf.numerical_snapshot()
             filtered = smooth_EKF(self.ekf, self._model_params, np.array([T, dT_dt, c, dc_dt]))
-            validate_filter(self.ekf, module="main", stage=stage)
             T_KF, dT_dt_KF, c_KF, dc_dt_KF = filtered
             for name, value in zip(("T_KF", "dT_dt_KF", "c_KF", "dc_dt_KF"), filtered):
                 self._put(name, value)
@@ -808,7 +714,6 @@ class CrystallizationController:
             self._put("sigma", sigma)
             G_model = calc_G(self._model_params, c_KF, T_KF)
             self._put("G_model", G_model)
-            require_finite([sigma, G_model], "calculated supersaturation and growth", stage=stage)
             target = self.params["target"]
             if target == "sigma":
                 self._put("target", sigma)
@@ -828,15 +733,8 @@ class CrystallizationController:
             self._put("t_lag_perc", lag_percentage)
             lag = self.params["t_lag"] * lag_percentage
             self._put("t_lag", lag)
-            require_finite([lag_percentage, lag], "projection delay", stage=stage)
             projected = filtered + np.array([filtered[1], 0.0, filtered[3], 0.0]) * lag
-            # A forward control projection is not a new reactor measurement;
-            # do not impose the calibration-polynomial interval on that
-            # extrapolation or change normal reference control trajectories.
-            require_finite(projected, "projected control state", stage="projection")
-            main_snapshot = None
             stage = "control"
-            control_snapshot = (self.int_e_target_dt, self.int_e_dT_dt_dt, self.int_e_T_dt)
             dT_dt_request = None
             if abs(calc_relative_sigma(projected[2], projected[0])) < self.params["sigma_threshold"]:
                 self._put("dT_dt_set", self._at("dT_dt_set", self.frame_index - 1))
@@ -862,10 +760,6 @@ class CrystallizationController:
             objective = objective_function(self._model_params, filtered, target, dT_dt_set, target_set, dt)
             self._put("objective", objective)
             self._fill_target("objective", target)
-            require_finite([dT_dt_set, T_j_set, objective, absolute_error,
-                            self.int_e_target_dt, self.int_e_dT_dt_dt, self.int_e_T_dt],
-                           "control result and integrals", stage=stage)
-            control_snapshot = None
             values = dict(T=T, T_j=T_j, c=c, dT_dt=dT_dt, dc_dt=dc_dt,
                 T_KF=T_KF, dT_dt_KF=dT_dt_KF, c_KF=c_KF, dc_dt_KF=dc_dt_KF,
                 sigma=sigma, G_model=G_model, G_measure=None, G_measure_KF=None,
@@ -905,18 +799,8 @@ class CrystallizationController:
                         self._root_workspace["adaptive_disp"] = True
                     G_measure = .5 * (self._at("G_u_KF") + self._at("G_v_KF"))
                     self._put("G_measure", G_measure)
-                    finite_scalar(G_measure, "G measurement", module="G", stage=stage)
-                    if self._g_recovery_pending is not None:
-                        G_measure_KF = self._recover_growth(G_measure)
-                        growth_reanchored = True
-                    else:
-                        validate_filter(self.ekf_G_measure, module="G", stage=stage)
-                        growth_snapshot = self.ekf_G_measure.numerical_snapshot()
-                        G_measure_KF = smooth_EKF_general(
-                            self.history["G_measure"][self._g_derivative_start_tick - 1:],
-                            self.ekf_G_measure, dt)
-                        validate_filter(self.ekf_G_measure, module="G", stage=stage)
-                        growth_snapshot = None
+                    G_measure_KF = smooth_EKF_general(
+                        self.history["G_measure"], self.ekf_G_measure, dt)
                     self._put("G_measure_KF", G_measure_KF)
                     self._put("to_adapt", True)
                     stage = "adaptation"
@@ -924,22 +808,22 @@ class CrystallizationController:
                     # applies logical mask, removes missing/nonpositive values,
                     # and only THEN retains its last max_num_adapt samples.
                     selected = list(self.history["to_adapt"])
-                    if self._fit_start_tick > 1:
-                        selected = [bool(value) and index >= self._fit_start_tick
-                                    for index, value in enumerate(selected, 1)]
                     length = len(selected)
                     new_params, new_count = adapt_growth_parameters(copy.deepcopy(self._model_params),
                         self.history["G_measure_KF"][:length], self.history["sigma"][:length],
                         self.history["T"][:length], selected, self.params["max_num_adapt"],
                         self.params["min_num_adapt"], self._source_scalar("adaptive_mode"))
-                    require_finite([new_params[name] for name in ("E_A", "k_0", "n")],
-                                   "fitted parameters", module="G", stage=stage)
+                    fitted = not (new_count < self.params["min_num_adapt"])
+                    if fitted:
+                        # The source fitter assigns its shared EKF functions
+                        # before returning params/num_adapt to the caller.
+                        # A failed binding retains its actual object prefix,
+                        # without committing the local parameter outputs.
+                        self._bind_main_filter(new_params, dt)
                     self._model_params = new_params
                     self.num_adapt = new_count
                     self._sync_parameter_view()
-                    fitted = not (new_count < self.params["min_num_adapt"])
                     if fitted:
-                        self._bind_main_filter(self._model_params, dt)
                         self.adaptation_diagnostics["fit_count"] += 1
                     self.adaptation_diagnostics.update(last_status="fit_succeeded" if fitted else "waiting_for_samples",
                         last_tick=self.frame_index, last_mode=self.adaptation_mode)
@@ -961,26 +845,12 @@ class CrystallizationController:
             self.last_adaptation_pause_reason = None
             self._finish_diagnostics(T=T, c=c, T_j=T_j, G_measure=G_measure,
                 refreshed=bool(self.last_refresh_event and self.last_refresh_event["effective_tick"] == self.frame_index),
-                growth_updated=should_adapt, growth_reanchored=growth_reanchored, projected=projected,
+                growth_updated=should_adapt, projected=projected,
                 dT_dt_request=dT_dt_request, T_j_set=T_j_set)
-            self._last_valid_command = float(T_j_set)
+            self._last_valid_command = copy.deepcopy(T_j_set)
             return replace(candidate_result, G_measure=G_measure, G_measure_KF=G_measure_KF,
                 E_A=self._model_params["E_A"], k_0=self._model_params["k_0"], n=self._model_params["n"])
         except Exception as exc:
-            # Only the interrupted numerical module is restored. Raw reads,
-            # allocated cycle/time and earlier completed modules stay recorded.
-            if main_snapshot is not None and self.ekf is not None:
-                self.ekf.restore_numerical_snapshot(main_snapshot)
-            if growth_snapshot is not None and self.ekf_G_measure is not None:
-                self.ekf_G_measure.restore_numerical_snapshot(growth_snapshot)
-            if control_snapshot is not None:
-                self.int_e_target_dt, self.int_e_dT_dt_dt, self.int_e_T_dt = control_snapshot
-            if not isinstance(exc, ControllerReadError):
-                if stage in {"growth_filter", "adaptation"}:
-                    self._request_numerical_recovery("G", str(exc), stage)
-                elif stage not in {"growth_read", "record_parameters"}:
-                    if not isinstance(exc, NumericalRecoveryError) or exc.module != "input":
-                        self._request_numerical_recovery("main", str(exc), stage)
             # One source-loop warning: preserve every completed assignment,
             # filter mutation and integral. Do not manufacture a normal point
             # or undo receive_modified because a later source stage failed.
@@ -1215,11 +1085,10 @@ class CrystallizationController:
             "refresh": {"pending": self.controller_refresh_request,
                 "count": self.refresh_count, "last_event": self.last_refresh_event},
             "initialization": self._activation_read_failure,
-            "numerical_recovery": {"main_pending": self._main_recovery_pending,
-                "g_pending": self._g_recovery_pending, "main_rebuild_count": self._main_rebuild_count,
+            "numerical_recovery": {"main_pending": None,
+                "g_pending": None, "main_rebuild_count": self._main_rebuild_count,
                 "g_rebuild_count": self._g_rebuild_count, "events": self.recovery_events,
-                "fit_start_tick": self._fit_start_tick,
-                "g_derivative_start_tick": self._g_derivative_start_tick,
+                "fit_start_tick": 1, "g_derivative_start_tick": 1,
                 "initial_read_observations": self._initial_read_observations,
                 "last_valid_command": self._last_valid_command},
             "adaptation": {"enabled": self.adaptation_enabled, "mode": self.adaptation_mode,
@@ -1305,13 +1174,12 @@ class CrystallizationController:
             self.last_refresh_event = copy.deepcopy(state["refresh"]["last_event"])
             self._activation_read_failure = copy.deepcopy(state["initialization"])
             recovery = state.get("numerical_recovery", {})
-            self._main_recovery_pending = copy.deepcopy(recovery.get("main_pending"))
-            self._g_recovery_pending = copy.deepcopy(recovery.get("g_pending"))
+            # Old pending requests and fitting/derivative segment boundaries
+            # are retired. Keep the archived objects/history and audit facts,
+            # without scheduling a rebuild or hiding pre-boundary samples.
             self._main_rebuild_count = recovery.get("main_rebuild_count", 0)
             self._g_rebuild_count = recovery.get("g_rebuild_count", 0)
             self.recovery_events = copy.deepcopy(recovery.get("events", []))
-            self._fit_start_tick = recovery.get("fit_start_tick", 1)
-            self._g_derivative_start_tick = recovery.get("g_derivative_start_tick", 1)
             self._initial_read_observations = copy.deepcopy(recovery.get("initial_read_observations", []))
             self._last_valid_command = recovery.get("last_valid_command")
             adaptation = state["adaptation"]

@@ -1,0 +1,23 @@
+# Use after the repository's docker-compose.yml. Only Controller is overridden.
+# OPCUA_* values come from the same project environment used by Telegraf/Writer.
+services:
+  controller:
+    build:
+      context: .
+      dockerfile: services/mpc/Dockerfile
+    environment:
+      OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:62552}
+      OPCUA_TIMEOUT_S: ${OPCUA_TIMEOUT_S:-5.0}
+      OPCUA_AUTH_METHOD: ${OPCUA_AUTH_METHOD:-Anonymous}
+      OPCUA_USERNAME: ${OPCUA_USERNAME:-}
+      OPCUA_PASSWORD: ${OPCUA_PASSWORD:-}
+      OPCUA_SECURITY_POLICY: ${OPCUA_SECURITY_POLICY:-None}
+      OPCUA_SECURITY_MODE: ${OPCUA_SECURITY_MODE:-None}
+      OPCUA_CERTIFICATE: ${OPCUA_CERTIFICATE:-}
+      OPCUA_PRIVATE_KEY: ${OPCUA_PRIVATE_KEY:-}
+      OPCUA_SERVER_CERTIFICATE: ${OPCUA_SERVER_CERTIFICATE:-}
+      OPCUA_SERVER_URI: ${OPCUA_SERVER_URI:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${OPCUA_CERT_HOST_ROOT:-./config/telegraf/certs}:/run/opcua-certs:ro

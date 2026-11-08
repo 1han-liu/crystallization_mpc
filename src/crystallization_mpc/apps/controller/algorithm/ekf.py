@@ -29,7 +29,7 @@ def _chol_psd(matrix: np.ndarray) -> np.ndarray:
         return result.real if np.iscomplexobj(result) and np.all(result.imag == 0) else result
 
 
-def _validate_process_noise(value: np.ndarray) -> None:
+def _validate_process_noise(value: np.ndarray, state_size: int) -> None:
     """Only Q takes the source constructor's covariance property setter.
 
     MeasurementNoise deliberately bypasses that setter in this constructor;
@@ -45,6 +45,12 @@ def _validate_process_noise(value: np.ndarray) -> None:
         fail("MATLAB:ExtendedKalmanFilter:expectedFinite", "ProcessNoise must be finite.")
     if array.ndim != 2 or array.shape[0] != array.shape[1]:
         fail("MATLAB:ExtendedKalmanFilter:expectedSquare", "ProcessNoise must be square.")
+    # Source set.ProcessNoise validates its dimensions against the additive
+    # state size before the PSD test. In particular, an empty initial T/c
+    # produces a shorter State and must fail here, not in a fixed-size reshape.
+    if array.size != 1 and array.shape != (state_size, state_size):
+        fail("shared_tracking:KalmanFilter:invalidCovarianceDims",
+             f"Expected ProcessNoise to be a scalar or {state_size}-by-{state_size} matrix.")
     if array.size == 0:
         return
     tolerance = 100.0 * np.spacing(np.max(np.abs(np.diag(array))))
@@ -144,7 +150,7 @@ class ExtendedKalmanFilter:
                                             reference_identifier="MATLAB:ExtendedKalmanFilter:expectedFinite")
         self._sqrt_covariance = _chol_psd(self.covariance)
         self._covariance_snapshot = self.covariance.copy()
-        _validate_process_noise(self.process_noise)
+        _validate_process_noise(self.process_noise, self.state.size)
         self._sqrt_process_noise = _chol_psd(self.process_noise)
         if np.asarray(self.measurement_noise).size == 0:
             self.measurement_noise = np.ones((1, 1))
@@ -261,7 +267,7 @@ class ExtendedKalmanFilter:
 def construct_EKF(
     state: np.ndarray, params: Mapping[str, Any], dt: float
 ) -> ExtendedKalmanFilter:
-    initial = np.asarray(state).reshape(4)
+    initial = np.asarray(state).reshape(-1)
     captured_params = copy.deepcopy(params)
     captured_dt = float(dt)
     return ExtendedKalmanFilter(
@@ -270,7 +276,7 @@ def construct_EKF(
         state=initial.copy(),
         process_noise=calc_Q(params, dt),
         measurement_noise=calc_R(params),
-        covariance=np.eye(4),
+        covariance=np.eye(initial.size),
     )
 
 

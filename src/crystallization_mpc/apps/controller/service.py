@@ -40,6 +40,8 @@ from crystallization_mpc.apps.controller.process import (
     ProcessWriteResult,
 )
 from crystallization_mpc.apps.controller.rabbit_process import RabbitProcessAdapter, RabbitProcessConfig
+from crystallization_mpc.apps.controller.opcua_reader import OpcUaReadClient
+from crystallization_mpc.apps.controller.process_io import ControllerProcessAdapter
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput, ControllerInputValueError
 from crystallization_mpc.apps.controller.telemetry import (
@@ -221,9 +223,10 @@ class ControllerService(OnlineParametersMixin):
                 self.influx_initialization_error = str(exc)
                 self.last_influx_error = str(exc)
                 logger.warning("Could not initialize Controller InfluxDB writer: %s", exc)
-        if isinstance(self.process_adapter, RabbitProcessAdapter):
-            self.process_adapter.audit_writer = self.measurement_writer
-            self.process_adapter.audit_required = False
+        writer_adapter = getattr(self.process_adapter, "writer", self.process_adapter)
+        if isinstance(writer_adapter, RabbitProcessAdapter):
+            writer_adapter.audit_writer = self.measurement_writer
+            writer_adapter.audit_required = False
         self.seed_event_count = 0
         self.duplicate_seed_event_count = 0
         self.last_seed_event: dict[str, Any] | None = None
@@ -289,30 +292,32 @@ class ControllerService(OnlineParametersMixin):
     def _build_process_adapter(self) -> ProcessAdapter:
         if not self.settings.process_enabled:
             return NoOpProcessAdapter()
-        return RabbitProcessAdapter(
-            RabbitProcessConfig(
-                rabbit_url=self.settings.rabbit_url,
-                exchange=self.settings.rabbit_exchange,
-                device_id=self.settings.process_device_id,
-                measurement_name=self.settings.process_measurement_name,
-                process_queue=self.settings.process_telemetry_queue,
-                result_queue=self.settings.process_result_queue,
-                sample_max_age_s=self.settings.process_sample_max_age_s,
-                startup_timeout_s=self.settings.process_startup_timeout_s,
-                command_ttl_s=self.settings.process_command_ttl_s,
-                write_timeout_s=self.settings.process_write_timeout_s,
-                node_ids=OpcUaNodeConfig(
-                    namespace_index=self.settings.process_namespace_index,
-                    T_j_set=self.settings.process_t_j_set_node,
-                    T=self.settings.process_t_node,
-                    T_j=self.settings.process_t_j_node,
-                    c=self.settings.process_c_node,
-                    count_middle=self.settings.process_count_middle_node,
-                ).node_ids(),
-                jacket_min_K=self.settings.process_jacket_min_K,
-                jacket_max_K=self.settings.process_jacket_max_K,
-                verify_tolerance_K=self.settings.process_verify_tolerance_K,
-            )
+        config = RabbitProcessConfig(
+            rabbit_url=self.settings.rabbit_url,
+            exchange=self.settings.rabbit_exchange,
+            device_id=self.settings.process_device_id,
+            measurement_name=self.settings.process_measurement_name,
+            process_queue=self.settings.process_telemetry_queue,
+            result_queue=self.settings.process_result_queue,
+            sample_max_age_s=self.settings.process_sample_max_age_s,
+            startup_timeout_s=self.settings.process_startup_timeout_s,
+            command_ttl_s=self.settings.process_command_ttl_s,
+            write_timeout_s=self.settings.process_write_timeout_s,
+            node_ids=OpcUaNodeConfig(
+                namespace_index=self.settings.process_namespace_index,
+                T_j_set=self.settings.process_t_j_set_node,
+                T=self.settings.process_t_node,
+                T_j=self.settings.process_t_j_node,
+                c=self.settings.process_c_node,
+                count_middle=self.settings.process_count_middle_node,
+            ).node_ids(),
+            jacket_min_K=self.settings.process_jacket_min_K,
+            jacket_max_K=self.settings.process_jacket_max_K,
+            verify_tolerance_K=self.settings.process_verify_tolerance_K,
+        )
+        return ControllerProcessAdapter(
+            reader=OpcUaReadClient(self.settings.opcua_read, config.node_ids),
+            writer=RabbitProcessAdapter(config),
         )
 
     def _state_document_locked(self) -> dict[str, Any]:
@@ -933,6 +938,8 @@ class ControllerService(OnlineParametersMixin):
 
     def _control_tick_once(self, *, now=None):
         with self._lock:
+            # Retired checkpoint/status field; it never requests initialization.
+            self.process_activation_pending = False
             if not self._parameters_received:
                 return {'executed':False,'reason':'initial_parameter_phase'}
             now = self._monotonic_clock() if now is None else now
@@ -957,12 +964,7 @@ class ControllerService(OnlineParametersMixin):
                         self.adapter.stop()
                 else:
                     source_if(source_not(self.controller_active))
-                    if source_if(self.controller_active) and self.process_activation_pending:
-                        self._complete_activation()
                 self._observe_controller_state()
-                if (not source_if(self.controller_active == 1)
-                        and self.initialization_status["state"] == "stopped"):
-                    return {'executed': False, 'reason': 'controller_inactive'}
                 stage = 'refresh'
                 self.adapter.prepare_iteration()
                 self._sync_workspace()
@@ -1610,66 +1612,60 @@ class ControllerService(OnlineParametersMixin):
 
 
     def _activate(self):
-        # The run is started exactly once. A failed initial read is retried by
-        # _complete_activation without clearing history or restarting its clock.
-        self.process_activation_pending = True
+        # check_component_active has already consumed the activation edge.
+        # initialize_controller is executed once; failure leaves its actual
+        # assignment prefix and does not schedule a complete initialization.
+        self.process_activation_pending = False
         self.initialization_status = {
-            "state": "pending", "attempts": 0, "stage": "start",
+            "state": "pending", "attempts": 1, "stage": "start",
             "last_error": None, "completed_at": None,
         }
-        self.adapter.start()
-        self._run_started_monotonic = self._monotonic_clock()
-        self._activation_wall_time = self._wall_clock()
-        self._run_elapsed_s = 0.0
-        self.control_tick_count = 0
-        self._complete_activation()
-
-
-    def _cancel_initialization(self):
-        if not self.process_activation_pending:
-            return
-        # A failed constructor may have left the startup refresh flag set.
-        # Stop cancels that unfinished attempt rather than rebuilding while
-        # inactive or applying its refresh receipt during a future run.
-        self.adapter.apply_modified({'controller_refresh_request': False})
-        self.process_activation_pending = False
-        self._refresh_receipt_event_id = None
-        self.initialization_status.update(state="stopped", stage=None)
-
-
-    def _complete_activation(self):
-        """Retry unfinished initialization in the same active experiment."""
-        if not self.process_activation_pending:
-            return
-        self.initialization_status["attempts"] += 1
         try:
-            if self.parameters.get('run_type') == 'experiment':
-                self.initialization_status["stage"] = "connect"
-                self.process_adapter.connect()
-                reader = getattr(self.process_adapter, 'read_initial_field', None)
-                if callable(reader):
-                    for name in ('T','T_j','T_j_set','c','count_middle'):
-                        self.initialization_status["stage"] = f"read_initial_{name}"
-                        self.adapter.assign_initial_scalar(name, reader(name), raw_units=True)
-                else:
-                    # Legacy third-party adapters expose only one snapshot.
-                    self.initialization_status["stage"] = "read_initial_state"
-                    state = self.process_adapter.read_state()
-                    for name in ('T','T_j','T_j_set','c','count_middle'):
-                        self.adapter.assign_initial_scalar(name, getattr(state,name), raw_units=False)
-                    self.last_process_state = state.to_dict()
-            self.initialization_status["stage"] = "seed_template"
-            self.adapter.complete_initialization()
-            self.initialization_status["stage"] = "filter_initialization"
-            self.adapter.request_refresh()
-            self.adapter.prepare_iteration()
+            self.adapter.start()
+            self._run_started_monotonic = self._monotonic_clock()
+            self._activation_wall_time = self._wall_clock()
+            self._run_elapsed_s = 0.0
+            self.control_tick_count = 0
+            self._initialize_activation()
         except Exception as exc:
-            self.initialization_status.update(state="pending", last_error=str(exc))
+            self.initialization_status.update(state="failed", last_error=str(exc))
             raise
-        self.process_activation_pending = False
         self.initialization_status.update(
             state="completed", stage=None, last_error=None, completed_at=utc_ts(),
         )
+
+
+    def _cancel_initialization(self):
+        # Compatibility observation only. The source does not clear a refresh
+        # request on stop: only a completed refresh clears that request.
+        self.process_activation_pending = False
+        self.initialization_status.update(state="stopped", stage=None)
+
+
+    def _initialize_activation(self):
+        """Execute the source initialization script on the activation edge."""
+        if self.parameters.get('run_type') == 'experiment':
+            self.initialization_status["stage"] = "connect"
+            self.process_adapter.connect()
+            reader = getattr(self.process_adapter, 'read_initial_field', None)
+            if callable(reader):
+                for name in ('T','T_j','T_j_set','c','count_middle'):
+                    self.initialization_status["stage"] = f"read_initial_{name}"
+                    self.adapter.assign_initial_scalar(name, reader(name), raw_units=True)
+            else:
+                # Legacy third-party adapters expose only one snapshot.
+                self.initialization_status["stage"] = "read_initial_state"
+                state = self.process_adapter.read_state()
+                for name in ('T','T_j','T_j_set','c','count_middle'):
+                    self.adapter.assign_initial_scalar(name, getattr(state,name), raw_units=False)
+                self.last_process_state = state.to_dict()
+        self.initialization_status["stage"] = "seed_template"
+        self.adapter.complete_initialization()
+        # The caller's common refresh block follows initialize_controller.
+        # A failed refresh keeps this flag set and retries only the refresh,
+        # without re-reading the initial values or repeating seed generation.
+        self.initialization_status["stage"] = "refresh_request"
+        self.adapter.request_refresh()
 
 
     def _observe_controller_state(self):
