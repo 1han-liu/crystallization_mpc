@@ -47,10 +47,6 @@ class CommandJournal:
                 run_id TEXT PRIMARY KEY,
                 run_started_at REAL NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS reconciliations (
-                command_id TEXT PRIMARY KEY,
-                evidence TEXT NOT NULL
-            );
             """
         )
         initialize_outbox(self.connection)
@@ -69,23 +65,20 @@ class CommandJournal:
                     status="unknown",
                     error="Writer restarted during execution; the device outcome is unknown. Command will not be replayed.",
                     write_result=None,
-                    execution_complete=True,
-                    manual_confirmation_required=True,
-                    recoverable=False,
-                    failure_kind="communication",
                 )
                 self._save_result(row["command_id"], result)
         return len(rows)
 
     def reserve(self, command: WriteCommand, *, rejection: str | None = None) -> dict[str, Any] | None:
         """Return a terminal result, or durably reserve exactly one attempt."""
+        fingerprint = command.fingerprint()
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             existing = self.connection.execute(
-                "SELECT fingerprint, state, result FROM commands WHERE command_id=?", (command.command_id,)
+                "SELECT fingerprint, result FROM commands WHERE command_id=?", (command.command_id,)
             ).fetchone()
             if existing is not None:
-                if existing["fingerprint"] != command.fingerprint():
+                if existing["fingerprint"] != fingerprint:
                     return command.result("failed", "command_id was already used for a different command.")
                 if existing["result"]:
                     return json.loads(existing["result"])
@@ -113,10 +106,11 @@ class CommandJournal:
 
             self.connection.execute(
                 "INSERT INTO commands(command_id, fingerprint, state, payload) VALUES (?, ?, 'executing', ?)",
-                (command.command_id, command.fingerprint(), command.fingerprint()),
+                (command.command_id, fingerprint, fingerprint),
             )
             if rejection:
                 result = command.result("failed", rejection)
+                result["write_attempted"] = False
                 self._save_result(command.command_id, result)
                 return result
             self.connection.execute(
@@ -127,95 +121,12 @@ class CommandJournal:
                 "INSERT OR IGNORE INTO experiments(run_id, run_started_at) VALUES (?, ?)",
                 (command.run_id, command.run_started_at.timestamp()),
             )
-            self._audit(json.loads(command.fingerprint()), "executing")
+            self._audit(command.to_dict(), "executing")
         return None
 
     def finish(self, command_id: str, result: dict[str, Any]) -> None:
         with self.connection:
             self._save_result(command_id, result)
-
-    @staticmethod
-    def _recovery_result(result: dict[str, Any]) -> dict[str, Any]:
-        """Legacy journals retain their facts; only definite communication failures recover."""
-        result = dict(result)
-        status = result["status"]
-        failure = result.get("failure_kind")
-        if failure is None and status == "failed":
-            error = result.get("error") or ""
-            connection_prefix = "OPC UA connection failed before write: "
-            known_transport = error.startswith(connection_prefix) and error[len(connection_prefix):].split(":", 1)[0] in {
-                "TimeoutError", "ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
-                "ConnectionAbortedError", "BrokenPipeError",
-            }
-            if known_transport or error.startswith(("Command expired before execution.",
-                                                    "Command expired while connecting;")):
-                failure = "communication"
-        result.update(
-            execution_complete=status != "executing",
-            manual_confirmation_required=status == "unknown",
-            recoverable=status == "success" or (status == "failed" and failure in {"communication", "cancelled"}),
-        )
-        if failure is not None:
-            result["failure_kind"] = failure
-        return result
-
-    def recovery_status(self, command: WriteCommand) -> dict[str, Any]:
-        """Read an outcome, or fence a never-seen command before it can arrive late."""
-        with self.connection:
-            self.connection.execute("BEGIN IMMEDIATE")
-            row = self.connection.execute(
-                "SELECT fingerprint,state,result FROM commands WHERE command_id=?", (command.command_id,)
-            ).fetchone()
-            if row is None:
-                result = command.result("failed", "Command cancelled before execution by recovery status check.")
-                result.update(failure_kind="cancelled", execution_complete=True,
-                              manual_confirmation_required=False, recoverable=True)
-                self.connection.execute(
-                    "INSERT INTO commands(command_id,fingerprint,state,payload,result) VALUES (?,?,?,?,?)",
-                    (command.command_id, command.fingerprint(), "failed", command.fingerprint(),
-                     json.dumps(result, allow_nan=False)),
-                )
-                self._audit(result, "cancelled_before_execution")
-                return result
-            if row["fingerprint"] != command.fingerprint():
-                return dict(command.result("failed", "command_id was already used for a different command."),
-                            failure_kind="validation", execution_complete=True,
-                            manual_confirmation_required=False, recoverable=False)
-            if not row["result"]:
-                return dict(command.result("executing"), execution_complete=False,
-                            manual_confirmation_required=False, recoverable=False)
-            result = self._recovery_result(json.loads(row["result"]))
-            reconciliation = self.connection.execute(
-                "SELECT evidence FROM reconciliations WHERE command_id=?", (command.command_id,)
-            ).fetchone()
-            if reconciliation is not None and result["status"] == "unknown":
-                result.update(manual_confirmation_required=False, recoverable=True,
-                              confirmed_current_state=True,
-                              reconciliation=json.loads(reconciliation["evidence"]))
-            return result
-
-    def confirm_unknown(self, command: WriteCommand, evidence: dict[str, Any]) -> dict[str, Any]:
-        """Record an operator decision separately; never rewrite an unknown device outcome."""
-        with self.connection:
-            self.connection.execute("BEGIN IMMEDIATE")
-            row = self.connection.execute(
-                "SELECT fingerprint,state,result FROM commands WHERE command_id=?", (command.command_id,)
-            ).fetchone()
-            if (row is None or row["fingerprint"] != command.fingerprint()
-                    or row["state"] != "unknown" or not row["result"]):
-                return dict(command.result("failed", "Only a completed unknown command may be manually confirmed."),
-                            failure_kind="validation", execution_complete=row is None or row["state"] != "executing",
-                            manual_confirmation_required=False, recoverable=False)
-            self.connection.execute(
-                "INSERT OR IGNORE INTO reconciliations(command_id,evidence) VALUES (?,?)",
-                (command.command_id, json.dumps(evidence, allow_nan=False)),
-            )
-            self._audit(dict(command.to_dict(), **evidence), "manual_confirmation")
-        return self.recovery_status(command)
-
-    def audit_recovery(self, result: dict[str, Any], query_id: str) -> None:
-        with self.connection:
-            self._audit(result, f"recovery_status:{query_id}")
 
     def _save_result(self, command_id: str, result: dict[str, Any]) -> None:
         self.connection.execute(

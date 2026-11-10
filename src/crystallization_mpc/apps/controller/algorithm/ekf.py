@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import copy
+from contextlib import contextmanager
 from typing import Any, Callable, Mapping
 
 import numpy as np
 from ._numeric_backend import cholesky_upper, matmul, qr_r, solve_triangular, svd_right, symmetric_eigenvalues
 
 from crystallization_mpc.apps.controller.tick import ControllerGrowthMeasurementError, ControllerInputValueError
+from .._recovery import (
+    NumericalRecoveryError, require_finite, validate_covariance,
+    validate_covariance_resolution, validate_model_state, validate_state_resolution,
+)
 from .dynamics import state_transition_function
 
 
@@ -29,7 +34,7 @@ def _chol_psd(matrix: np.ndarray) -> np.ndarray:
         return result.real if np.iscomplexobj(result) and np.all(result.imag == 0) else result
 
 
-def _validate_process_noise(value: np.ndarray, state_size: int) -> None:
+def _validate_process_noise(value: np.ndarray) -> None:
     """Only Q takes the source constructor's covariance property setter.
 
     MeasurementNoise deliberately bypasses that setter in this constructor;
@@ -45,12 +50,6 @@ def _validate_process_noise(value: np.ndarray, state_size: int) -> None:
         fail("MATLAB:ExtendedKalmanFilter:expectedFinite", "ProcessNoise must be finite.")
     if array.ndim != 2 or array.shape[0] != array.shape[1]:
         fail("MATLAB:ExtendedKalmanFilter:expectedSquare", "ProcessNoise must be square.")
-    # Source set.ProcessNoise validates its dimensions against the additive
-    # state size before the PSD test. In particular, an empty initial T/c
-    # produces a shorter State and must fail here, not in a fixed-size reshape.
-    if array.size != 1 and array.shape != (state_size, state_size):
-        fail("shared_tracking:KalmanFilter:invalidCovarianceDims",
-             f"Expected ProcessNoise to be a scalar or {state_size}-by-{state_size} matrix.")
     if array.size == 0:
         return
     tolerance = 100.0 * np.spacing(np.max(np.abs(np.diag(array))))
@@ -128,6 +127,14 @@ class ExtendedKalmanFilter:
     diagnostic_observer: Callable[[str, Mapping[str, Any]], None] | None = field(
         default=None, repr=False, compare=False
     )
+    measurement_jacobian: ArrayFunction | None = field(default=None, repr=False, compare=False)
+    state_validator: Callable[[np.ndarray], None] | None = field(default=None, repr=False, compare=False)
+    forecast_validator: Callable[[np.ndarray], None] | None = field(default=None, repr=False, compare=False)
+    enforce_measurement_resolution: bool = field(default=False, repr=False, compare=False)
+    innovation_nis_limit: float | None = field(default=None, repr=False, compare=False)
+    last_innovation_nis: float | None = field(default=None, init=False, repr=False, compare=False)
+    _forecast_validated_state: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _forecast_validator_used: Callable | None = field(default=None, init=False, repr=False, compare=False)
     _diagnostic_initial_covariance: np.ndarray | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -148,17 +155,20 @@ class ExtendedKalmanFilter:
             raise ControllerInputValueError("Initial filter State must be real and finite.",
                                             stage="filter_initialization",
                                             reference_identifier="MATLAB:ExtendedKalmanFilter:expectedFinite")
+        validate_covariance(self.covariance, stage="filter_initialization")
         self._sqrt_covariance = _chol_psd(self.covariance)
         self._covariance_snapshot = self.covariance.copy()
-        _validate_process_noise(self.process_noise, self.state.size)
+        _validate_process_noise(self.process_noise)
         self._sqrt_process_noise = _chol_psd(self.process_noise)
         if np.asarray(self.measurement_noise).size == 0:
             self.measurement_noise = np.ones((1, 1))
         if np.asarray(self.measurement_noise).ndim != 2 or self.measurement_noise.shape[0] != self.measurement_noise.shape[1]:
             raise ControllerInputValueError("Matrix must be square.", stage="filter_initialization",
                                             reference_identifier="MATLAB:square")
+        validate_covariance(self.measurement_noise, stage="filter_initialization")
         self._sqrt_measurement_noise = _chol_psd(self.measurement_noise)
         self.measurement_noise = matmul(self._sqrt_measurement_noise, self._sqrt_measurement_noise.conj().T)
+        self._validate_candidate(self.state, self.covariance, stage="filter_initialization")
         # Observational only: constructor P remains unchanged and this copy is
         # deliberately absent from the recovery wire format.
         try:
@@ -184,15 +194,64 @@ class ExtendedKalmanFilter:
             self._covariance_snapshot = self.covariance.copy()
 
     def restore_covariance(self, covariance: np.ndarray, root: np.ndarray | None = None) -> None:
-        self.covariance = covariance.copy()
-        self._sqrt_covariance = _chol_psd(covariance) if root is None else root.copy()
-        self._covariance_snapshot = covariance.copy()
+        candidate = covariance.copy()
+        self._validate_candidate(self.state, candidate, stage="filter_restore_covariance")
+        factor = _chol_psd(candidate) if root is None else root.copy()
+        require_finite(factor, "restored covariance root", stage="filter_restore")
+        if factor.shape != candidate.shape:
+            raise ValueError("Covariance root has an incompatible shape.")
+        reconstructed = matmul(factor, factor.T)
+        scales = np.sqrt(np.maximum(np.diag(candidate), np.finfo(float).tiny))
+        tolerance = 64.0 * candidate.shape[0] * np.finfo(float).eps
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            discrepancy = (reconstructed - candidate) / scales[:, None] / scales[None, :]
+        if not np.isfinite(discrepancy).all() or np.max(np.abs(discrepancy)) > tolerance:
+            raise NumericalRecoveryError("Covariance root does not match its covariance.", module="main", stage="filter_restore")
+        self.covariance = candidate
+        self._sqrt_covariance = factor
+        self._covariance_snapshot = candidate.copy()
+
+    def _validate_candidate(self, state: np.ndarray, covariance: np.ndarray, *, stage: str) -> None:
+        require_finite(state, "filter state", stage=stage)
+        if np.asarray(state).shape != self.state.shape:
+            raise NumericalRecoveryError("Filter state shape changed.", module="main", stage=stage)
+        validate_covariance(covariance, stage=stage)
+        if self.state_validator is not None:
+            self.state_validator(state)
+        if self.enforce_measurement_resolution:
+            validate_covariance_resolution(covariance, self.measurement_noise, stage=stage)
+        if stage not in {"filter_predict", "filter_correct_input", "filter_restore_covariance"}:
+            self._validate_forecast(state)
+
+    def _validate_forecast(self, state: np.ndarray) -> None:
+        if self.forecast_validator is None:
+            return
+        # A pure validation cache is scoped to the captured params/dt callback.
+        # Rebinding either creates a new callback; no rejected result is cached.
+        if (self._forecast_validator_used is not self.forecast_validator
+                or self._forecast_validated_state is None
+                or not np.array_equal(state, self._forecast_validated_state)):
+            self.forecast_validator(state)
+            self._forecast_validated_state = state.copy()
+            self._forecast_validator_used = self.forecast_validator
+
+    @contextmanager
+    def _transaction(self):
+        snapshot = self.numerical_snapshot()
+        try:
+            yield
+        except Exception:
+            self.restore_numerical_snapshot(snapshot)
+            raise
 
     def numerical_snapshot(self) -> dict[str, Any]:
         """Copy computational memory without a constructor or factorization."""
         names = ("state", "covariance", "process_noise", "measurement_noise",
                  "_sqrt_covariance", "_covariance_snapshot", "_sqrt_process_noise",
-                 "_sqrt_measurement_noise", "_diagnostic_initial_covariance")
+                 "_sqrt_measurement_noise", "_diagnostic_initial_covariance", "last_innovation_nis",
+                 "measurement_jacobian", "state_validator", "enforce_measurement_resolution",
+                 "innovation_nis_limit", "forecast_validator", "_forecast_validated_state",
+                 "_forecast_validator_used")
         return {**{name: copy.deepcopy(getattr(self, name)) for name in names},
                 "transition": self.transition, "measurement": self.measurement}
 
@@ -202,60 +261,88 @@ class ExtendedKalmanFilter:
             setattr(self, name, value if name in {"transition", "measurement"} else copy.deepcopy(value))
 
     def predict(self) -> np.ndarray:
-        self._synchronize_covariance()
-        prior = self.state.copy()
-        F = _forward_jacobian(self.transition, prior)
-        predicted = np.asarray(self.transition(prior), dtype=float)
-        predicted_root = _qr_factor(F, self._sqrt_covariance, self._sqrt_process_noise)
-        predicted_covariance = matmul(predicted_root, predicted_root.T)
-        self.state = predicted
-        self.covariance = predicted_covariance
-        self._sqrt_covariance = predicted_root
-        self._covariance_snapshot = predicted_covariance.copy()
-        self._observe("prior", state=self.state, covariance=self.covariance)
-        return self.state.copy()
+        with self._transaction():
+            self._validate_candidate(self.state, self.covariance, stage="filter_predict")
+            self._synchronize_covariance()
+            prior = self.state.copy()
+            F = _forward_jacobian(self.transition, prior)
+            require_finite(F, "transition Jacobian", stage="filter_predict")
+            predicted = np.asarray(self.transition(prior))
+            require_finite(predicted, "predicted state", stage="filter_predict")
+            predicted_root = _qr_factor(F, self._sqrt_covariance, self._sqrt_process_noise)
+            predicted_covariance = matmul(predicted_root, predicted_root.T)
+            self._validate_candidate(predicted, predicted_covariance, stage="filter_predict")
+            self.state = predicted
+            self.covariance = predicted_covariance
+            self._sqrt_covariance = predicted_root
+            self._covariance_snapshot = predicted_covariance.copy()
+            self._observe("prior", state=self.state, covariance=self.covariance)
+            return self.state.copy()
 
     def correct(self, observed: np.ndarray) -> np.ndarray:
-        # Source correct(z) checks z before its internal correction can mutate
-        # pState/P. A preceding predict is deliberately not undone on failure.
         if np.iscomplexobj(observed) or not np.isfinite(np.asarray(observed)).all():
             raise ControllerInputValueError("Filter correction measurement z must be real and finite.",
                                             reference_identifier="MATLAB:ExtendedKalmanFilter:expectedFinite")
-        self._synchronize_covariance()
-        observed_array = np.asarray(observed, dtype=float).reshape(-1)
-        H = _forward_jacobian(self.measurement, self.state)
-        expected = np.asarray(self.measurement(self.state), dtype=float).reshape(-1)
-        noise_root = self._sqrt_measurement_noise
-        if noise_root.shape == (1, 1) and observed_array.size != 1:
-            noise_root = np.eye(observed_array.size) * noise_root[0, 0]
-            self._sqrt_measurement_noise = noise_root
-            self.measurement_noise = matmul(noise_root, noise_root.conj().T)
-        elif noise_root.shape[0] != observed_array.size:
-            raise ControllerInputValueError("MeasurementNoise has incompatible dimensions.",
-                                            reference_identifier="shared_tracking:KalmanFilter:invalidCovarianceDims")
-        innovation_root = _qr_factor(H, self._sqrt_covariance, noise_root)
-        cross_covariance = matmul(matmul(self._sqrt_covariance, self._sqrt_covariance.T), H.T)
-        gain = solve_triangular(innovation_root.T,
-                                solve_triangular(innovation_root, cross_covariance.T, lower=True, check_finite=False),
-                                lower=False, check_finite=False).T
-        corrected = self.state + matmul(gain, observed_array - expected)
-        correction = matmul(-gain, H)
-        for index in range(self.state.size):
-            correction[index, index] += 1.0
-        corrected_root = _qr_factor(correction, self._sqrt_covariance, matmul(gain, noise_root))
-        self.state = corrected
-        self._sqrt_covariance = corrected_root
-        self.covariance = matmul(corrected_root, corrected_root.T)
-        self._covariance_snapshot = self.covariance.copy()
-        innovation_covariance = matmul(innovation_root, innovation_root.T)
-        self._observe(
-            "posterior", state=self.state, covariance=self.covariance,
-            innovation=observed_array - expected,
-            innovation_covariance=innovation_covariance,
-        )
-        return self.state.copy()
+        with self._transaction():
+            self._validate_candidate(self.state, self.covariance, stage="filter_correct_input")
+            self._synchronize_covariance()
+            observed_array = np.asarray(observed, dtype=float).reshape(-1)
+            H = (np.asarray(self.measurement_jacobian(self.state)) if self.measurement_jacobian is not None
+                 else _forward_jacobian(self.measurement, self.state))
+            expected = np.asarray(self.measurement(self.state), dtype=float).reshape(-1)
+            require_finite(H, "measurement Jacobian", stage="filter_correct")
+            require_finite(expected, "expected measurement", stage="filter_correct")
+            if H.shape != (observed_array.size, self.state.size) or expected.size != observed_array.size:
+                raise ControllerInputValueError("Measurement has incompatible dimensions.")
+            noise_root = self._sqrt_measurement_noise
+            if noise_root.shape == (1, 1) and observed_array.size != 1:
+                noise_root = np.eye(observed_array.size) * noise_root[0, 0]
+                self._sqrt_measurement_noise = noise_root
+                self.measurement_noise = matmul(noise_root, noise_root.conj().T)
+            elif noise_root.shape[0] != observed_array.size:
+                raise ControllerInputValueError("MeasurementNoise has incompatible dimensions.",
+                                                reference_identifier="shared_tracking:KalmanFilter:invalidCovarianceDims")
+            innovation_root = _qr_factor(H, self._sqrt_covariance, noise_root)
+            innovation = observed_array - expected
+            require_finite(innovation, "measurement innovation", stage="filter_correct")
+            whitened = solve_triangular(innovation_root, innovation, lower=True, check_finite=False)
+            nis = float(np.dot(whitened, whitened))
+            require_finite(nis, "normalized innovation", stage="filter_correct")
+            # No statistical cut-off is invented here: a configured limit must
+            # come from the calibrated observation policy and its false-alarm budget.
+            if self.innovation_nis_limit is not None:
+                if not np.isfinite(self.innovation_nis_limit) or self.innovation_nis_limit <= 0:
+                    raise ValueError("Configured innovation limit must be finite and positive.")
+                if nis > self.innovation_nis_limit:
+                    raise NumericalRecoveryError("Innovation exceeds the configured normalized limit.",
+                                                 module="main", stage="filter_correct")
+            cross_covariance = matmul(matmul(self._sqrt_covariance, self._sqrt_covariance.T), H.T)
+            gain = solve_triangular(innovation_root.T,
+                                    solve_triangular(innovation_root, cross_covariance.T, lower=True, check_finite=False),
+                                    lower=False, check_finite=False).T
+            require_finite(gain, "Kalman gain", stage="filter_correct")
+            corrected = self.state + matmul(gain, innovation)
+            correction = matmul(-gain, H)
+            for index in range(self.state.size):
+                correction[index, index] += 1.0
+            corrected_root = _qr_factor(correction, self._sqrt_covariance, matmul(gain, noise_root))
+            corrected_covariance = matmul(corrected_root, corrected_root.T)
+            self._validate_candidate(corrected, corrected_covariance, stage="filter_correct")
+            self.state = corrected
+            self._sqrt_covariance = corrected_root
+            self.covariance = corrected_covariance
+            self._covariance_snapshot = corrected_covariance.copy()
+            self.last_innovation_nis = nis
+            innovation_covariance = matmul(innovation_root, innovation_root.T)
+            self._observe(
+                "posterior", state=self.state, covariance=self.covariance,
+                innovation=innovation, innovation_covariance=innovation_covariance,
+                normalized_innovation_squared=nis,
+            )
+            return self.state.copy()
 
     def to_dict(self) -> dict[str, Any]:
+        self._validate_candidate(self.state, self.covariance, stage="filter_checkpoint")
         self._synchronize_covariance()
         return {
             "state": self.state.tolist(),
@@ -267,17 +354,71 @@ class ExtendedKalmanFilter:
 def construct_EKF(
     state: np.ndarray, params: Mapping[str, Any], dt: float
 ) -> ExtendedKalmanFilter:
-    initial = np.asarray(state).reshape(-1)
-    captured_params = copy.deepcopy(params)
-    captured_dt = float(dt)
+    initial = np.asarray(state).reshape(4)
+    transition, measurement, jacobian, validator, forecast = _main_filter_functions(params, dt, calc_R(params))
     return ExtendedKalmanFilter(
-        transition=lambda value: state_transition_function(captured_params, value, captured_dt),
-        measurement=lambda value: measurement_function(captured_params, value),
+        transition=transition,
+        measurement=measurement,
         state=initial.copy(),
         process_noise=calc_Q(params, dt),
         measurement_noise=calc_R(params),
-        covariance=np.eye(initial.size),
+        covariance=np.eye(4),
+        measurement_jacobian=jacobian,
+        state_validator=validator,
+        forecast_validator=forecast,
+        enforce_measurement_resolution=True,
     )
+
+
+def _main_filter_functions(params: Mapping[str, Any], dt: float, noise: np.ndarray):
+    captured_params = copy.deepcopy(dict(params))
+    captured_dt = float(dt)
+    if not np.isfinite(captured_dt) or captured_dt <= 0:
+        raise ValueError("Main-filter interval must be finite and positive.")
+    captured_noise = np.asarray(noise).copy()
+
+    def validator(value: np.ndarray) -> None:
+        validate_model_state(value, stage="main_filter_state")
+        validate_state_resolution(value, captured_noise, captured_dt, stage="main_filter_state")
+
+    def forecast(value: np.ndarray) -> None:
+        predicted = state_transition_function(captured_params, value, captured_dt)
+        validate_state_resolution(predicted, captured_noise, 0.0, stage="main_filter_forecast")
+
+    return (
+        lambda value: state_transition_function(captured_params, value, captured_dt),
+        lambda value: measurement_function(captured_params, value),
+        lambda value: measurement_matrices(captured_params, value)[0],
+        validator,
+        forecast,
+    )
+
+
+def update_EKF_interval(filter_: ExtendedKalmanFilter, params: Mapping[str, Any], dt: float) -> None:
+    """Rebind the main prediction clock/Q without resetting its state or P.
+
+    Call under the controller's lock after the process-time admission policy.
+    The same entry point attaches main-filter guards after neutral restoration.
+    """
+    transition, measurement, jacobian, validator, forecast = _main_filter_functions(params, dt, filter_.measurement_noise)
+    noise = calc_Q(params, float(dt))
+    _validate_process_noise(noise)
+    noise_root = _chol_psd(noise)
+    validator(filter_.state)
+    validate_covariance(filter_.covariance, stage="main_filter_bind")
+    validate_covariance_resolution(filter_.covariance, filter_.measurement_noise, stage="main_filter_bind")
+    forecast(filter_.state)
+    with filter_._transaction():
+        filter_.transition = transition
+        filter_.measurement = measurement
+        filter_.measurement_jacobian = jacobian
+        filter_.state_validator = validator
+        filter_.forecast_validator = forecast
+        filter_._forecast_validated_state = filter_.state.copy()
+        filter_._forecast_validator_used = forecast
+        filter_.enforce_measurement_resolution = True
+        filter_.process_noise = noise
+        filter_._sqrt_process_noise = noise_root
 
 
 def smooth_EKF(
@@ -285,8 +426,9 @@ def smooth_EKF(
     params: Mapping[str, Any],
     measurement_state: np.ndarray,
 ) -> np.ndarray:
-    filter_.predict()
-    return filter_.correct(measurement_function(params, measurement_state))
+    with filter_._transaction():
+        filter_.predict()
+        return filter_.correct(measurement_function(params, measurement_state))
 
 
 def create_EKF_general(
@@ -344,12 +486,11 @@ def restore_EKF(
     covariance = np.asarray(state.get("covariance"), dtype=float)
     if vector.shape != filter_.state.shape or covariance.shape != filter_.covariance.shape:
         raise ValueError("EKF recovery state has an incompatible shape.")
-    # This restores the saved internal object fields, like MATLAB loadobj;
-    # it is not a new State-property constructor assignment. The checkpoint
-    # validator supplies the corresponding recorded computation provenance.
-    filter_.state = vector.copy()
-    root = state.get("sqrt_covariance")
-    filter_.restore_covariance(covariance, np.asarray(root, dtype=float) if root is not None else None)
+    with filter_._transaction():
+        filter_._validate_candidate(vector, covariance, stage="filter_restore")
+        filter_.state = vector.copy()
+        root = state.get("sqrt_covariance")
+        filter_.restore_covariance(covariance, np.asarray(root, dtype=float) if root is not None else None)
     return filter_
 
 
@@ -362,6 +503,7 @@ __all__ = [
     "measurement_function",
     "measurement_matrices",
     "restore_EKF",
+    "update_EKF_interval",
     "smooth_EKF",
     "smooth_EKF_general",
 ]

@@ -186,23 +186,54 @@ class DurableInfluxWriter:
         """Deliver one batch, for the worker and deterministic recovery tests."""
         with self._lock:
             rows = self.connection.execute(
-                "SELECT event_id,payload FROM telemetry_outbox WHERE delivered_at_ns IS NULL ORDER BY queued_at_ns LIMIT 100"
+                "SELECT event_id,payload FROM telemetry_outbox WHERE delivered_at_ns IS NULL "
+                "ORDER BY attempts,queued_at_ns LIMIT 100"
             ).fetchall()
-        for identifier, encoded in rows:
-            payload = json.loads(encoded)
+        delivered = False
+        outcomes = []
+        batch_delivered = False
+        batch_writer = getattr(writer, "write_tagged_batch", None)
+        if rows and callable(batch_writer):
             try:
+                batch_writer([json.loads(encoded) for _, encoded in rows])
+            except Exception:
+                # A rejected batch may contain one bad point. Retry separately
+                # so healthy records still progress and errors stay attributable.
+                pass
+            else:
+                outcomes = [(time.time_ns(), None, identifier) for identifier, _ in rows]
+                delivered = True
+                batch_delivered = True
+        for identifier, encoded in rows:
+            if batch_delivered:
+                break
+            try:
+                payload = json.loads(encoded)
                 writer.write_tagged_fields(payload["fields"], tags=payload["tags"],
                                            measurement=payload["measurement"], timestamp=payload["timestamp_ns"])
             except Exception as exc:
                 # Client errors may contain tokens and URLs; persist only type.
-                with self._lock, self.connection:
-                    self.connection.execute("UPDATE telemetry_outbox SET attempts=attempts+1,last_error=? WHERE event_id=?",
-                                            (type(exc).__name__, identifier))
-                return False
+                outcomes.append((None, type(exc).__name__, identifier))
+                # Retain this record for retry, but let other observations and
+                # experiments progress. Attempt ordering also prevents a full
+                # batch of bad records from permanently hiding later rows.
+                continue
+            outcomes.append((time.time_ns(), None, identifier))
+            delivered = True
+        # Small durable groups reduce fsyncs without holding the shared SQLite
+        # write lock for a whole HTTP batch on Windows storage. A crash before
+        # an acknowledgment commit only retries the same Influx points.
+        for offset in range(0, len(outcomes), 5):
             with self._lock, self.connection:
-                self.connection.execute("UPDATE telemetry_outbox SET delivered_at_ns=?,attempts=attempts+1,last_error=NULL WHERE event_id=?",
-                                        (time.time_ns(), identifier))
-        return bool(rows)
+                self.connection.executemany(
+                    "UPDATE telemetry_outbox SET delivered_at_ns=COALESCE(?,delivered_at_ns),"
+                    "attempts=attempts+1,last_error=? WHERE event_id=? AND delivered_at_ns IS NULL",
+                    outcomes[offset:offset + 5],
+                )
+            if offset + 5 < len(outcomes):
+                time.sleep(0.05)
+        # The worker backs off when nothing could be delivered.
+        return delivered
 
     def _worker(self) -> None:
         writer = None

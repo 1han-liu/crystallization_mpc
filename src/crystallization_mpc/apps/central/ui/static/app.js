@@ -29,6 +29,7 @@ const state = {
   latestOverlayKey: null,
   lastOverlayRefreshAt: 0,
   controllerStatus: null,
+  lastControllerStatus: null,
   processSource: null,
   processSourceReceivedAt: 0,
   seedActionInFlight: false,
@@ -36,9 +37,6 @@ const state = {
   pendingSeedEventId: null,
   seedActionMessage: "",
   seedActionError: false,
-  processRecoveryActionInFlight: false,
-  processRecoveryActionError: "",
-  processRecoveryActionKey: null,
   gsensorActivation: null,
   gsensorActivationInFlight: false,
   gsensorActivationCommand: null,
@@ -99,7 +97,6 @@ const startExperimentButton = document.querySelector("#start-experiment");
 const retrySelectionButton = document.querySelector("#retry-selection");
 const endExperimentButton = document.querySelector("#end-experiment");
 const experimentMessage = document.querySelector("#experiment-message");
-const confirmProcessRecoveryButton = document.querySelector("#confirm-process-recovery");
 const systemRefreshStatus = document.querySelector("#system-refresh-status");
 const gsensorLiveStatus = document.querySelector("#gsensor-live-status");
 const gsensorLiveFrame = document.querySelector("#gsensor-live-frame");
@@ -194,10 +191,8 @@ function renderMutationState() {
 
 function markSystemStatusUnavailable(message, label = "offline") {
   state.systemStatusFresh = false;
-  state.processSource = null;
   renderProcessSource();
   state.controllerStatus = null;
-  state.gsensorActivation = null;
   systemRefreshStatus.textContent = label;
   systemRefreshStatus.className = "status error";
   controllerLiveStatus.textContent = "unavailable";
@@ -248,53 +243,48 @@ function configureServiceLinks(links = {}) {
 function renderProcessSource() {
   const source = state.processSource;
   const elapsed = Math.max(0, (Date.now() - state.processSourceReceivedAt) / 1000);
-  const age = typeof source?.sample_age_s === "number" ? source.sample_age_s + elapsed : null;
-  const fresh = age !== null && age >= 0 && source.sample_max_age_s > 0
-    && age <= source.sample_max_age_s;
-  let kind = source?.status || "unavailable";
-  // A hanging HTTP request must not leave the last green card on screen.
-  if (kind === "ready" && (source.ready !== true || source.connected !== true || !fresh)) kind = "stale";
+  const kind = state.systemStatusFresh ? source?.status || "unavailable" : "unavailable";
   const ready = kind === "ready";
-  const showingRaw = kind === "invalid" && source.connected === true && fresh
-    && typeof source.raw_values?.c === "number";
-  const values = ready ? source.values : showingRaw ? source.raw_values : null;
   const labels = {
-    ready: "Receiving normally", waiting: "Waiting for data", invalid: "Invalid data",
-    stale: "Data expired", disconnected: "Disconnected", disabled: "Monitoring disabled",
-    unavailable: "Unconfirmed",
+    ready: "Values received", partial: "Some values missing", waiting: "Waiting for data",
+    invalid: "Field warnings", disconnected: "Disconnected", disabled: "Monitoring disabled",
+    unavailable: "Status unavailable",
   };
   const messages = {
-    ready: "OPC UA data is being received normally. All five values have Good quality and a fresh, complete collection.",
-    waiting: "Waiting for a complete OPC UA sample. Check that the device server and Telegraf are running.",
-    invalid: source?.error || "Incoming OPC UA data failed validation.",
-    stale: "OPC UA data is no longer fresh. Check the device server, Telegraf and communication link.",
-    disconnected: "The process telemetry connection is unavailable. Check RabbitMQ and Central.",
+    ready: "Showing the latest received value for each field. Fields update independently.",
+    partial: "Some fields have not supplied a value. Available fields are shown below.",
+    waiting: "No OPC UA values have arrived yet. Check the device server and Telegraf.",
+    invalid: source?.error || "Some fields have a warning. See the details beside each value.",
+    disconnected: "The telemetry connection is unavailable. Showing the last received observations.",
     disabled: "OPC UA source monitoring is disabled in Central configuration.",
-    unavailable: "OPC UA data status is unconfirmed. Waiting for a successful status refresh.",
+    unavailable: "Status refresh is unavailable. Any values below are the last received observations.",
   };
-  document.querySelector("#process-source-card").dataset.state = ready ? "ready" : kind;
+  document.querySelector("#process-source-card").dataset.state = kind;
   const badge = document.querySelector("#process-source-status");
-  badge.textContent = labels[kind] || "Unconfirmed";
-  badge.className = `status ${ready ? "running" : ["invalid", "stale", "disconnected"].includes(kind) ? "error" : "idle"}`;
-  let message = messages[kind] || messages.unavailable;
-  if (kind === "waiting" && source?.missing_fields?.length) {
-    message += ` Missing: ${source.missing_fields.join(", ")}.`;
-  }
-  if (showingRaw) message += " Showing raw readings. This sample cannot be used for control.";
-  document.querySelector("#process-source-message").textContent = message;
+  badge.textContent = labels[kind] || labels.unavailable;
+  badge.className = `status ${ready ? "running" : ["invalid", "disconnected"].includes(kind) ? "error" : "idle"}`;
+  document.querySelector("#process-source-message").textContent = messages[kind] || messages.unavailable;
   for (const name of ["T", "T_j", "c", "count_middle", "T_j_set"]) {
-    const value = values?.[name];
+    const field = source?.fields?.[name];
+    const value = field?.value;
     document.querySelector(`#process-source-${name}`).textContent = typeof value === "number" && Number.isFinite(value)
       ? `${value.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 })}${name.startsWith("T") ? " °C" : ""}` : "—";
+    const age = typeof field?.age_s === "number" ? field.age_s + elapsed : null;
+    const ageText = age === null ? "" : age < 0 ? ` · clock ahead ${(-age).toFixed(1)} s` : ` · ${age.toFixed(1)} s ago`;
+    const label = field?.timestamp_basis === "source" ? "Source" : field?.timestamp_basis === "gather" ? "Collected" : "Timestamp";
+    document.querySelector(`#process-source-${name}-updated`).textContent = !field?.received_at
+      ? "Not received"
+      : `${field.updated_at ? `${label}: ${formatExperimentTime(field.updated_at)}${ageText}` : "Measurement timestamp unavailable"}\nReceived: ${formatExperimentTime(field.received_at)}`;
+    const error = document.querySelector(`#process-source-${name}-error`);
+    error.textContent = field?.error || "";
+    error.hidden = !error.textContent;
   }
-  const collected = source?.collected_at ? formatExperimentTime(source.collected_at) : null;
-  const sampleLabel = showingRaw ? "Latest complete raw sample" : "Latest complete sample";
-  document.querySelector("#process-source-sample").textContent = collected
-    ? `${sampleLabel}: ${collected} · age ${Math.max(0, age ?? 0).toFixed(1)} s · freshness limit ${source.sample_max_age_s} s`
-    : "No complete sample received.";
+  document.querySelector("#process-source-sample").textContent = source?.last_received_at
+    ? `Latest telemetry received: ${formatExperimentTime(source.last_received_at)}. Values remain visible between updates.`
+    : "No telemetry received yet.";
   const controller = state.controllerStatus;
   const process = controller?.integrations?.process;
-  document.querySelector("#process-source-control").textContent = !source || !controller?.available || !process
+  document.querySelector("#process-source-control").textContent = !state.systemStatusFresh || !controller?.available || !process
     ? "Controller process mode is unconfirmed."
     : !process.enabled ? "Controller process input is disabled."
       : !process.write_enabled ? "Controller process input is enabled · read-only mode."
@@ -335,11 +325,17 @@ function controllerRunningForRun(runId) {
     && controller.active === true && controller.recovery?.status !== "error";
 }
 
+function observedControllerForRun() {
+  const controller = state.controllerStatus?.available === true
+    ? state.controllerStatus : state.lastControllerStatus;
+  return controller?.current_run_id === state.currentRunId ? controller : null;
+}
+
 function controllerWaitingForProcess(controller = state.controllerStatus) {
   return state.systemStatusFresh && controller?.available === true
     && controller.status === "running" && controller.active === true
     && !controller.error
-    && !["error", "persistence_error", "confirmation_required"].includes(controller.recovery?.status)
+    && !["error", "persistence_error"].includes(controller.recovery?.status)
     && controller.integrations?.process?.waiting_for_data === true;
 }
 
@@ -348,65 +344,31 @@ function controllerWaitingForGrowth(controller = state.controllerStatus) {
   return state.systemStatusFresh && controller?.available === true
     && controller.status === "running" && controller.active === true
     && !controller.error
-    && !["error", "persistence_error", "confirmation_required"].includes(controller.recovery?.status)
+    && !["error", "persistence_error"].includes(controller.recovery?.status)
     && growth?.source === "live_gsensor" && growth.requested_enabled === true
     && ["growth_data_timeout", "waiting_for_fresh_valid_sample"].includes(growth.growth_wait?.reason);
 }
 
 function processWaitMessage(controller = state.controllerStatus) {
   const process = controller?.integrations?.process || {};
-  const write = process.write_recovery || {};
-  if (write.pending === true) {
-    const detail = write.manual_confirmation_required === true
-      ? "An earlier device write has an unknown outcome. Verify the actual device state and that no old command can still execute, then confirm below."
-      : "Confirming the previous device command with Writer. No new device command will be sent while its outcome is unresolved.";
-    return `${detail} This experiment is retained. Control calculations and new device writes are paused.${state.processRecoveryActionError ? ` ${state.processRecoveryActionError}` : ""}`;
-  }
-  const concentration = process.last_invalid_state?.raw_c;
-  const detail = process.wait_reason === "negative_concentration"
-    ? ` Concentration is negative${typeof concentration === "number" && Number.isFinite(concentration)
-      ? ` (c = ${concentration.toPrecision(6)})` : ""}.` : "";
-  const reason = process.wait_reason === "process_transport_wait"
-    ? "Reconnecting to the process communication link."
-    : process.wait_reason === "process_data_timeout"
-    ? "Waiting for fresh process data. Communication timed out."
-    : `Waiting for valid process data.${detail}`;
   const reasons = [];
-  if (controllerWaitingForProcess(controller)) reasons.push(reason);
+  if (controllerWaitingForProcess(controller)) {
+    const missing = process.missing_fields?.length ? ` Missing: ${process.missing_fields.join(", ")}.` : "";
+    reasons.push(`Waiting for initial process data.${missing}`);
+  }
   if (controllerWaitingForGrowth(controller)) reasons.push("Waiting for fresh valid G data.");
-  return `${reasons.join(" ")} Control calculations and device writes are paused. This experiment is retained and will resume after communication and fresh valid measurements are confirmed.`;
-}
-
-function processWaitLabel(controller = state.controllerStatus) {
-  const process = controller?.integrations?.process || {};
-  if (process.write_recovery?.pending === true) return "Confirming previous command";
-  if (process.wait_reason === "process_transport_wait") return "Reconnecting";
-  return "Waiting for process data";
+  return `${reasons.join(" ")} The experiment remains active while waiting for data.`;
 }
 
 function renderProcessWaitStatus() {
   const current = currentExperiment();
   const processWaiting = controllerWaitingForProcess();
   const growthWaiting = controllerWaitingForGrowth();
-  const write = state.controllerStatus?.integrations?.process?.write_recovery || {};
-  const command = write.command || {};
-  const key = `${current?.run_id || ""}:${command.command_id || ""}`;
-  if (state.processRecoveryActionKey !== key) {
-    state.processRecoveryActionKey = key;
-    state.processRecoveryActionError = "";
-  }
-  const canConfirm = processWaiting && write.pending === true && write.manual_confirmation_required === true
-    && command.run_id === current?.run_id && typeof command.command_id === "string"
-    && controllerMatchesRecoveryIdentity(current) && current?.status !== "stopping";
-  confirmProcessRecoveryButton.hidden = !canConfirm;
-  confirmProcessRecoveryButton.disabled = !canConfirm || state.processRecoveryActionInFlight || state.experimentActionInFlight;
-  confirmProcessRecoveryButton.textContent = state.processRecoveryActionInFlight
-    ? "Sending confirmation…" : "Confirm device state and resume";
   if ((processWaiting || growthWaiting) && controllerRunningForRun(current?.run_id)
       && current.status !== "stopping" && !state.recoveryEndPending) {
     state.processWaitRunId = current.run_id;
     state.growthWaitRunId = growthWaiting ? current.run_id : null;
-    commandStatus.textContent = processWaiting ? processWaitLabel()
+    commandStatus.textContent = processWaiting ? "Waiting for process data"
       : "Waiting for G data";
     commandStatus.className = "status idle";
     setExperimentMessage(processWaitMessage());
@@ -421,47 +383,17 @@ function renderProcessWaitStatus() {
       commandStatus.className = "status success";
       setExperimentMessage(wasGrowthWaiting && state.controllerStatus.growth_input?.requested_enabled === false
         ? `Controller is running for ${displayNameForExperiment(current)}. GSensor is Off.`
-        : `Controller resumed for ${displayNameForExperiment(current)} after receiving fresh valid measurement data.`);
+        : `Controller is running for ${displayNameForExperiment(current)}. Required input data is available.`);
     }
   }
 }
 
-async function confirmProcessRecovery() {
-  if (confirmProcessRecoveryButton.disabled || confirmProcessRecoveryButton.hidden) return;
-  const runId = state.currentRunId;
-  const command = state.controllerStatus?.integrations?.process?.write_recovery?.command;
-  if (!command || command.run_id !== runId) return;
-  if (!window.confirm(
-    "Confirm only after checking the actual device state and ensuring that the earlier command cannot still execute. This will retain the current experiment and request recovery; no new setpoint is sent by this button.",
-  )) return;
-  state.processRecoveryActionInFlight = true;
-  state.processRecoveryActionError = "";
-  renderProcessWaitStatus();
-  try {
-    await fetchJson("/api/process/recovery/confirm", {
-      method: "POST", body: JSON.stringify({run_id: runId, command_id: command.command_id, confirmation: true}),
-    });
-    if (state.currentRunId === runId) {
-      setExperimentMessage("Confirmation sent. Waiting for Writer acknowledgement and a fresh measurement baseline before control resumes.");
-    }
-  } catch (error) {
-    if (state.currentRunId === runId) state.processRecoveryActionError = error.message;
-  } finally {
-    state.processRecoveryActionInFlight = false;
-    await loadSystemStatus().catch(() => {});
-    renderProcessWaitStatus();
-  }
-}
-
-function controllerRecoveryHeld() {
+function controllerHasUnendedRun() {
   const controller = state.controllerStatus;
   return state.systemStatusFresh && controller?.available === true
-    && (controller.status === "recovery_required"
-      || controller.recovery?.requires_confirmation === true
-      || controller.recovery?.status === "confirmation_required"
-      || (controller.status !== "running" && controller.status !== "stopped"
-        && Boolean(controller.current_run_id) && controller.stopped_at == null
-        && recoveryTimestamp(controller.started_at) !== null));
+    && controller.status !== "running" && controller.status !== "stopped"
+    && Boolean(controller.current_run_id) && controller.stopped_at == null
+    && recoveryTimestamp(controller.started_at) !== null;
 }
 
 function recoveryTimestamp(value) {
@@ -483,12 +415,11 @@ function controllerMatchesRecoveryIdentity(experiment) {
     && expected !== null && recoveryTimestamp(controller.started_at) === expected;
 }
 
-function controllerRecoveryHeldForRun(experiment) {
+function controllerHasUnendedRunForRun(experiment) {
   const controller = state.controllerStatus;
-  return controllerRecoveryHeld() && controller.active === false
-    && ((controller.status === "recovery_required" && controller.recovery?.requires_confirmation === true)
-      || (["error", "configured"].includes(controller.status) && controller.stopped_at == null
-        && controller.recovery?.status !== "error"))
+  return controllerHasUnendedRun() && controller.active === false
+    && ["error", "configured"].includes(controller.status) && controller.stopped_at == null
+    && controller.recovery?.status !== "error"
     && controllerMatchesRecoveryIdentity(experiment);
 }
 
@@ -496,8 +427,8 @@ function recoveryEndConfirmed(experiment) {
   const controller = state.controllerStatus;
   return state.systemStatusFresh && controller?.available === true
     && controllerMatchesRecoveryIdentity(experiment) && controller.status === "stopped"
-    && controller.active === false && controller.recovery?.requires_confirmation !== true
-    && !["confirmation_required", "error", "persistence_error"].includes(controller.recovery?.status);
+    && controller.active === false
+    && !["error", "persistence_error"].includes(controller.recovery?.status);
 }
 
 function recoveryEndMessage(experiment) {
@@ -521,29 +452,22 @@ function renderRecoveryEndStatus() {
         error: Boolean(failure) || !state.systemStatusFresh,
       });
     }
-  } else if (controllerRecoveryHeld()) {
-    const reasons = {controller_restart: "Controller restarted", growth_timeout: "G data timed out",
-      gsensor_error: "GSensor reported a terminal error"};
-    const reason = reasons[state.controllerStatus?.recovery?.hold_reason]
-      || (state.controllerStatus?.status === "error" ? "Controller stopped after a fault" : "Operator confirmation required");
-    setExperimentMessage(controllerRecoveryHeldForRun(currentExperiment())
-      ? `Controller safety hold: ${reason}. Use End Experiment to release this run; it will not resume automatically.`
-      : `Controller holds ${state.controllerStatus.current_run_id || "another experiment"}. Select that experiment and use End Experiment before starting a new run.`);
+  } else if (controllerHasUnendedRun()) {
+    setExperimentMessage(controllerHasUnendedRunForRun(currentExperiment())
+      ? "Controller is not running for this experiment. Use End Experiment to finish it."
+      : `Controller has an unfinished run ${state.controllerStatus.current_run_id || "for another experiment"}. Select that experiment and use End Experiment before starting a new run.`);
   }
 }
 
 function runtimeReady() {
   return runtimeRunActive() && currentExperiment()?.status !== "stopping"
     && controllerRunningForRun(state.currentRunId)
+    && !state.controllerStatus.status_snapshot_error
     && state.controllerStatus.runtime_controls?.supported
     && Boolean(state.controllerStatus.runtime_controls?.configuration);
 }
 
 function controllerFailureMessage(controller = state.controllerStatus) {
-  if (controller?.status === "recovery_required") {
-    return controller.recovery?.hold_detail || controller?.last_error
-      || "Controller safety hold requires End Experiment before a new run.";
-  }
   if (controller?.recovery?.status === "error") {
     return `Controller recovery failed: ${controller.recovery.error || "the saved state could not be restored."}`;
   }
@@ -711,9 +635,8 @@ function renderConfigurationDetails(configuration, live) {
     }
   });
   const panel = document.querySelector("#runtime-fitting");
-  const status = state.controllerStatus;
-  const adaptation = live && controllerRunningForRun(state.currentRunId)
-    ? status.adaptation : null;
+  const status = observedControllerForRun();
+  const adaptation = live ? status?.adaptation : null;
   if (!adaptation) {
     panel.textContent = "Fitting diagnostics unavailable. No confirmed live Controller data.";
     panel.classList.remove("error");
@@ -785,10 +708,10 @@ async function loadRuntimeHistory(older = false) {
 }
 
 function renderLiveConfiguration() {
-  const runtime = state.systemStatusFresh && state.controllerStatus?.available && state.controllerStatus?.current_run_id === state.currentRunId
-    ? state.controllerStatus?.runtime_controls : null;
+  const observed = observedControllerForRun();
+  const runtime = observed?.runtime_controls;
   const ready = runtimeReady();
-  const configuration = ready ? runtime?.configuration : null;
+  const configuration = runtime?.configuration;
   const displayedConfiguration = configuration || state.runConfiguration;
   runConfigurationControls.forEach((control) => { control.disabled = true; });
   adaptationEnableLabel.textContent = configuration ? "Adaptation" : "Adaptation at Start (unconfirmed)";
@@ -820,7 +743,9 @@ function renderLiveConfiguration() {
       : controller?.current_run_id && controller.current_run_id !== state.currentRunId
         ? `Controller belongs to another experiment (${controller.current_run_id}).`
         : "Controller has not confirmed running settings for this experiment.";
-    message += " Saved start settings are shown; they are not confirmed as active. Editing is locked.";
+    message += configuration
+      ? " Last received Controller settings are shown. Editing waits for a successful status refresh."
+      : " Saved start settings are shown; they are not confirmed as active. Editing is locked.";
   } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
     label = timedOut || request?.status === "timeout" ? "confirmation timeout" : "awaiting confirmation";
     message = `Request ${request?.command?.event_id || "…"}: waiting for the next control tick and a valid measurement to apply settings and refresh Controller. Retry uses the same event.`;
@@ -1552,7 +1477,7 @@ function setExperimentMessage(message, { error = false } = {}) {
 
 function renderControllerStartStatus() {
   if (!state.startSentRunId) return;
-  if (controllerRecoveryHeld() || state.recoveryEndPending) {
+  if (controllerHasUnendedRun() || state.recoveryEndPending) {
     commandStatus.textContent = "safety confirmation required";
     commandStatus.className = "status error";
     state.startSentRunId = null;
@@ -1720,9 +1645,6 @@ function renderControllerGrowthInput() {
       className = "status running";
       message = "Waiting for a fresh valid growth-rate measurement.";
     }
-    if (growthInput.control_hold_reason && !growthWaiting) {
-      message += " Growth-rate target control is waiting and the current jacket setpoint is being held.";
-    }
   }
 
   gsensorGrowthReadinessState.textContent = label;
@@ -1837,17 +1759,21 @@ function renderExperiments() {
     && state.lastRenderedExperimentStatus === "stopping"
     && status === "completed";
   const isTerminal = ["completed", "error"].includes(status);
-  const recoveryHeld = controllerRecoveryHeld();
+  const recoveryHeld = controllerHasUnendedRun();
   const recoveryEndWaiting = state.recoveryEndPending && !recoveryEndConfirmed(state.recoveryEndPending);
   const recoveryBlocksStart = recoveryHeld || recoveryEndWaiting;
   const canCreate = (!hasCurrent || isTerminal) && !recoveryBlocksStart;
   const controllerRunning = controllerRunningForRun(current?.run_id);
-  const canStart = ["created", "starting"].includes(status) && !controllerRunning && !recoveryBlocksStart;
+  const observed = observedControllerForRun();
+  const knownRunning = controllerRunning || (observed?.status === "running" && observed.active === true
+    && !["created", "completed", "error"].includes(status));
+  const canStart = ["created", "starting"].includes(status) && !knownRunning && !recoveryBlocksStart
+    && state.controllerStatus?.available === true;
   const selectionRetryRequired = status === "created"
     && state.selectionRetryRunId === current?.run_id;
   const canRetrySelection = status === "created" && (selectionRetryRequired
     || (state.gsensorStatusRunId !== current?.run_id && state.selectionSentRunId !== current?.run_id));
-  const canEnd = hasCurrent && (!isTerminal || controllerRecoveryHeldForRun(current));
+  const canEnd = hasCurrent && (!isTerminal || controllerHasUnendedRunForRun(current));
   const action = state.experimentActionName;
   const blocked = !state.systemStatusFresh || mutationInFlight();
   if (state.lastRenderedRunId !== current?.run_id) {
@@ -1859,7 +1785,7 @@ function renderExperiments() {
     state.historyCursor = null;
   }
 
-  const displayedStatus = status === "starting" && controllerRunning ? "running" : status;
+  const displayedStatus = status === "starting" && knownRunning ? "running" : status;
   experimentStatus.textContent = displayedStatus || "not selected";
   experimentStatus.className = `status ${displayedStatus || "idle"}`;
   experimentDisplayName.textContent = displayNameForExperiment(current);
@@ -1886,8 +1812,9 @@ function renderExperiments() {
   newExperimentButton.textContent = action === "create" ? "Creating…" : "Create Experiment";
   startExperimentButton.textContent = action === "start"
     ? "Starting…"
-    : controllerRunning ? "Controller Running"
-      : (status === "starting" ? "Retry Start" : "Start Experiment");
+    : knownRunning ? "Controller Running"
+      : (!state.systemStatusFresh || state.controllerStatus?.available !== true) ? "Checking Controller…"
+        : (status === "starting" ? "Retry Start" : "Start Experiment");
   endExperimentButton.textContent = action === "end"
     ? "Ending…"
     : (status === "stopping" ? "Retry End" : "End Experiment");
@@ -1928,6 +1855,7 @@ function renderSystemStatus(payload) {
     && gsensor.last_status?.run_id === current.run_id;
   const gsensorStatus = gsensorMatchesRun ? gsensor.last_status : {};
   state.controllerStatus = controller;
+  if (controller.available === true) state.lastControllerStatus = controller;
   state.processSource = payload.process_source || null;
   state.processSourceReceivedAt = Date.now();
   renderProcessSource();
@@ -1963,7 +1891,7 @@ function renderSystemStatus(payload) {
   const growthWaiting = controllerWaitingForGrowth(controller);
   const inputWaiting = processWaiting || growthWaiting;
   controllerLiveStatus.textContent = recoveryFailed ? "error"
-    : processWaiting ? processWaitLabel(controller)
+    : processWaiting ? "Waiting for process data"
       : growthWaiting ? "Waiting for G data" : controller.status || "unavailable";
   controllerLiveStatus.className = controller.available
     ? (recoveryFailed || controller.status === "error" ? "status error"
@@ -2194,7 +2122,7 @@ async function finishCurrentExperiment() {
   if (!current || endExperimentButton.disabled) {
     return;
   }
-  const recoveryEnd = controllerRecoveryHeldForRun(current);
+  const recoveryEnd = controllerHasUnendedRunForRun(current);
   const confirmed = window.confirm(
     recoveryEnd
       ? "End this interrupted Controller run? Wait for Controller to confirm stopped before creating a new experiment."
@@ -2798,7 +2726,6 @@ endExperimentButton.addEventListener("click", async () => {
   await finishCurrentExperiment();
 });
 
-confirmProcessRecoveryButton.addEventListener("click", confirmProcessRecovery);
 
 addSeedButton.addEventListener("click", async () => {
   await addSeed();

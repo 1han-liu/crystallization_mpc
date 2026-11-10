@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from ._ode45_ieee import ode45_final_ieee
+from .._recovery import validate_measurement, validate_model_state
 from .thermodynamics import calc_c_sat, calc_dc_sat_dT, calc_relative_sigma
 
 
@@ -79,12 +80,15 @@ def state_transition_function(
     rtol: float = ODE_RTOL,
     atol: float = ODE_ATOL,
 ) -> np.ndarray:
+    validate_model_state(x, stage="transition_initial_state")
     initial = np.asarray(x, dtype=float).reshape(4)
 
     def rhs(_time: float, state: np.ndarray) -> np.ndarray:
         return state_transition_ode(params, state, dt)[0]
 
-    return ode45_final_ieee(rhs, initial, dt, rtol=rtol, atol=atol)
+    result = ode45_final_ieee(rhs, initial, dt, rtol=rtol, atol=atol)
+    validate_model_state(result, stage="transition_final_state")
+    return result
 
 
 def state_transition_ode_T(params: Mapping[str, Any], T: float, T_j: float) -> float:
@@ -103,6 +107,8 @@ def state_transition_function_T(
     rtol: float = ODE_RTOL,
     atol: float = ODE_ATOL,
 ) -> float:
+    validate_measurement("T", T, stage="thermal_transition_initial")
+    validate_measurement("T_j", T_j, stage="thermal_transition_initial")
     result = ode45_final_ieee(
         lambda _time, state: np.array(
             [state_transition_ode_T(params, float(state[0]), float(T_j))]
@@ -112,7 +118,9 @@ def state_transition_function_T(
         rtol=rtol,
         atol=atol,
     )
-    return float(result[0])
+    value = float(result[0])
+    validate_measurement("T", value, stage="thermal_transition_final")
+    return value
 
 
 __all__ = [

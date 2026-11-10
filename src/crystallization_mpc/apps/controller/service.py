@@ -13,7 +13,6 @@ import numpy as np
 import os
 import threading
 import time
-from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -34,14 +33,10 @@ from crystallization_mpc.apps.controller.process import (
     ProcessAdapter,
     ControllerReadError,
     ProcessConnectionError,
-    ProcessMeasurementPending,
-    ProcessWritePending,
     ProcessState,
     ProcessWriteResult,
 )
 from crystallization_mpc.apps.controller.rabbit_process import RabbitProcessAdapter, RabbitProcessConfig
-from crystallization_mpc.apps.controller.opcua_reader import OpcUaReadClient
-from crystallization_mpc.apps.controller.process_io import ControllerProcessAdapter
 from crystallization_mpc.apps.controller.result import ControllerStepResult
 from crystallization_mpc.apps.controller.tick import ControllerTickInput, ControllerInputValueError
 from crystallization_mpc.apps.controller.telemetry import (
@@ -96,7 +91,6 @@ class ControllerState(str, Enum):
     IDLE = "idle"
     CONFIGURED = "configured"
     RUNNING = "running"
-    RECOVERY_REQUIRED = "recovery_required"
     STOPPED = "stopped"
     ERROR = "error"
 
@@ -115,7 +109,6 @@ class ControllerService(OnlineParametersMixin):
         measurement_writer: InfluxWriter | None = None,
         process_adapter: ProcessAdapter | None = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
-        wall_clock: Callable[[], float] = time.time,
         parameter_publisher: Any = None,
     ) -> None:
         self.settings = settings or ControllerSettings.from_env()
@@ -128,7 +121,6 @@ class ControllerService(OnlineParametersMixin):
         self._control_stop = threading.Event()
         self._control_wakeup = threading.Event()
         self._monotonic_clock = monotonic_clock
-        self._wall_clock = wall_clock
         self._lock = threading.RLock()
 
         self.state = ControllerState.IDLE
@@ -187,7 +179,6 @@ class ControllerService(OnlineParametersMixin):
         self.last_process_state: dict[str, Any] | None = None
         self.last_process_write: dict[str, Any] | None = None
         self.process_wait: dict[str, Any] | None = None
-        self.process_write_wait: dict[str, Any] | None = None
         self.process_wait_count = 0
         self.process_activation_pending = False
         self.activation_client_unassigned = False
@@ -223,10 +214,9 @@ class ControllerService(OnlineParametersMixin):
                 self.influx_initialization_error = str(exc)
                 self.last_influx_error = str(exc)
                 logger.warning("Could not initialize Controller InfluxDB writer: %s", exc)
-        writer_adapter = getattr(self.process_adapter, "writer", self.process_adapter)
-        if isinstance(writer_adapter, RabbitProcessAdapter):
-            writer_adapter.audit_writer = self.measurement_writer
-            writer_adapter.audit_required = False
+        if isinstance(self.process_adapter, RabbitProcessAdapter):
+            self.process_adapter.audit_writer = self.measurement_writer
+            self.process_adapter.audit_required = False
         self.seed_event_count = 0
         self.duplicate_seed_event_count = 0
         self.last_seed_event: dict[str, Any] | None = None
@@ -249,7 +239,6 @@ class ControllerService(OnlineParametersMixin):
         self.runtime_history_error: str | None = None
         self.recovery_status = "disabled"
         self.recovery_error: str | None = None
-        self.safety_hold: dict[str, Any] | None = None
         self._configured_parameter_sections: dict[str, Any] | None = None
         self._initialize_online_parameters(parameter_publisher)
         self.state_path = (
@@ -262,12 +251,12 @@ class ControllerService(OnlineParametersMixin):
         self._parameters_received = False
         self._modified_queue = []
         self.controller_active = self.controller_active_old = False
-        self._activation_wall_time = None
-        self._last_iteration_start = None
         self._refresh_receipt_event_id = None
         self.runtime_history = RuntimeHistory(system_path(self.settings.experiment_root, ".controller_runtime_history.json")) if self.state_path else None
         for entry in self.runtime_events.values():
             self._archive_runtime_event(entry["command"], entry["result"])
+        self._status_snapshot: dict[str, Any] = {}
+        self._publish_status_snapshot_locked()
 
     def _archive_runtime_event(self, command, result):
         if self.runtime_history is None:
@@ -281,43 +270,34 @@ class ControllerService(OnlineParametersMixin):
 
     def runtime_history_page(self, run_id: str, before: int | None = None,
                              after: int | None = None, limit: int = 50):
-        with self._lock:
-            # Replay in-memory outcomes after a temporary journal failure.
-            for entry in self.runtime_events.values():
-                self._archive_runtime_event(entry["command"], entry["result"])
-            page = self.runtime_history.page(run_id, before=before, after=after, limit=limit) if self.runtime_history else {"entries": [], "next_cursor": None}
-            return {**page, "error": self.runtime_history_error,
-                    "persistence_enabled": self.runtime_history is not None}
+        # RuntimeHistory owns its read/write lock. A read must not wait for a
+        # control cycle or rewrite historical outcomes as a side effect.
+        page = self.runtime_history.page(run_id, before=before, after=after, limit=limit) if self.runtime_history else {"entries": [], "next_cursor": None}
+        return {**page, "error": self.runtime_history_error,
+                "persistence_enabled": self.runtime_history is not None}
 
     def _build_process_adapter(self) -> ProcessAdapter:
         if not self.settings.process_enabled:
             return NoOpProcessAdapter()
-        config = RabbitProcessConfig(
-            rabbit_url=self.settings.rabbit_url,
-            exchange=self.settings.rabbit_exchange,
-            device_id=self.settings.process_device_id,
-            measurement_name=self.settings.process_measurement_name,
-            process_queue=self.settings.process_telemetry_queue,
-            result_queue=self.settings.process_result_queue,
-            sample_max_age_s=self.settings.process_sample_max_age_s,
-            startup_timeout_s=self.settings.process_startup_timeout_s,
-            command_ttl_s=self.settings.process_command_ttl_s,
-            write_timeout_s=self.settings.process_write_timeout_s,
-            node_ids=OpcUaNodeConfig(
-                namespace_index=self.settings.process_namespace_index,
-                T_j_set=self.settings.process_t_j_set_node,
-                T=self.settings.process_t_node,
-                T_j=self.settings.process_t_j_node,
-                c=self.settings.process_c_node,
-                count_middle=self.settings.process_count_middle_node,
-            ).node_ids(),
-            jacket_min_K=self.settings.process_jacket_min_K,
-            jacket_max_K=self.settings.process_jacket_max_K,
-            verify_tolerance_K=self.settings.process_verify_tolerance_K,
-        )
-        return ControllerProcessAdapter(
-            reader=OpcUaReadClient(self.settings.opcua_read, config.node_ids),
-            writer=RabbitProcessAdapter(config),
+        return RabbitProcessAdapter(
+            RabbitProcessConfig(
+                rabbit_url=self.settings.rabbit_url,
+                exchange=self.settings.rabbit_exchange,
+                device_id=self.settings.process_device_id,
+                measurement_name=self.settings.process_measurement_name,
+                process_queue=self.settings.process_telemetry_queue,
+                result_queue=self.settings.process_result_queue,
+                command_ttl_s=self.settings.process_command_ttl_s,
+                write_timeout_s=self.settings.process_write_timeout_s,
+                node_ids=OpcUaNodeConfig(
+                    namespace_index=self.settings.process_namespace_index,
+                    T_j_set=self.settings.process_t_j_set_node,
+                    T=self.settings.process_t_node,
+                    T_j=self.settings.process_t_j_node,
+                    c=self.settings.process_c_node,
+                    count_middle=self.settings.process_count_middle_node,
+                ).node_ids(),
+            )
         )
 
     def _state_document_locked(self) -> dict[str, Any]:
@@ -328,7 +308,6 @@ class ControllerService(OnlineParametersMixin):
             "schema_version": 2,
             "updated_at": utc_ts(),
             "state": self.state.value,
-            "safety_hold": copy.deepcopy(self.safety_hold),
             "parameters": copy.deepcopy(self.parameters),
             "parameter_sections": copy.deepcopy(self._configured_parameter_sections),
             "run_parameters": self._online_parameter_document(),
@@ -427,7 +406,6 @@ class ControllerService(OnlineParametersMixin):
                 "last_state": copy.deepcopy(self.last_process_state),
                 "last_write": copy.deepcopy(self.last_process_write),
                 "waiting": copy.deepcopy(self.process_wait),
-                "write_wait": copy.deepcopy(self.process_write_wait),
                 "wait_count": self.process_wait_count,
                 "activation_pending": self.process_activation_pending,
                 "activation_client_unassigned": self.activation_client_unassigned,
@@ -441,6 +419,10 @@ class ControllerService(OnlineParametersMixin):
     def _try_persist_state_locked(self):
         # Observation only. Failure cannot revoke assignments, require restart,
         # clear filters, or prevent the next source iteration.
+        if self.runtime_history_error:
+            for entry in self.runtime_events.values():
+                self._archive_runtime_event(entry["command"], entry["result"])
+        self._publish_status_snapshot_locked()
         if self.state_path is None:
             return True
         temporary = None
@@ -460,6 +442,7 @@ class ControllerService(OnlineParametersMixin):
             if temporary is not None and temporary.exists():
                 try: temporary.unlink()
                 except OSError: pass
+            self._publish_status_snapshot_locked()
 
 
     def start(self, *, scheduler_enabled: bool = True, consumer_enabled: bool = True) -> None:
@@ -485,6 +468,7 @@ class ControllerService(OnlineParametersMixin):
                 daemon=True,
             )
             self._consumer_thread.start()
+            self._publish_status_snapshot_locked()
 
     def stop(self) -> None:
         self._consumer_stop.set()
@@ -563,28 +547,27 @@ class ControllerService(OnlineParametersMixin):
                     self.consumer_status = "reconnecting"
                     if self.recovery_status != "error":
                         self.last_error = f"RabbitMQ consumer error: {exc}"
+                    self._publish_status_snapshot_locked()
                 logger.exception("Controller RabbitMQ consumer stopped; retrying.")
                 self._consumer_stop.wait(5)
 
     def _consumer_ready(self) -> None:
         with self._lock:
             self.consumer_status = "consuming"
+            self._publish_status_snapshot_locked()
 
     def on_message(self, message: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self.received_message_count += 1
             self.last_message = copy.deepcopy(message)
-
-        try:
-            result = self._dispatch(message)
-        except Exception as exc:
-            result = {"accepted": False, "reason": str(exc)}
-            with self._lock:
+            try:
+                result = self._dispatch(message)
+            except Exception as exc:
+                result = {"accepted": False, "reason": str(exc)}
                 self.rejected_message_count += 1
                 self.last_error = str(exc)
-            logger.warning("Controller rejected message: %s", exc)
-        else:
-            with self._lock:
+                logger.warning("Controller rejected message: %s", exc)
+            else:
                 if result.get("accepted"):
                     self.accepted_message_count += 1
                     self.last_error = None
@@ -592,7 +575,6 @@ class ControllerService(OnlineParametersMixin):
                     self.rejected_message_count += 1
                     self.last_error = result.get("reason")
 
-        with self._lock:
             if self.recovery_status == "error":
                 # A later bus message must not hide the reason recovery failed
                 # or make an incompatible checkpoint look ready to run.
@@ -769,7 +751,7 @@ class ControllerService(OnlineParametersMixin):
             # Source stop toggles activation; it does not destroy the workspace.
             self._modified_queue.clear()
             self.runtime_pending = None
-            self.process_wait = self.process_write_wait = None
+            self.process_wait = None
             self._try_persist_state_locked()
             try:
                 self._mark_archive_finalized(command.run_id)
@@ -931,19 +913,11 @@ class ControllerService(OnlineParametersMixin):
             raise ControllerReadError('No G message was delivered; this is not an observed OPC UA timeout.',stage='growth_read')
         return copy.deepcopy(self.last_sample)
 
-
-    def confirm_process_recovery(self, payload):
-        return {'accepted':False,'reason':'Controller has no cross-cycle write-confirmation state.'}
-
-
     def _control_tick_once(self, *, now=None):
         with self._lock:
-            # Retired checkpoint/status field; it never requests initialization.
-            self.process_activation_pending = False
             if not self._parameters_received:
                 return {'executed':False,'reason':'initial_parameter_phase'}
             now = self._monotonic_clock() if now is None else now
-            self._last_iteration_start = now
             stage, tick = 'receive_modified', None
             kernel = getattr(self.adapter,'controller',None)
             try:
@@ -964,7 +938,13 @@ class ControllerService(OnlineParametersMixin):
                         self.adapter.stop()
                 else:
                     source_if(source_not(self.controller_active))
+                    if source_if(self.controller_active) and self.process_activation_pending:
+                        self._complete_activation()
                 self._observe_controller_state()
+                self._publish_status_snapshot_locked()
+                if (not source_if(self.controller_active == 1)
+                        and self.initialization_status["state"] == "stopped"):
+                    return {'executed': False, 'reason': 'controller_inactive'}
                 stage = 'refresh'
                 self.adapter.prepare_iteration()
                 self._sync_workspace()
@@ -980,23 +960,17 @@ class ControllerService(OnlineParametersMixin):
                     return {'executed':False,'reason':'controller_inactive'}
                 dt = self._get_dt()
                 mode = self.parameters.get('run_type')
-                elapsed = (self._wall_clock()-self._activation_wall_time if mode=='experiment'
-                           and self._activation_wall_time is not None else self._run_elapsed_s+dt)
+                elapsed = (self._monotonic_clock()-self._run_started_monotonic if mode=='experiment'
+                           and self._run_started_monotonic is not None else self._run_elapsed_s+dt)
                 stage = 'process_read'
-                reader = None
                 state = None
                 if mode == 'experiment':
-                    reader = getattr(self.process_adapter,'read_process_field',None)
-                    if not callable(reader):
-                        # Keep allocation/time before the legacy aggregate call.
-                        def reader(name):
-                            nonlocal state
-                            if state is None: state = self.process_adapter.read_state()
-                            value = getattr(state,name)
-                            return value-self.parameters['C2K'] if name in ('T','T_j') else value
-                tick = ControllerTickInput(self.control_tick_count+1,dt,elapsed,
-                    process_reader=reader,
+                    state = self.process_adapter.read_state()
+                    self.last_process_state = state.to_dict()
+                    self.process_wait = None
+                tick = ControllerTickInput(self.control_tick_count+1,dt,elapsed,process_state=state,
                     growth_reader=self._read_growth_sample_locked if self._uses_live_growth_locked() else None)
+                stage = 'calculation'
                 output = self.adapter.step(tick)
                 self._sync_workspace()
                 if output is None:
@@ -1009,6 +983,9 @@ class ControllerService(OnlineParametersMixin):
                     result = {'output_generated':True,'influxdb_written':False,'observation_error':str(exc)}
                 if mode == 'experiment':
                     stage = 'process_write'
+                    if not self.settings.process_write_enabled:
+                        return {'executed':True,'tick_seq':self.control_tick_count,**result,
+                                'process_write_attempted':False,'process_write_outcome':'not_attempted'}
                     try:
                         self.process_adapter.set_command_context(self.current_run_id,self.started_at,tick.tick_seq)
                         written = self.process_adapter.write_jacket_setpoint(output.T_j_set)
@@ -1021,6 +998,13 @@ class ControllerService(OnlineParametersMixin):
                 return {'executed':True,'tick_seq':self.control_tick_count,**result}
             except Exception as exc:
                 self._sync_workspace()
+                if isinstance(exc, ProcessConnectionError) and stage in ('activation', 'process_read'):
+                    waiting_since = (self.process_wait or {}).get("waiting_since", utc_ts())
+                    self.process_wait = {"reason": "initial_process_data", "detail": str(exc),
+                                         "waiting_since": waiting_since}
+                    self._observe_controller_state()
+                    return {"executed": False, "reason": "waiting_process_data",
+                            "process_write_attempted": False}
                 if stage=='activation':
                     self.adapter.record_activation_read_failure(exc)
                 self._observe_controller_state()
@@ -1028,10 +1012,8 @@ class ControllerService(OnlineParametersMixin):
                 return {'executed':False,'reason':'source_exception','stage':getattr(exc,'stage',stage),
                         'tick_seq':self.control_tick_count,'output_generated':False,'process_write_attempted':False}
             finally:
-                self.process_wait = self.process_write_wait = None
                 self._next_tick_monotonic = now + self._interval()
                 self._try_persist_state_locked()
-
 
     def _record_write_outcome_locked(
         self, tick: ControllerTickInput, *, outcome: str, attempted: bool,
@@ -1246,22 +1228,17 @@ class ControllerService(OnlineParametersMixin):
         process = integrations["process"]
         process.update(copy.deepcopy(dict(self.process_adapter.status())))
         waiting = self.state == ControllerState.RUNNING and (
-            self.process_wait is not None or self.process_write_wait is not None
+            self.process_wait is not None
             or process.get("waiting_for_data") is True
         )
         wait_metadata = self.process_wait or process.get("last_invalid_state") or {}
         process.update(
             {
                 "enabled": self.settings.process_enabled,
-                "write_enabled": self.settings.process_write_enabled,
-                "shadow_mode": (
-                    self.settings.process_enabled
-                    and not self.settings.process_write_enabled
-                ),
                 "configured": bool(self.settings.rabbit_url and self.settings.rabbit_exchange),
                 "transport": "rabbitmq",
-                "write_enabled": self.parameters.get("run_type") == "experiment",
-                "shadow_mode": False,
+                "write_enabled": self.parameters.get("run_type") == "experiment" and self.settings.process_write_enabled,
+                "shadow_mode": self.parameters.get("run_type") == "experiment" and not self.settings.process_write_enabled,
                 "service_error_count": self.process_error_count,
                 "service_last_error": self.last_process_error,
                 "waiting_for_data": waiting,
@@ -1272,7 +1249,6 @@ class ControllerService(OnlineParametersMixin):
                 "activation_pending": self.process_activation_pending,
                 "activation_client_unassigned": self.activation_client_unassigned,
                 "initialization": copy.deepcopy(self.initialization_status),
-                "write_recovery": copy.deepcopy(self.process_write_wait),
             }
         )
         influx = integrations["influxdb"]
@@ -1298,6 +1274,32 @@ class ControllerService(OnlineParametersMixin):
         return integrations
 
     def status(self) -> dict[str, Any]:
+        """Read the last complete snapshot without acquiring the control lock."""
+        return copy.deepcopy(self._status_snapshot)
+
+    def _publish_status_snapshot_locked(self) -> None:
+        """Replace the whole observation at a serialized command/tick boundary."""
+        try:
+            snapshot = self._status_locked()
+        except Exception as exc:
+            # Optional diagnostics cannot hide a real Start/End transition or
+            # interrupt calculation. Never carry details across run identities.
+            recovery_failed = self.recovery_status == "error"
+            previous = self._status_snapshot
+            same_run = (previous.get("current_run_id") == self.current_run_id
+                        and previous.get("started_at") == self.started_at)
+            snapshot = {**(previous if same_run else {}),
+                        "role": ROLE, "status": ControllerState.ERROR.value if recovery_failed else self.state.value,
+                        "active": self.state == ControllerState.RUNNING and not recovery_failed,
+                        "current_run_id": self.current_run_id,
+                        "started_at": self.started_at, "stopped_at": self.stopped_at,
+                        "last_error": self.last_error,
+                        "status_snapshot_error": f"Status details unavailable: {type(exc).__name__}"}
+            logger.warning("Controller status details unavailable (%s)", type(exc).__name__)
+        snapshot["status_updated_at"] = utc_ts()
+        self._status_snapshot = snapshot
+
+    def _status_locked(self) -> dict[str, Any]:
         with self._lock:
             recovery_failed = self.recovery_status == "error"
             thread_alive = bool(
@@ -1313,9 +1315,6 @@ class ControllerService(OnlineParametersMixin):
             )
             # G availability is diagnostic. It no longer installs a persistent
             # pre-control gate; the post-control read may abort that iteration.
-            control_hold_reason = None
-            if self._parameter_confirmation_holds_control():
-                control_hold_reason = "parameter_confirmation"
             adaptation_fitting, adaptation_capture_error = self._adaptation_snapshot_locked()
             return {
                 "role": ROLE,
@@ -1354,7 +1353,6 @@ class ControllerService(OnlineParametersMixin):
                     "source": "live_gsensor" if self._uses_live_growth_locked() else "simulated",
                     "available": growth_available,
                     "reason": growth_reason,
-                    "control_hold_reason": control_hold_reason,
                     "requested_enabled": self.gsensor_desired_enabled,
                     "enabled": self.gsensor_enabled,
                     "measurement_ready": self.gsensor_measurement_ready,
@@ -1443,11 +1441,6 @@ class ControllerService(OnlineParametersMixin):
                 "recovery": {
                     "status": self.recovery_status,
                     "error": self.recovery_error,
-                    "requires_confirmation": self.state == ControllerState.RECOVERY_REQUIRED,
-                    "requires_new_run": self.state == ControllerState.RECOVERY_REQUIRED,
-                    "hold_reason": (self.safety_hold or {}).get("reason"),
-                    "hold_detail": (self.safety_hold or {}).get("detail"),
-                    "hold_occurred_at": (self.safety_hold or {}).get("occurred_at"),
                     "state_file": str(self.state_path) if self.state_path else None,
                 },
                 "control_output_enabled": self.last_control_output is not None,
@@ -1610,63 +1603,58 @@ class ControllerService(OnlineParametersMixin):
     def request_refresh(self, event_id=None):
         return self.submit_operator_map({'controller_refresh_request': True}, event_id=event_id)
 
-
     def _activate(self):
-        # check_component_active has already consumed the activation edge.
-        # initialize_controller is executed once; failure leaves its actual
-        # assignment prefix and does not schedule a complete initialization.
-        self.process_activation_pending = False
+        # The run is started exactly once. A failed initial read is retried by
+        # _complete_activation without clearing history or restarting its clock.
+        self.process_activation_pending = True
         self.initialization_status = {
-            "state": "pending", "attempts": 1, "stage": "start",
+            "state": "pending", "attempts": 0, "stage": "start",
             "last_error": None, "completed_at": None,
         }
-        try:
-            self.adapter.start()
-            self._run_started_monotonic = self._monotonic_clock()
-            self._activation_wall_time = self._wall_clock()
-            self._run_elapsed_s = 0.0
-            self.control_tick_count = 0
-            self._initialize_activation()
-        except Exception as exc:
-            self.initialization_status.update(state="failed", last_error=str(exc))
-            raise
-        self.initialization_status.update(
-            state="completed", stage=None, last_error=None, completed_at=utc_ts(),
-        )
-
+        self.adapter.start()
+        self._run_started_monotonic = self._monotonic_clock()
+        self._run_elapsed_s = 0.0
+        self.control_tick_count = 0
+        self._complete_activation()
 
     def _cancel_initialization(self):
-        # Compatibility observation only. The source does not clear a refresh
-        # request on stop: only a completed refresh clears that request.
+        if not self.process_activation_pending:
+            return
+        # A failed constructor may have left the startup refresh flag set.
+        # Stop cancels that unfinished attempt rather than rebuilding while
+        # inactive or applying its refresh receipt during a future run.
+        self.adapter.apply_modified({'controller_refresh_request': False})
         self.process_activation_pending = False
+        self._refresh_receipt_event_id = None
         self.initialization_status.update(state="stopped", stage=None)
 
-
-    def _initialize_activation(self):
-        """Execute the source initialization script on the activation edge."""
-        if self.parameters.get('run_type') == 'experiment':
-            self.initialization_status["stage"] = "connect"
-            self.process_adapter.connect()
-            reader = getattr(self.process_adapter, 'read_initial_field', None)
-            if callable(reader):
-                for name in ('T','T_j','T_j_set','c','count_middle'):
-                    self.initialization_status["stage"] = f"read_initial_{name}"
-                    self.adapter.assign_initial_scalar(name, reader(name), raw_units=True)
-            else:
-                # Legacy third-party adapters expose only one snapshot.
+    def _complete_activation(self):
+        """Retry unfinished initialization in the same active experiment."""
+        if not self.process_activation_pending:
+            return
+        self.initialization_status["attempts"] += 1
+        try:
+            if self.parameters.get('run_type') == 'experiment':
+                self.initialization_status["stage"] = "connect"
+                self.process_adapter.connect()
                 self.initialization_status["stage"] = "read_initial_state"
                 state = self.process_adapter.read_state()
                 for name in ('T','T_j','T_j_set','c','count_middle'):
-                    self.adapter.assign_initial_scalar(name, getattr(state,name), raw_units=False)
+                    self.adapter.assign_initial_scalar(name, getattr(state, name), raw_units=False)
                 self.last_process_state = state.to_dict()
-        self.initialization_status["stage"] = "seed_template"
-        self.adapter.complete_initialization()
-        # The caller's common refresh block follows initialize_controller.
-        # A failed refresh keeps this flag set and retries only the refresh,
-        # without re-reading the initial values or repeating seed generation.
-        self.initialization_status["stage"] = "refresh_request"
-        self.adapter.request_refresh()
-
+                self.process_wait = None
+            self.initialization_status["stage"] = "seed_template"
+            self.adapter.complete_initialization()
+            self.initialization_status["stage"] = "filter_initialization"
+            self.adapter.request_refresh()
+            self.adapter.prepare_iteration()
+        except Exception as exc:
+            self.initialization_status.update(state="pending", last_error=str(exc))
+            raise
+        self.process_activation_pending = False
+        self.initialization_status.update(
+            state="completed", stage=None, last_error=None, completed_at=utc_ts(),
+        )
 
     def _observe_controller_state(self):
         # HTTP status has no counterpart in the source statement sequence.
@@ -1719,14 +1707,6 @@ def _timestamp_utc(value: Any, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include a timezone.")
     return parsed.astimezone(timezone.utc)
-
-
-def _utc_timestamp(epoch_seconds: float) -> str:
-    return (
-        datetime.fromtimestamp(float(epoch_seconds), tz=timezone.utc)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
 
 
 __all__ = [

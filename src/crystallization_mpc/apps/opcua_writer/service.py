@@ -13,8 +13,7 @@ from crystallization_mpc.apps.controller.process import ProcessSafetyError
 from crystallization_mpc.infra.rabbitmq.connection import connect
 
 from .commands import (
-    COMMAND_ROUTE, RESULT_ROUTE, CONFIRM_COMMAND, STATUS_COMMAND,
-    RecoveryQuery, WriteCommand, result_envelope,
+    COMMAND_ROUTE, RESULT_ROUTE, WriteCommand, result_envelope,
 )
 from .config import WriterSettings
 from .device import SetpointDevice
@@ -43,8 +42,6 @@ class CommandExecutor:
             log.warning("Recovered %d interrupted commands as unknown; no automatic replay", self.journal.recovered_count)
 
     def execute(self, message: Mapping[str, Any]) -> dict[str, Any]:
-        if message.get("name") in {STATUS_COMMAND, CONFIRM_COMMAND}:
-            return self._recover(message)
         try:
             command = WriteCommand.from_envelope(message)
         except (ValueError, TypeError, ProcessSafetyError) as exc:
@@ -58,10 +55,7 @@ class CommandExecutor:
                 "status": "failed",
                 "error": f"Invalid command: {exc}",
                 "write_result": None,
-                "failure_kind": "validation",
-                "execution_complete": True,
-                "manual_confirmation_required": False,
-                "recoverable": False,
+                "write_attempted": False,
             }
             self.journal.audit_rejection(result)
             return self._record_log(result)
@@ -78,74 +72,36 @@ class CommandExecutor:
         # Reserve first even for a rejection: duplicates must retain their outcome.
         previous = self.journal.reserve(command, rejection=rejection)
         if previous is not None:
-            return self._record_log(self.journal._recovery_result(previous))
+            return self._record_log(previous)
 
         try:
             self.device.connect()
         except Exception as exc:
             result = command.result("failed", f"OPC UA connection failed before write: {self._error_text(exc)}")
-            result["failure_kind"] = "validation" if _definite_failure(exc) else "communication"
+            result["write_attempted"] = False
         else:
             if command.expires_at <= self.now():
                 result = command.result("failed", "Command expired while connecting; no write attempted.")
-                result["failure_kind"] = "communication"
+                result["write_attempted"] = False
             else:
                 try:
                     write_result = self.device.write_jacket_setpoint(command.setpoint_K)
                 except ProcessSafetyError as exc:
                     result = command.result("failed", f"OPC UA write/readback validation failed: {self._error_text(exc)}")
-                    result["failure_kind"] = "validation"
                 except Exception as exc:
                     if _definite_failure(exc):
                         result = command.result("failed", f"OPC UA rejected write/readback: {self._error_text(exc)}")
-                        result["failure_kind"] = "validation"
                     else:
                         result = command.result(
                             "unknown",
                             f"Connection or execution failed after write was attempted; outcome unknown: {self._error_text(exc)}",
                         )
-                        result["failure_kind"] = "communication"
                 else:
                     result = command.result("success", write_result=write_result.to_dict())
+                result["write_attempted"] = True
         # If this commit fails we must not ACK. The durable executing state will
         # become unknown on restart instead of repeating a potentially applied write.
-        result = self.journal._recovery_result(result)
         self.journal.finish(command.command_id, result)
-        return self._record_log(result)
-
-    def _recover(self, message: Mapping[str, Any]) -> dict[str, Any]:
-        """Serialize recovery with writes, without connecting to or writing the device."""
-        try:
-            query = RecoveryQuery.from_envelope(message)
-            if not self.settings.process.jacket_min_K <= query.command.setpoint_K <= self.settings.process.jacket_max_K:
-                raise ProcessSafetyError("Original T_j_set is outside the configured safe range.")
-            if query.command.run_started_at > self.now() + timedelta(seconds=5):
-                raise ProcessSafetyError("Original experiment start timestamp is in the future.")
-        except (ValueError, TypeError, ProcessSafetyError) as exc:
-            raw = message.get("payload", {})
-            raw = raw if isinstance(raw, Mapping) else {}
-            result = {key: raw.get(key) for key in ("command_id", "run_id", "run_started_at", "query_id")}
-            result.update(tick_seq=raw.get("tick_seq") if type(raw.get("tick_seq")) is int else 0,
-                          status="failed", error=f"Invalid recovery command: {exc}", write_result=None,
-                          failure_kind="validation", execution_complete=True,
-                          manual_confirmation_required=False, recoverable=False)
-            if type(raw.get("recovery_generation")) is int and raw["recovery_generation"] >= 0:
-                result["recovery_generation"] = raw["recovery_generation"]
-            self.journal.audit_rejection(result)
-            return self._record_log(result)
-
-        if query.confirm:
-            result = self.journal.confirm_unknown(query.command, {
-                "query_id": query.query_id, "operator_confirmed": True,
-                "confirmed_at": self.now().isoformat(),
-                # Controller must read a post-confirmation complete process
-                # baseline before it is permitted to calculate or write again.
-                "requires_fresh_process_baseline": True,
-            })
-        else:
-            result = self.journal.recovery_status(query.command)
-        result = query.result(result)
-        self.journal.audit_recovery(result, query.query_id)
         return self._record_log(result)
 
     def _error_text(self, error: Exception) -> str:
@@ -228,8 +184,7 @@ class WriterService:
         except (ValueError, UnicodeDecodeError):
             message = {}
         result = self.executor.execute(message)
-        recovery = message.get("name") in {STATUS_COMMAND, CONFIRM_COMMAND}
-        envelope = result_envelope(result, recovery=recovery)
+        envelope = result_envelope(result)
         confirmed = channel.basic_publish(
             exchange=self.settings.rabbit_exchange,
             routing_key=RESULT_ROUTE,
@@ -237,7 +192,7 @@ class WriterService:
             properties=pika.BasicProperties(
                 content_type="application/json",
                 delivery_mode=2,
-                correlation_id=result.get("query_id") if recovery else result.get("command_id"),
+                correlation_id=result.get("command_id"),
             ),
             mandatory=True,
         )

@@ -66,9 +66,6 @@ class OnlineParametersMixin:
                 'pending': copy.deepcopy(self.run_parameter_pending),
                 'last_result': copy.deepcopy(self.run_parameter_last_result)}
 
-    def _parameter_confirmation_holds_control(self):
-        return False
-
     def _parameter_tick_patch(self):
         return None
 

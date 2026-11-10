@@ -1,8 +1,4 @@
-"""Read-only, run-independent observation of the Telegraf process stream.
-
-The exclusive queue receives a copy of telemetry, never consumes Controller's
-queue, and has no equipment-command or write-result binding.
-"""
+"""Read-only observation of each field in Central's own telemetry subscription."""
 from __future__ import annotations
 
 import json
@@ -21,9 +17,6 @@ from crystallization_mpc.apps.controller.rabbit_process import (
 )
 
 
-NEGATIVE_CONCENTRATION = "Process value is outside its valid range: c."
-
-
 class ProcessSourceMonitor:
     def __init__(self, config: RabbitProcessConfig, *, enabled=True,
                  clock_ns=time.time_ns, connection_factory=None):
@@ -35,15 +28,10 @@ class ProcessSourceMonitor:
         self._stop = threading.Event()
         self._thread = None
         self._connected = False
-        self._epoch_ns = 0
-        self._rounds = {}
-        self._invalid_rounds = set()
-        self._sample = None
-        self._sample_ns = 0
-        self._newest_ns = 0
-        self._problem_ns = 0
-        self._problem = None
         self._connection_error = None
+        self._message_error = None
+        self._fields = {}
+        self._last_received_ns = None
 
     @classmethod
     def from_env(cls, rabbit_url, exchange):
@@ -57,7 +45,6 @@ class ProcessSourceMonitor:
             rabbit_url=rabbit_url, exchange=exchange, node_ids=nodes.node_ids(),
             device_id=os.getenv("PROCESS_DEVICE_ID", "crystallizer"),
             measurement_name=os.getenv("PROCESS_MEASUREMENT_NAME", "crystallizer_raw"),
-            sample_max_age_s=float(os.getenv("PROCESS_SAMPLE_MAX_AGE_S", "5")),
         ), enabled=os.getenv("CENTRAL_PROCESS_MONITOR_ENABLED", "true").lower() == "true")
 
     @staticmethod
@@ -86,14 +73,6 @@ class ProcessSourceMonitor:
         with self._lock:
             self._connected = connected
             self._connection_error = error
-            if connected:
-                # Reconnection requires a new collection, not a cached sample.
-                self._epoch_ns = self._clock_ns()
-                self._rounds.clear()
-                self._invalid_rounds.clear()
-                self._sample = None
-                self._sample_ns = self._newest_ns = self._problem_ns = 0
-                self._problem = None
 
     def _run(self):
         while not self._stop.is_set():
@@ -103,9 +82,7 @@ class ProcessSourceMonitor:
                 channel = connection.channel()
                 channel.exchange_declare(exchange=self.config.exchange, exchange_type="topic", durable=True)
                 declared = channel.queue_declare(
-                    queue="", exclusive=True, auto_delete=True,
-                    arguments={"x-message-ttl": max(1, int(self.config.sample_max_age_s * 1000)),
-                               "x-max-length": 1000},
+                    queue="", exclusive=True, auto_delete=True, arguments={"x-max-length": 1000},
                 )
                 channel.queue_bind(exchange=self.config.exchange, queue=declared.method.queue,
                                    routing_key=TELEMETRY_ROUTE)
@@ -115,7 +92,7 @@ class ProcessSourceMonitor:
                 while not self._stop.is_set() and connection.is_open:
                     connection.process_data_events(time_limit=0.25)
             except Exception:
-                # Never publish connection strings or credentials in UI errors.
+                # Do not expose connection strings or credentials in UI errors.
                 self._set_connection(False, "Cannot receive process telemetry from RabbitMQ.")
             finally:
                 self._set_connection(False, "Process telemetry connection is unavailable.")
@@ -133,125 +110,111 @@ class ProcessSourceMonitor:
             message = None
         self.accept(message)
 
-    def _reject(self, stamp, message):
-        self._invalid_rounds.add(stamp)
-        if len(self._invalid_rounds) > 128:
-            self._invalid_rounds = set(sorted(self._invalid_rounds)[-128:])
-        self._rounds.pop(stamp, None)
-        if stamp == self._sample_ns and self._sample and self._sample["c"] < 0:
-            self._sample = None
-        self._record_problem(stamp, message)
-
-    def _record_problem(self, stamp, message):
-        if stamp >= self._problem_ns:
-            self._problem_ns = stamp
-            self._problem = message
-
     def accept(self, message):
-        """Validate exact nanosecond rounds; no interpolation or zero filling."""
+        """Keep each latest observation, including a missing value or bad quality.
+
+        Unlike Controller's calculation cache, this monitor displays the latest
+        raw observation and its error. Timestamps describe that observation;
+        they never decide whether another field may be displayed.
+        """
         with self._lock:
-            now = self._clock_ns()
-            cutoff = max(self._epoch_ns, now - int(self.config.sample_max_age_s * 1e9))
-            self._rounds = {stamp: values for stamp, values in self._rounds.items() if stamp >= cutoff}
-            self._invalid_rounds = {stamp for stamp in self._invalid_rounds if stamp >= cutoff}
             if not isinstance(message, dict) or not isinstance(message.get("metrics"), list):
-                self._reject(now, "Invalid process telemetry message.")
+                self._message_error = "Invalid process telemetry message."
                 return
+            now = self._clock_ns()
             for metric in message["metrics"]:
                 if not isinstance(metric, dict):
-                    self._reject(now, "Invalid process telemetry metric.")
+                    self._message_error = "Invalid process telemetry metric."
                     continue
                 if metric.get("name") != self.config.measurement_name:
                     continue
-                tags = metric.get("tags")
-                if not isinstance(tags, dict):
-                    self._reject(now, "Missing process data identity.")
+                tags, values = metric.get("tags"), metric.get("fields")
+                if not isinstance(tags, dict) or tags.get("device") != self.config.device_id:
                     continue
-                if tags.get("device") != self.config.device_id:
+                if not isinstance(values, dict):
+                    self._message_error = "Missing process telemetry fields."
                     continue
-                stamp = metric.get("timestamp")
-                if type(stamp) is not int:
-                    self._reject(now, "Invalid process collection timestamp.")
-                    continue
-                if stamp < cutoff or stamp < self._sample_ns:
-                    continue
-                if stamp > now:
-                    self._reject(now, "Process timestamp is ahead of the system clock.")
-                    continue
-                self._newest_ns = max(self._newest_ns, stamp)
-                if stamp in self._invalid_rounds:
-                    continue
-                fields = metric.get("fields")
-                names = [name for name in FIELDS if isinstance(fields, dict) and name in fields]
+                names = [name for name in FIELDS
+                         if name in values or tags.get("id") == self.config.node_ids[name]]
                 if len(names) != 1:
-                    self._reject(stamp, "Each process metric must contain exactly one expected value.")
+                    self._message_error = "Each process metric must identify one expected field."
                     continue
                 name = names[0]
-                quality = fields.get("Quality")
-                if tags.get("id") != self.config.node_ids[name]:
-                    self._reject(stamp, f"Unexpected OPC UA node for {name}.")
-                    continue
-                if not ((type(quality) is int and quality == 0)
-                        or (isinstance(quality, str) and quality in GOOD_QUALITY_STRINGS)):
-                    self._reject(stamp, f"OPC UA quality is not Good for {name}.")
-                    continue
-                value = fields[name]
+                quality, value = values.get("Quality"), values.get(name)
                 try:
-                    valid = not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value)
-                except OverflowError:
-                    valid = False
-                if not valid:
-                    self._reject(stamp, f"Invalid numeric value for {name}.")
-                    continue
-                value = float(value)
-                if ((name == "count_middle" and value < 0)
-                        or (name in ("T", "T_j", "T_j_set") and value <= -CELSIUS_TO_KELVIN)):
-                    self._reject(stamp, f"Process value is outside its valid range: {name}.")
-                    continue
-                values = self._rounds.setdefault(stamp, {})
-                if name in values and values[name] != value:
-                    self._reject(stamp, f"Conflicting process values for {name}.")
-                    continue
-                if name == "c" and value < 0:
-                    # Assemble the raw round for display while keeping it invalid for control.
-                    self._record_problem(stamp, NEGATIVE_CONCENTRATION)
-                values[name] = value
-                if len(values) == len(FIELDS) and stamp >= self._sample_ns:
-                    self._sample = dict(values)
-                    self._sample_ns = stamp
-            self._rounds = dict(sorted(self._rounds.items())[-128:])
-            self._invalid_rounds = set(sorted(self._invalid_rounds)[-128:])
+                    numeric = not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value)
+                    value = float(value) if numeric else None
+                except (OverflowError, ValueError):
+                    value = None
+                error = None
+                if tags.get("id") != self.config.node_ids[name]:
+                    error = "Unexpected OPC UA node."
+                elif name not in values:
+                    error = "Telegraf omitted the numeric value."
+                elif value is None:
+                    error = "Non-finite or missing numeric value."
+                elif not ((type(quality) is int and quality == 0)
+                          or (isinstance(quality, str) and quality in GOOD_QUALITY_STRINGS)):
+                    error = f"OPC UA quality is not Good: {quality}."
+                elif name == "c" and value < 0:
+                    error = "Negative concentration."
+                elif name == "count_middle" and value < 0:
+                    error = "Negative process count."
+                elif name.startswith("T") and value <= -CELSIUS_TO_KELVIN:
+                    error = "Temperature is below its physical range."
+                stamp = metric.get("timestamp")
+                stamp = stamp if type(stamp) is int and 0 < stamp <= 2**63 - 1 else None
+                basis = tags.get("timestamp_basis")
+                basis = "gather" if basis in (None, "", "gather") else basis
+                self._fields[name] = {
+                    "value": value, "quality": quality, "error": error,
+                    "updated_at": self._timestamp_text(stamp),
+                    "timestamp_basis": basis if basis in ("source", "gather") else "unknown",
+                    "received_at": self._timestamp_text(now), "timestamp_ns": stamp,
+                }
+                self._last_received_ns = now
+                self._message_error = None
+
+    @staticmethod
+    def _timestamp_text(stamp):
+        if type(stamp) is not int:
+            return None
+        try:
+            seconds, nanos = divmod(stamp, 1_000_000_000)
+            return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + f".{nanos:09d}Z"
+        except (ValueError, OverflowError, OSError):
+            return None
 
     def status(self):
+        """Return immediately, even before the first field has arrived."""
         with self._lock:
-            age = (self._clock_ns() - self._sample_ns) / 1e9 if self._sample is not None else None
-            fresh = age is not None and 0 <= age <= self.config.sample_max_age_s
-            problem = self._problem if self._problem_ns >= self._sample_ns else None
+            now = self._clock_ns()
+            fields = {}
+            for name in FIELDS:
+                entry = dict(self._fields.get(name, {
+                    "value": None, "quality": None, "error": None, "updated_at": None,
+                    "received_at": None, "timestamp_basis": "unknown",
+                }))
+                stamp = entry.pop("timestamp_ns", None)
+                entry["age_s"] = (now - stamp) / 1e9 if stamp is not None else None
+                fields[name] = entry
+            missing = [name for name, entry in fields.items() if entry["value"] is None]
             if not self.enabled:
                 state = "disabled"
             elif not self._connected:
                 state = "disconnected"
-            elif problem:
+            elif self._message_error or any(entry["error"] for entry in fields.values()):
                 state = "invalid"
-            elif age is None:
+            elif not self._fields:
                 state = "waiting"
-            elif not fresh:
-                state = "stale"
+            elif missing:
+                state = "partial"
             else:
                 state = "ready"
-            values = dict(self._sample) if state == "ready" else {}
-            raw_values = (dict(self._sample) if state == "invalid" and fresh
-                          and problem == NEGATIVE_CONCENTRATION and self._sample["c"] < 0 else {})
-            collected_at = (datetime.fromtimestamp(self._sample_ns / 1e9, timezone.utc).isoformat()
-                            if self._sample is not None else None)
-            newest = self._rounds.get(self._newest_ns, {})
             return {
-                "status": state, "ready": state == "ready", "connected": self._connected,
-                "device_id": self.config.device_id,
-                "sample_age_s": age, "sample_max_age_s": self.config.sample_max_age_s,
-                "collected_at": collected_at, "values": values,
-                "raw_values": raw_values,
-                "missing_fields": [] if state == "ready" else [name for name in FIELDS if name not in newest],
-                "error": self._connection_error if not self._connected else problem,
+                "status": state, "connected": self._connected, "device_id": self.config.device_id,
+                "fields": fields, "missing_fields": missing,
+                "last_received_at": self._timestamp_text(self._last_received_ns),
+                "error": self._connection_error if not self._connected else self._message_error,
                 "read_only": True,
             }

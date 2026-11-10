@@ -27,89 +27,9 @@ class ProcessSafetyError(ProcessAdapterError):
     """A process value or requested setpoint violated a safety constraint."""
 
 
-class ProcessMeasurementPending(ProcessSafetyError):
-    """A fresh, otherwise valid complete round has negative concentration.
-
-    This exception is never a write receipt: when raised by a write method it
-    guarantees that the corresponding command has not been published.
-    """
-
-    reason = "negative_concentration"
-
-    def __init__(self, *, read_at: str, raw_c: float, waiting_since: str) -> None:
-        self.read_at = read_at
-        self.raw_c = float(raw_c)
-        self.waiting_since = waiting_since
-        super().__init__("Fresh process concentration is negative; waiting for valid measurement data.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"reason": self.reason, "read_at": self.read_at,
-                "raw_c": self.raw_c, "waiting_since": self.waiting_since}
-
-
-class ProcessDataTimeoutPending(ProcessMeasurementPending):
-    """A connected process bus has no fresh complete measurement yet.
-
-    No current concentration or read timestamp is invented. A last-valid time
-    is historical metadata only and never permission to reuse that sample.
-    """
-
-    reason = "process_data_timeout"
-
-    def __init__(self, *, waiting_since: str, last_valid_read_at: str | None = None) -> None:
-        self.waiting_since = waiting_since
-        self.last_valid_read_at = last_valid_read_at
-        self.read_at = None
-        self.raw_c = None
-        ProcessSafetyError.__init__(self, "Waiting for fresh complete process measurement data.")
-
-    def to_dict(self) -> dict[str, Any]:
-        metadata = {"reason": self.reason, "waiting_since": self.waiting_since}
-        if self.last_valid_read_at is not None:
-            metadata["last_valid_read_at"] = self.last_valid_read_at
-        return metadata
-
-
-class ProcessTransportPending(ProcessMeasurementPending):
-    """A temporarily unavailable bus; no new device command was submitted."""
-
-    reason = "process_transport_wait"
-
-    def __init__(self, *, waiting_since: str, detail: str = "Reconnecting to the process message bus.") -> None:
-        self.waiting_since = waiting_since
-        self.detail = detail
-        self.read_at = None
-        self.raw_c = None
-        ProcessSafetyError.__init__(self, detail)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"reason": self.reason, "waiting_since": self.waiting_since, "detail": self.detail}
-
-
-class ProcessWritePending(ProcessAdapterError):
-    """A completed numerical cycle has an unresolved device-write outcome.
-
-    This deliberately does not inherit ProcessMeasurementPending: the write may
-    already have reached the device and must never be blindly repeated.
-    """
-
-    reason = "process_write_confirmation_pending"
-
-    def __init__(self, snapshot: Mapping[str, Any]) -> None:
-        import copy
-
-        self.snapshot = copy.deepcopy(dict(snapshot))
-        super().__init__(str(snapshot.get("detail") or "Waiting to confirm the previous device command."))
-
-    def to_dict(self) -> dict[str, Any]:
-        import copy
-
-        return copy.deepcopy(self.snapshot)
-
-
 @dataclass(frozen=True)
 class ProcessState:
-    """One real-equipment snapshot using the Controller contract units.
+    """A latest-available process snapshot using the Controller contract units.
 
     ``T``, ``T_j`` and ``T_j_set`` are kelvin. ``c`` and ``count_middle``
     retain the scalar units exposed by the equipment OPC UA server.
@@ -124,6 +44,9 @@ class ProcessState:
     source_timestamps: Mapping[str, str | None] = field(default_factory=dict)
     server_timestamps: Mapping[str, str | None] = field(default_factory=dict)
     status_codes: Mapping[str, str] = field(default_factory=dict)
+    collection_timestamp_ns: int | None = None
+    timestamp_basis: str = "unknown"
+    received_at: str | None = None
 
     def __post_init__(self) -> None:
         # Measurement semantics belong to the actual source calculation. A
@@ -141,6 +64,9 @@ class ProcessState:
             "source_timestamps": dict(self.source_timestamps),
             "server_timestamps": dict(self.server_timestamps),
             "status_codes": dict(self.status_codes),
+            "collection_timestamp_ns": self.collection_timestamp_ns,
+            "timestamp_basis": self.timestamp_basis,
+            "received_at": self.received_at,
         }
 
 
@@ -184,7 +110,7 @@ class ProcessAdapter(ABC):
 
     @abstractmethod
     def read_state(self) -> ProcessState:
-        """Read one complete, validated equipment snapshot."""
+        """Read one process snapshot; required values must already be available."""
 
     @abstractmethod
     def write_jacket_setpoint(self, setpoint_K: float) -> ProcessWriteResult:
@@ -537,8 +463,6 @@ __all__ = [
     "ProcessAdapterError",
     "ProcessConnectionError",
     "ProcessSafetyError",
-    "ProcessMeasurementPending",
-    "ProcessDataTimeoutPending",
     "ProcessState",
     "ProcessWriteResult",
 ]
@@ -552,8 +476,8 @@ from ._source_values import (
 class ControllerReadError(ProcessConnectionError):
     """A read attempt failed; the GUI-style loop warns and tries its next cycle.
 
-    This is not a device-write receipt, a completed measurement, or permission
-    to substitute historical values. ``stage`` identifies the failing read.
+    This is not a device-write receipt. A latest-value adapter raises it only
+    when a required field has no available value. ``stage`` identifies the read.
     """
 
     def __init__(self, message: str, *, stage: str = "process_read") -> None:

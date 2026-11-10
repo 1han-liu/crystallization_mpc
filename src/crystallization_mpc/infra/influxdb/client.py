@@ -39,17 +39,24 @@ def _read_dotenv_file() -> dict[str, str]:
     return values
 
 
-def load_influx_settings() -> InfluxSettings:
+def load_influx_settings(*, prefix: str | None = None) -> InfluxSettings:
     env_file_values = _read_dotenv_file()
-    token = os.getenv("INFLUX_TOKEN") or env_file_values.get("INFLUX_TOKEN")
+
+    def value(name: str, default: str | None = None) -> str | None:
+        keys = ([f"{prefix}_INFLUX_{name}"] if prefix else []) + [f"INFLUX_{name}"]
+        return (next((os.environ[key].strip() for key in keys if os.getenv(key, "").strip()), None)
+                or next((env_file_values[key].strip() for key in keys if env_file_values.get(key, "").strip()), None)
+                or default)
+
+    token = value("TOKEN")
     if not token:
         raise RuntimeError("INFLUX_TOKEN is required.")
 
     return InfluxSettings(
-        url=os.getenv("INFLUX_URL") or env_file_values.get("INFLUX_URL") or "http://localhost:8087",
+        url=value("URL", "http://localhost:8087"),
         token=token,
-        org=os.getenv("INFLUX_ORG") or env_file_values.get("INFLUX_ORG") or "lab",
-        bucket=os.getenv("INFLUX_BUCKET") or env_file_values.get("INFLUX_BUCKET") or "process",
+        org=value("ORG", "lab"),
+        bucket=value("BUCKET", "process"),
     )
 
 

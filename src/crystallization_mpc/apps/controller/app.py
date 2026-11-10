@@ -46,27 +46,20 @@ def get_runtime_history(run_id: str, before: int | None = Query(None, ge=1),
         raise HTTPException(status_code=422, detail="Use either before or after, not both.")
     return service.runtime_history_page(run_id, before, after, limit)
 
-
-@web_app.post("/api/process/recovery/confirm")
-def confirm_process_recovery(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    try:
-        return service.confirm_process_recovery(payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
 @web_app.post("/api/controller/refresh")
 def request_controller_refresh(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
     with service._lock:
-        return service.request_refresh(payload.get("event_id"))
+        result = service.request_refresh(payload.get("event_id"))
+        service._publish_status_snapshot_locked()
+        return result
 
 
 @web_app.post("/api/controller/modified")
 def modify_controller_workspace(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     with service._lock:
-        return service.submit_operator_map(payload.get("values", {}), event_id=payload.get("event_id"))
+        result = service.submit_operator_map(payload.get("values", {}), event_id=payload.get("event_id"))
+        service._publish_status_snapshot_locked()
+        return result
 
 
 __all__ = ["service", "web_app"]

@@ -1,5 +1,71 @@
 # Controller reference validation
 
+## Numerical corrections and shell simplification
+
+Unfinished/nonfinite ODE intervals fail instead of returning a partial state.
+Main-filter updates are transactional, use analytic H and reject unresolvable
+or non-integrable candidate states. These corrections change failure behavior
+shared with the original MATLAB; historical parity claims below do not extend
+to those failure paths.
+
+The November 10 shell simplification removes process admission, recovery
+confirmation and shared write permits. The calculation sources are frozen at
+their existing working-copy contents. New regression results are separate from
+the historical frozen-oracle acceptance.
+
+The process transport now keeps one latest-valid-value cache. Each finite,
+Good-quality update replaces only its own field; missing or invalid updates
+retain the prior valid value. Controller cycles use one cached snapshot and
+the configured control interval even when IR has not updated for 60 seconds.
+Initial missing inputs return a normal wait immediately, without advancing the
+algorithm or blocking status queries. Reconnection retains cached values;
+explicit transport shutdown clears them. Original source timestamps remain
+metadata and are never replaced by the time of a later cached read.
+
+Scheduling and experiment elapsed time now share the monotonic clock. The
+configured Central `dt` supplies the control tick and its scheduling interval;
+IR source time does not change either. Main-filter initialization and control
+integral calls are regression checked against that configured interval. Existing
+parameter assignment and explicit Refresh behavior remains unchanged. Simulation
+retains its existing accelerated wall-clock scheduling and nominal model step.
+
+Setpoints follow Controller -> RabbitMQ -> Writer -> OPC UA, with one ordinary
+write command and one result event. Writer does not query Central or require a
+shared permit, generation or operator recovery confirmation. Failed or uncertain
+writes report that command's outcome; they do not block a subsequent cycle.
+Unused recovery-result classifications, the result-normalization wrapper and
+Controller-side device-bound/readback settings have been deleted. Normal command
+expiry, journal deduplication/ordering, unit conversion and device readback remain.
+Transport synchronization uses a lock and the per-command result Event; the
+obsolete condition-variable notifications have been removed. Offline delivery
+tests cover result-publication failure, redelivery, late/mismatched receipts and
+the next cycle following a failed or uncertain write.
+
+Central's OPC UA card now displays each field independently, including its
+original measurement timestamp, receipt time and any local warning. A missing
+count or delayed IR update no longer hides available temperatures. The monitor
+keeps the latest raw observation for display, while Controller independently
+retains the last valid input for calculation. Disconnection or a failed HTTP
+status refresh labels the retained observations instead of erasing them.
+The complete-round assembler, source-time watermark/skew checks, whole-card
+freshness gate, duplicate-source counters and their unused configuration were
+deleted. Initial input waits use a neutral active-run message and do not block
+status queries. The existing five-field card and surrounding layout remain.
+
+Controller status reads copy an already published snapshot without acquiring
+the control-cycle lock or querying live algorithm/storage observers. Commands
+and complete iteration boundaries replace the snapshot, including Start/End
+identity and `status_updated_at`. Parameter assignments remain serialized with
+the algorithm. Runtime-history reads use the journal's own lock, without taking
+the control lock or rewriting outcomes; failed history writes retry on the
+existing work path. Central retains last received settings and confirmed Gsensor
+state when status refresh fails, while reporting the refresh failure separately.
+Current-run parameter controls, Add Seed and Gsensor toggles are regression
+checked across repeated running snapshots. Offline HTTP regressions hold
+calculation, Writer receipt and persistence stages, and exercise a CPU-busy
+tick against Central's unchanged one-second status timeout. No timeout increase,
+protection state machine or numerical change is involved.
+
 > Distribution note: the test suite, MATLAB fixtures/harness, and numerical
 > audit scripts described here are local-only and excluded from Git. References
 > below preserve validation provenance; reproduction requires those local

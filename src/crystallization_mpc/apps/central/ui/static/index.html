@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Central UI</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20261028-process-source">
+    <link rel="stylesheet" href="/static/styles.css?v=20261110-process-fields">
   </head>
   <body>
     <div class="shell">
@@ -79,15 +79,15 @@
             <h3 id="process-source-heading">OPC UA Data Source</h3>
             <span id="process-source-status" class="status idle">Checking</span>
           </div>
-          <p id="process-source-message" role="status" aria-live="polite">Waiting to confirm incoming OPC UA data.</p>
+          <p id="process-source-message" role="status" aria-live="polite">Waiting for incoming OPC UA values.</p>
           <dl class="process-source-values">
-            <div><dt>Reactor temperature</dt><dd id="process-source-T">—</dd></div>
-            <div><dt>Jacket temperature</dt><dd id="process-source-T_j">—</dd></div>
-            <div><dt>Concentration (g/g H₂O)</dt><dd id="process-source-c">—</dd></div>
-            <div><dt>Process count</dt><dd id="process-source-count_middle">—</dd></div>
-            <div><dt>Jacket setpoint</dt><dd id="process-source-T_j_set">—</dd></div>
+            <div><dt>Reactor temperature</dt><dd id="process-source-T">—</dd><dd id="process-source-T-updated" class="process-field-time">Not received</dd><dd id="process-source-T-error" class="process-field-error" hidden></dd></div>
+            <div><dt>Jacket temperature</dt><dd id="process-source-T_j">—</dd><dd id="process-source-T_j-updated" class="process-field-time">Not received</dd><dd id="process-source-T_j-error" class="process-field-error" hidden></dd></div>
+            <div><dt>Concentration (g/g H₂O)</dt><dd id="process-source-c">—</dd><dd id="process-source-c-updated" class="process-field-time">Not received</dd><dd id="process-source-c-error" class="process-field-error" hidden></dd></div>
+            <div><dt>Process count</dt><dd id="process-source-count_middle">—</dd><dd id="process-source-count_middle-updated" class="process-field-time">Not received</dd><dd id="process-source-count_middle-error" class="process-field-error" hidden></dd></div>
+            <div><dt>Jacket setpoint</dt><dd id="process-source-T_j_set">—</dd><dd id="process-source-T_j_set-updated" class="process-field-time">Not received</dd><dd id="process-source-T_j_set-error" class="process-field-error" hidden></dd></div>
           </dl>
-          <p id="process-source-sample" class="muted">No complete sample received.</p>
+          <p id="process-source-sample" class="muted">No telemetry received yet.</p>
           <p id="process-source-control" class="muted">Controller process mode is unconfirmed.</p>
         </section>
 
@@ -257,7 +257,6 @@
           </div>
 
           <p id="experiment-message" class="experiment-message" role="status" aria-live="polite"></p>
-          <button id="confirm-process-recovery" class="ghost" type="button" hidden disabled>Confirm device state and resume</button>
           <p id="current-export-status" role="status" aria-live="polite">CSV export: Not exported</p>
         </section>
 
@@ -453,7 +452,7 @@
       </div>
     </template>
 
-    <script src="/static/app.js?v=20261101-timeout-recovery-alignment-lock"></script>
+    <script src="/static/app.js?v=20261110-status-snapshot"></script>
     <script src="/static/archive.js?v=20261014-1"></script>
   </body>
 </html>

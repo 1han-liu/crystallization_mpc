@@ -206,7 +206,7 @@ class ExperimentExporter:
         def problem(code, message):
             state["errors"].append({"code": code, "message": message})
 
-        controller = _records(source.fetch("controller_measurement", run_id=run_id), run_id)
+        controller = _controller_records(source.fetch("controller_measurement", run_id=run_id), run_id)
         gsensor = _records(source.fetch("gsensor_measurement", run_id=run_id), run_id)
         runtime_events = _records(source.fetch("controller_runtime_event", run_id=run_id), run_id)
         io_events = _records(source.fetch("process_io_event", run_id=run_id), run_id)
@@ -259,6 +259,18 @@ class ExperimentExporter:
             "gsensor_data.csv": (GSENSOR_COLUMNS, gsensor),
             "events.csv": (EVENT_COLUMNS, events),
         }
+
+
+def _controller_records(records, run_id):
+    """Keep the established CSV column across the activation-energy storage migration."""
+    result = _records(records, run_id)
+    for row in result:
+        # A migrated point may also retain its legacy integer E_A field.
+        # The dedicated floating-point field keeps fitted values without rounding.
+        activation_energy = row.pop("E_A_float", None)
+        if activation_energy is not None:
+            row["E_A"] = activation_energy
+    return result
 
 
 def _records(records, run_id):

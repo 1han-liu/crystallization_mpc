@@ -21,6 +21,26 @@ else:
 SIGMA_MEASUREMENT = "crystallizer"
 
 
+def _storage_fields(fields: dict[str, Any], measurement: str) -> dict[str, Any]:
+    """Keep fitted activation energy compatible with legacy integer shards.
+
+    Earlier Controller records stored E_A as an integer. InfluxDB fixes field
+    types within a shard, so writing a fitted float under that name rejects the
+    whole point. A separate, consistently floating field preserves fractional
+    values without changing the observation or deleting historical records.
+    Readers prefer E_A_float and fall back to the legacy E_A field.
+    """
+    if measurement != "controller_measurement":
+        return fields
+    stored = dict(fields)
+    activation_energy = stored.pop("E_A", None)
+    if activation_energy is not None:
+        stored["E_A_float"] = float(activation_energy)
+    elif stored.get("E_A_float") is not None:
+        stored["E_A_float"] = float(stored["E_A_float"])
+    return stored
+
+
 def _field_value(value: Any) -> Any:
     if isinstance(value, bool):
         return value
@@ -46,7 +66,7 @@ def build_tagged_point(
     for key, value in (tags or {}).items():
         if value is not None:
             point = point.tag(key, str(value))
-    for key, value in fields.items():
+    for key, value in _storage_fields(fields, measurement).items():
         if value is not None:
             point = point.field(key, _field_value(value))
     return point
@@ -73,6 +93,14 @@ class InfluxWriter:
             timestamp=timestamp,
         )
         self.write_api.write(bucket=self.settings.bucket, record=point)
+
+    def write_tagged_batch(self, records: list[dict[str, Any]]) -> None:
+        """Send an outbox batch in one HTTP request using original point identities."""
+        points = [build_tagged_point(record["fields"], tags=record["tags"],
+                                    measurement=record["measurement"], timestamp=record["timestamp_ns"])
+                  for record in records]
+        if points:
+            self.write_api.write(bucket=self.settings.bucket, record=points)
 
     def close(self) -> None:
         self.client.close()

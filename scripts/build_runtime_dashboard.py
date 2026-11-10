@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def build_dashboard():
-    dashboard = json.loads((ROOT / "grafana/dashboards/crystallization-mpc.json").read_text())
-    annotation = json.loads((ROOT / "grafana/runtime-configuration-annotation.json").read_text())
+    dashboard = json.loads((ROOT / "grafana/dashboards/crystallization-mpc.json").read_text(encoding="utf-8"))
+    annotation = json.loads((ROOT / "grafana/runtime-configuration-annotation.json").read_text(encoding="utf-8"))
     annotations = dashboard.setdefault("annotations", {}).setdefault("list", [])
     annotations[:] = [item for item in annotations if item.get("name") != annotation["name"]]
     annotations.append(annotation)
@@ -29,4 +29,4 @@ if __name__ == "__main__":
     if args.output.is_symlink():
         raise SystemExit("Refusing a symlink output")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(build_dashboard(), indent=2) + "\n")
+    args.output.write_text(json.dumps(build_dashboard(), indent=2) + "\n", encoding="utf-8")

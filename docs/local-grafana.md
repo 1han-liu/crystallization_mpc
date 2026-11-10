@@ -1,5 +1,32 @@
 # 本机 Grafana 实时可视化
 
+## 已有整数 E_A 数据库的兼容与补传（2026-11-09）
+
+早期 `controller_measurement.E_A` 可能被 InfluxDB 固定为整数类型，后续
+拟合得到浮点值会使整条测量记录被拒收。现在写入边界将激活能保存到稳定的
+浮点字段 `E_A_float`，保留拟合小数；Grafana 优先读取此字段，缺失时读取历史
+`E_A`，CSV 仍使用 `E_A` 列。历史记录无需删除，控制算法和原始队列数据不变。
+
+耐久队列现在会继续发送同批其他记录，并优先尝试重试次数较少的记录，单条
+拒收不会阻塞后续实验。失败记录继续保留，全部失败时等待后再重试。
+
+旧 Controller 正在执行实验时，可使用更新镜像中的独立补传入口，无需重启
+Controller。为它提供原有 InfluxDB 环境配置和现存队列目录，例如：
+
+```bash
+python -m crystallization_mpc.infra.influxdb.recovery \
+  --database /data/telemetry/controller_telemetry.sqlite3 --follow
+```
+
+该入口只发送现存遥测、更新投递状态，不启动控制或设备通信；保留原事件 ID、
+标签和纳秒时间戳。并发重试以相同 InfluxDB 点身份覆盖，不生成新的采样时间。
+省略 `--follow` 可进行一次持续到空队列或失败的补传。运行前应对 SQLite 队列
+做一致性备份；不要删除队列、实验文件或 InfluxDB 历史数据。
+
+现场兼容补传容器名为 `crystallization_mpc-final-telemetry-recovery`，配置为
+自动恢复运行。原服务在实验结束后的下次正常重建时会使用已更新的 application
+镜像；确认新服务可自行投递后，可停止兼容补传容器。
+
 本机部署使用项目 Compose 已固定的 InfluxDB 2.7、Grafana 10.4.3 镜像及现有
 `grafana/` 仪表盘/数据源配置，不安装完整 Compose 平台，不修改 GSensor。
 仅绑定 127.0.0.1；请勿将这套本地演示配置暴露到公网。版本升级和远程访问另行评估。

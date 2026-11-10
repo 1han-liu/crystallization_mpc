@@ -1,12 +1,9 @@
-"""Controller configuration for direct OPC UA reads and existing Writer commands."""
+"""Environment-backed Controller configuration; equipment connections live in the writer."""
 
 from __future__ import annotations
 
-import math
 import os
-from dataclasses import dataclass, field
-
-from .opcua_reader import OpcUaReadConfig
+from dataclasses import dataclass
 
 from crystallization_mpc.messaging.routing import EXCHANGE, QUEUES
 
@@ -61,34 +58,22 @@ class ControllerSettings:
     process_measurement_name: str = "crystallizer_raw"
     process_telemetry_queue: str = "process.telemetry"
     process_result_queue: str = "process.results"
-    process_sample_max_age_s: float = 5.0
-    process_startup_timeout_s: float = 10.0
     process_command_ttl_s: float = 5.0
     process_write_timeout_s: float = 5.0
-    # Read-node identities; PROCESS_* overrides the existing OPCUA_* settings.
+    # Expected telemetry identities only; no endpoint, login or certificates.
     process_namespace_index: int = 2
     process_t_j_set_node: str = "iCache.Temperature1"
     process_t_node: str = "Local.iControl.Experiment1.Trends.Tr.Value"
     process_t_j_node: str = "Local.iControl.Experiment1.Trends.Tj.Value"
     process_c_node: str = "Local.iControl.Experiment1.Trends.load.Value"
     process_count_middle_node: str = "Local.iControl.Experiment1.Trends.count.Value"
-    process_jacket_min_K: float = 253.15
-    process_jacket_max_K: float = 453.15
-    process_verify_tolerance_K: float = 0.05
-    opcua_read: OpcUaReadConfig = field(default_factory=OpcUaReadConfig)
-
-    def __post_init__(self) -> None:
-        # Only transport call configuration is represented here. Source input,
-        # parameter and physical limits are evaluated at the source statements.
-        pass
 
     @classmethod
     def from_env(cls) -> "ControllerSettings":
-        # These legacy flags also enabled direct device writes. The authorized
-        # read client is independent; all writes still use the existing Writer.
+        # Never silently reactivate the removed direct OPC UA path from an old .env.
         if _env_bool("CONTROLLER_OPCUA_ENABLED") or _env_bool("CONTROLLER_OPCUA_WRITE_ENABLED"):
             raise ValueError(
-                "Legacy CONTROLLER_OPCUA_* direct read/write mode was removed. Use "
+                "CONTROLLER_OPCUA_* direct I/O was removed. Migrate to "
                 "CONTROLLER_PROCESS_ENABLED/CONTROLLER_PROCESS_WRITE_ENABLED and "
                 "the process-io services; equipment configuration belongs in OPCUA_*."
             )
@@ -113,28 +98,14 @@ class ControllerSettings:
             process_measurement_name=os.getenv("PROCESS_MEASUREMENT_NAME", "crystallizer_raw"),
             process_telemetry_queue=os.getenv("PROCESS_TELEMETRY_QUEUE", "process.telemetry"),
             process_result_queue=os.getenv("PROCESS_RESULT_QUEUE", "process.results"),
-            process_sample_max_age_s=_env_float("PROCESS_SAMPLE_MAX_AGE_S", 5),
-            process_startup_timeout_s=_env_float("PROCESS_STARTUP_TIMEOUT_S", 10),
             process_command_ttl_s=_env_float("PROCESS_COMMAND_TTL_S", 5),
             process_write_timeout_s=_env_float("PROCESS_WRITE_TIMEOUT_S", 5),
-            process_namespace_index=(_env_int("PROCESS_NAMESPACE_INDEX", 2)
-                                     if "PROCESS_NAMESPACE_INDEX" in os.environ
-                                     else _env_int("OPCUA_NAMESPACE_INDEX", 2)),
-            process_t_j_set_node=os.getenv("PROCESS_T_J_SET_NODE",
-                os.getenv("OPCUA_T_J_SET_READ_NODE", "").strip()
-                or os.getenv("OPCUA_T_J_SET_NODE", "iCache.Temperature1")),
-            process_t_node=os.getenv("PROCESS_T_NODE",
-                os.getenv("OPCUA_T_NODE", "Local.iControl.Experiment1.Trends.Tr.Value")),
-            process_t_j_node=os.getenv("PROCESS_T_J_NODE",
-                os.getenv("OPCUA_T_J_NODE", "Local.iControl.Experiment1.Trends.Tj.Value")),
-            process_c_node=os.getenv("PROCESS_C_NODE",
-                os.getenv("OPCUA_C_NODE", "Local.iControl.Experiment1.Trends.load.Value")),
-            process_count_middle_node=os.getenv("PROCESS_COUNT_MIDDLE_NODE",
-                os.getenv("OPCUA_COUNT_MIDDLE_NODE", "Local.iControl.Experiment1.Trends.count.Value")),
-            process_jacket_min_K=_env_float("PROCESS_JACKET_MIN_K", 253.15),
-            process_jacket_max_K=_env_float("PROCESS_JACKET_MAX_K", 453.15),
-            process_verify_tolerance_K=_env_float("PROCESS_VERIFY_TOLERANCE_K", 0.05),
-            opcua_read=OpcUaReadConfig.from_env(),
+            process_namespace_index=_env_int("PROCESS_NAMESPACE_INDEX", 2),
+            process_t_j_set_node=os.getenv("PROCESS_T_J_SET_NODE", "iCache.Temperature1"),
+            process_t_node=os.getenv("PROCESS_T_NODE", "Local.iControl.Experiment1.Trends.Tr.Value"),
+            process_t_j_node=os.getenv("PROCESS_T_J_NODE", "Local.iControl.Experiment1.Trends.Tj.Value"),
+            process_c_node=os.getenv("PROCESS_C_NODE", "Local.iControl.Experiment1.Trends.load.Value"),
+            process_count_middle_node=os.getenv("PROCESS_COUNT_MIDDLE_NODE", "Local.iControl.Experiment1.Trends.count.Value"),
         )
 
     def integration_status(self) -> dict[str, dict[str, object]]:
@@ -143,10 +114,8 @@ class ControllerSettings:
                 "enabled": self.process_enabled,
                 "write_enabled": self.process_write_enabled,
                 "shadow_mode": self.process_enabled and not self.process_write_enabled,
-                "transport": "opcua-read/rabbitmq-write",
-                "read_transport": "opcua",
-                "write_transport": "rabbitmq",
-                "configured": bool(self.opcua_read.endpoint and self.rabbit_url and self.rabbit_exchange),
+                "transport": "rabbitmq",
+                "configured": bool(self.rabbit_url and self.rabbit_exchange),
                 "device_id": self.process_device_id,
                 "connected": False,
             },
