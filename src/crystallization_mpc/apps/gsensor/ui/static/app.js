@@ -100,8 +100,6 @@ const state = {
   experimentParameters: null,
   parameterRenderKey: null,
   alignmentConfiguration: null,
-  alignmentSelectionAction: null,
-  alignmentSelectionFeedback: null,
   alignmentCapabilitiesReady: false,
   alignmentCapabilitiesError: null,
   initialized: false,
@@ -114,7 +112,12 @@ const state = {
   measurementActive: false,
   experimentLifecycleStatus: "not_started",
   sourceActionInFlight: false,
-  liveStatusInFlight: false,
+  statusRead: null,
+  sourceRead: null,
+  metadataRead: null,
+  initializationPayloadRevision: null,
+  initializationVisual: null,
+  candidateRenderKey: null,
   statusAvailable: false,
   imageScan: {},
   sequenceResetAction: null,
@@ -153,6 +156,22 @@ const state = {
   overlayImage: null,
   alignmentCapabilities: {},
 };
+
+function setIfChanged(element, property, value) {
+  const next = ["textContent", "className", "title"].includes(property) ? String(value ?? "") : value;
+  if (element[property] !== next) element[property] = next;
+}
+
+function toggleClass(element, name, enabled) {
+  const next = Boolean(enabled);
+  if (element.classList.contains(name) !== next) element.classList.toggle(name, next);
+  return next;
+}
+
+function setAttributeIfChanged(element, name, value) {
+  const next = String(value);
+  if (element.getAttribute(name) !== next) element.setAttribute(name, next);
+}
 
 function applyUiMode(mode) {
   const resolved = mode === "development" ? "development" : "production";
@@ -211,21 +230,21 @@ function clearMeasurementOverlay() {
   state.overlayImage = null;
   state.latestOverlayFrame = null;
   state.lastOverlayRefreshAt = 0;
-  measurementOverlay.hidden = true;
+  setIfChanged(measurementOverlay, "hidden", true);
   measurementOverlay.removeAttribute("src");
-  measurementOverlayCaption.textContent = "No overlay for the current experiment.";
-  refreshOverlayButton.disabled = true;
+  setIfChanged(measurementOverlayCaption, "textContent", "No overlay for the current experiment.");
+  setIfChanged(refreshOverlayButton, "disabled", true);
 }
 
 function setStatusAvailable(available, message = "") {
   state.statusAvailable = available;
-  connectionStatus.hidden = available;
-  connectionStatus.textContent = available ? "" : `Status connection lost. Measurements, images and parameters may be outdated. Editing is disabled until status refresh succeeds. ${message}`;
+  setIfChanged(connectionStatus, "hidden", available);
+  setIfChanged(connectionStatus, "textContent", available ? "" : `Status connection lost. Measurements, images and parameters may be outdated. Editing is disabled until status refresh succeeds. ${message}`);
   renderRunParameters();
   renderInitialization(state.initialization);
   renderImageScan(state.imageScan);
   renderReinitialization();
-  refreshOverlayButton.disabled = !available || !state.latestOverlayFrame;
+  setIfChanged(refreshOverlayButton, "disabled", !available || !state.latestOverlayFrame);
 }
 
 function adoptExperiment(payload) {
@@ -236,6 +255,7 @@ function adoptExperiment(payload) {
   state.runId = runId;
   state.contextRevision += 1;
   state.initializationRevision += 1;
+  state.initializationPayloadRevision = null;
   state.initializationAction = null;
   state.initializationFeedback = null;
   state.gsensorActivation = null;
@@ -248,8 +268,6 @@ function adoptExperiment(payload) {
   state.sequenceResetFeedback = null;
   state.experimentParameters = null;
   state.alignmentConfiguration = null;
-  state.alignmentSelectionAction = null;
-  state.alignmentSelectionFeedback = null;
   state.initialized = false;
   state.latestMeasurementResult = null;
   state.sourceError = null;
@@ -262,8 +280,11 @@ function adoptExperiment(payload) {
 
 function renderStatus(payload, { includeInitialization = true } = {}) {
   adoptExperiment(payload);
+  const initializationUnchanged = payload.initialization_unchanged === true
+    && payload.initialization_revision === state.initializationPayloadRevision;
+  const initialization = initializationUnchanged ? state.initialization : payload.initialization || null;
   state.statusAvailable = true;
-  connectionStatus.hidden = true;
+  setIfChanged(connectionStatus, "hidden", true);
   state.measurementActive = Boolean(payload.active);
   state.experimentLifecycleStatus = payload.experiment_lifecycle_status || "not_started";
   state.initialized = Boolean(payload.initialized);
@@ -274,23 +295,24 @@ function renderStatus(payload, { includeInitialization = true } = {}) {
   // Only the run snapshot is authoritative. /api/params can be a later Central draft.
   state.experimentParameters = snapshot?.run_id === state.runId ? snapshot : null;
   renderRunParameters();
-  statusText.textContent = state.experimentLifecycleStatus;
+  setIfChanged(statusText, "textContent", state.experimentLifecycleStatus);
   const lifecycleRunning = [
     "waiting_for_initial_image",
     "initializing",
     "baseline_ready",
     "measuring",
   ].includes(state.experimentLifecycleStatus);
-  statusText.className = state.experimentLifecycleStatus === "error"
+  setIfChanged(statusText, "className", state.experimentLifecycleStatus === "error"
     ? "status error"
-    : (lifecycleRunning ? "status running" : "status idle");
-  initializedText.textContent = payload.initialized ? "initialized" : payload.initialization_status || "not initialized";
-  initializedText.className = payload.initialized ? "status running" : "status idle";
-  paramsBlock.textContent = JSON.stringify(payload.params || {}, null, 2);
-  messageBlock.textContent = JSON.stringify({
+    : (lifecycleRunning ? "status running" : "status idle"));
+  setIfChanged(initializedText, "textContent", payload.initialized ? "initialized" : payload.initialization_status || "not initialized");
+  setIfChanged(initializedText, "className", payload.initialized ? "status running" : "status idle");
+  if (state.uiMode === "development") {
+    setIfChanged(paramsBlock, "textContent", JSON.stringify(payload.params || {}, null, 2));
+    setIfChanged(messageBlock, "textContent", JSON.stringify({
     last_message: payload.last_message || null,
     last_command_message: payload.last_command_message || null,
-    initialization: payload.initialization || null,
+    initialization,
     measurement_running: payload.measurement_running,
     last_measurement_step_at: payload.last_measurement_step_at || null,
     measurement_step_count: payload.measurement_step_count || 0,
@@ -301,17 +323,27 @@ function renderStatus(payload, { includeInitialization = true } = {}) {
     image_scan: payload.image_scan || null,
     gsensor_activation: payload.gsensor_activation || null,
     reinitialization: payload.reinitialization || null,
-  }, null, 2);
+    }, null, 2));
+  }
   renderImageScan(payload.image_scan || {});
   renderBaseline(payload.baseline || null);
   renderOnlineMeasurement(payload);
+  if (state.runId && Number.isInteger(payload.image_scan?.file_count)) {
+    state.experimentSource = {
+      ...(payload.experiment || state.experimentSource || {}), selected: true, run_id: state.runId,
+      image_count: payload.image_scan.file_count,
+      latest_image: payload.image_scan.latest_ready?.image_name || null,
+      latest_discovered_image: payload.image_scan.latest_discovered?.image_name || null,
+    };
+  }
   renderExperimentSource(state.experimentSource);
-  if (includeInitialization || payload.initialization?.session_id !== state.initialization?.session_id) {
-    if (payload.initialization?.session_id !== state.initialization?.session_id && state.initializationAction) {
+  if (includeInitialization || initialization?.session_id !== state.initialization?.session_id) {
+    if (initialization?.session_id !== state.initialization?.session_id && state.initializationAction) {
       state.initializationAction = null;
       state.initializationRevision += 1;
     }
-    renderInitialization(payload.initialization || null);
+    renderInitialization(initialization);
+    state.initializationPayloadRevision = payload.initialization_revision || null;
   } else {
     renderInitialization(state.initialization);
   }
@@ -343,20 +375,20 @@ function refreshMeasurementOverlay(frameSeq, { force = false, final = false, pro
   image.onload = () => {
     if (revision !== state.overlayRequest || runId !== state.runId) return;
     measurementOverlay.src = image.src;
-    measurementOverlay.hidden = false;
-    measurementOverlayCaption.textContent = `${final ? "Final" : "Latest"} overlay · ${runId} · frame ${frameSeq}`;
+    setIfChanged(measurementOverlay, "hidden", false);
+    setIfChanged(measurementOverlayCaption, "textContent", `${final ? "Final" : "Latest"} overlay · ${runId} · frame ${frameSeq}`);
   };
   image.onerror = () => {
     if (revision !== state.overlayRequest || runId !== state.runId) return;
-    measurementOverlay.hidden = true;
+    setIfChanged(measurementOverlay, "hidden", true);
     measurementOverlay.removeAttribute("src");
-    measurementOverlayCaption.textContent = "Overlay is not available yet. Refresh Preview to try again.";
+    setIfChanged(measurementOverlayCaption, "textContent", "Overlay is not available yet. Refresh Preview to try again.");
     state.latestOverlayFrame = null;
   };
   image.src = `/api/measurement/overlay/${kind}?run_id=${encodeURIComponent(runId)}&frame_seq=${encodeURIComponent(frameSeq)}&_=${now}`;
   state.latestOverlayFrame = key;
   state.lastOverlayRefreshAt = now;
-  refreshOverlayButton.disabled = false;
+  setIfChanged(refreshOverlayButton, "disabled", false);
 }
 
 function renderOnlineMeasurement(payload) {
@@ -369,35 +401,35 @@ function renderOnlineMeasurement(payload) {
   const valid = Boolean(result?.valid);
   const hasResult = Boolean(result);
 
-  measurementValidity.textContent = hasResult ? (valid ? "valid" : "invalid") : "no sample";
-  measurementValidity.className = hasResult
+  setIfChanged(measurementValidity, "textContent", hasResult ? (valid ? "valid" : "invalid") : "no sample");
+  setIfChanged(measurementValidity, "className", hasResult
     ? (valid ? "status running" : "status error")
-    : "status idle";
-  measurementFrame.textContent = hasResult ? String(result.frame_seq) : "—";
-  measurementImage.textContent = result?.image_name || "—";
-  measurementGU.textContent = formatGrowthRate(result?.u?.G, result?.unit);
-  measurementGUKf.textContent = formatGrowthRate(result?.u?.G_KF, result?.unit);
-  measurementGV.textContent = formatGrowthRate(result?.v?.G, result?.unit);
-  measurementGVKf.textContent = formatGrowthRate(result?.v?.G_KF, result?.unit);
-  measurementValidCount.textContent = String(processing.valid_frame_count || 0);
-  measurementInvalidCount.textContent = String(processing.invalid_frame_count || 0);
+    : "status idle");
+  setIfChanged(measurementFrame, "textContent", hasResult ? String(result.frame_seq) : "—");
+  setIfChanged(measurementImage, "textContent", result?.image_name || "—");
+  setIfChanged(measurementGU, "textContent", formatGrowthRate(result?.u?.G, result?.unit));
+  setIfChanged(measurementGUKf, "textContent", formatGrowthRate(result?.u?.G_KF, result?.unit));
+  setIfChanged(measurementGV, "textContent", formatGrowthRate(result?.v?.G, result?.unit));
+  setIfChanged(measurementGVKf, "textContent", formatGrowthRate(result?.v?.G_KF, result?.unit));
+  setIfChanged(measurementValidCount, "textContent", String(processing.valid_frame_count || 0));
+  setIfChanged(measurementInvalidCount, "textContent", String(processing.invalid_frame_count || 0));
   const alignment = result?.alignment || null;
   const previewMethod = alignment?.method ? alignmentLabel(alignment.method) : "—";
-  alignmentMethod.textContent = previewMethod;
-  alignmentStatus.textContent = alignment
+  setIfChanged(alignmentMethod, "textContent", previewMethod);
+  setIfChanged(alignmentStatus, "textContent", alignment
     ? (alignment.success ? (alignment.fallback_used ? "fallback" : "success") : "failed")
-    : "—";
-  alignmentTranslation.textContent = alignment
+    : "—");
+  setIfChanged(alignmentTranslation, "textContent", alignment
     ? `${Number(alignment.tx_px || 0).toFixed(2)}, ${Number(alignment.ty_px || 0).toFixed(2)} px`
-    : "—";
-  alignmentRotation.textContent = alignment
+    : "—");
+  setIfChanged(alignmentRotation, "textContent", alignment
     ? `${Number(alignment.rotation_deg || 0).toFixed(3)}°`
-    : "—";
-  alignmentRuntime.textContent = alignment
+    : "—");
+  setIfChanged(alignmentRuntime, "textContent", alignment
     ? `${Number(alignment.runtime_ms || 0).toFixed(1)} ms`
-    : "—";
-  measurementPublishCount.textContent = String(publishing.success_count || 0);
-  measurementInfluxCount.textContent = String(influx.success_count || 0);
+    : "—");
+  setIfChanged(measurementPublishCount, "textContent", String(publishing.success_count || 0));
+  setIfChanged(measurementInfluxCount, "textContent", String(influx.success_count || 0));
 
   const errors = [
     result?.error,
@@ -405,10 +437,10 @@ function renderOnlineMeasurement(payload) {
     publishing.last_error,
     influx.last_error,
   ].filter(Boolean);
-  measurementError.textContent = errors.length
+  setIfChanged(measurementError, "textContent", errors.length
     ? errors.join(" · ")
-    : (hasResult ? `Processed at ${result.processed_at}` : "Waiting for the first post-baseline image.");
-  measurementError.classList.toggle("error", errors.length > 0);
+    : (hasResult ? `Processed at ${result.processed_at}` : "Waiting for the first post-baseline image."));
+  toggleClass(measurementError, "error", errors.length > 0);
 
   const final = ["stopped", "completed"].includes(payload.experiment_lifecycle_status)
     && Boolean(processing.final_overlay_path);
@@ -424,41 +456,41 @@ function renderBaseline(baseline) {
     baseline.segment_frame_seq === 0
     || (baseline.segment_frame_seq == null && baseline.frame_seq === 0)
   ));
-  baselineStatus.textContent = ready ? "ready" : "not ready";
-  baselineStatus.className = ready ? "status running" : "status idle";
-  baselineFrameSeq.textContent = ready ? String(baseline.frame_seq) : "—";
-  baselineImage.textContent = ready ? baseline.image_name : "—";
-  baselineUDistance.textContent = ready ? `${baseline.u?.distance_px ?? 0} px` : "—";
-  baselineVDistance.textContent = ready ? `${baseline.v?.distance_px ?? 0} px` : "—";
-  baselineEstablishedAt.textContent = ready ? baseline.established_at : "—";
+  setIfChanged(baselineStatus, "textContent", ready ? "ready" : "not ready");
+  setIfChanged(baselineStatus, "className", ready ? "status running" : "status idle");
+  setIfChanged(baselineFrameSeq, "textContent", ready ? String(baseline.frame_seq) : "—");
+  setIfChanged(baselineImage, "textContent", ready ? baseline.image_name : "—");
+  setIfChanged(baselineUDistance, "textContent", ready ? `${baseline.u?.distance_px ?? 0} px` : "—");
+  setIfChanged(baselineVDistance, "textContent", ready ? `${baseline.v?.distance_px ?? 0} px` : "—");
+  setIfChanged(baselineEstablishedAt, "textContent", ready ? baseline.established_at : "—");
 }
 
 function renderImageScan(scan) {
   state.imageScan = scan && typeof scan === "object" ? scan : {};
   const currentScan = state.imageScan;
   const scanStatus = currentScan.status || "stopped";
-  imageScanStatus.textContent = scanStatus;
-  imageScanStatus.className = scanStatus === "error" ? "status error" : (
+  setIfChanged(imageScanStatus, "textContent", scanStatus);
+  setIfChanged(imageScanStatus, "className", scanStatus === "error" ? "status error" : (
     ["running", "waiting_for_image", "monitoring_during_initialization"].includes(scanStatus)
       ? "status running" : "status idle"
-  );
-  scanProcessedCount.textContent = String(currentScan.processed_count || 0);
-  scanPendingCount.textContent = String(currentScan.pending_image_count || 0);
-  scanLatestDiscovered.textContent = formatSourceImage(currentScan.latest_discovered);
-  scanLatestReady.textContent = formatSourceImage(currentScan.latest_ready);
+  ));
+  setIfChanged(scanProcessedCount, "textContent", String(currentScan.processed_count || 0));
+  setIfChanged(scanPendingCount, "textContent", String(currentScan.pending_image_count || 0));
+  setIfChanged(scanLatestDiscovered, "textContent", formatSourceImage(currentScan.latest_discovered));
+  setIfChanged(scanLatestReady, "textContent", formatSourceImage(currentScan.latest_ready));
 
   const sequenceHealth = currentScan.sequence_health || {};
   const watermark = currentScan.watermark || null;
-  scanSequenceWatermark.textContent = formatWatermark(watermark, sequenceHealth.watermark_sequence);
+  setIfChanged(scanSequenceWatermark, "textContent", formatWatermark(watermark, sequenceHealth.watermark_sequence));
   const missingCount = Number(sequenceHealth.missing_count || 0);
   const lateCount = Number(sequenceHealth.late_count || 0);
-  scanMissingCount.textContent = String(Number.isFinite(missingCount) ? missingCount : 0);
-  scanLateCount.textContent = String(Number.isFinite(lateCount) ? lateCount : 0);
-  scanMissingCount.classList.toggle("sequence-alert", missingCount > 0);
-  scanLateCount.classList.toggle("sequence-alert", lateCount > 0);
-  scanMissingCount.title = formatMissingRanges(sequenceHealth.missing_ranges);
-  scanLateCount.title = sequenceHealth.last_late
-    ? `Latest late image: ${formatSourceImage(sequenceHealth.last_late)}` : "";
+  setIfChanged(scanMissingCount, "textContent", String(Number.isFinite(missingCount) ? missingCount : 0));
+  setIfChanged(scanLateCount, "textContent", String(Number.isFinite(lateCount) ? lateCount : 0));
+  toggleClass(scanMissingCount, "sequence-alert", missingCount > 0);
+  toggleClass(scanLateCount, "sequence-alert", lateCount > 0);
+  setIfChanged(scanMissingCount, "title", formatMissingRanges(sequenceHealth.missing_ranges));
+  setIfChanged(scanLateCount, "title", sequenceHealth.last_late
+    ? `Latest late image: ${formatSourceImage(sequenceHealth.last_late)}` : "");
 
   const resetCandidate = sequenceHealth.reset_candidate || null;
   const resetAvailable = sequenceHealth.reset_available === true
@@ -470,34 +502,32 @@ function renderImageScan(scan) {
   }
   const feedback = state.sequenceResetFeedback;
   const showReset = Boolean(resetAvailable || resetAction);
-  scanSequenceWarning.hidden = !showReset && !feedback;
-  scanSequenceWarning.classList.toggle("pending", Boolean(resetAction));
-  scanSequenceWarning.classList.toggle("error", feedback?.kind === "error");
-  confirmSequenceResetButton.hidden = !showReset;
-  confirmSequenceResetButton.disabled = !state.statusAvailable
+  setIfChanged(scanSequenceWarning, "hidden", !showReset && !feedback);
+  toggleClass(scanSequenceWarning, "pending", Boolean(resetAction));
+  toggleClass(scanSequenceWarning, "error", feedback?.kind === "error");
+  setIfChanged(confirmSequenceResetButton, "hidden", !showReset);
+  setIfChanged(confirmSequenceResetButton, "disabled", !state.statusAvailable
     || Boolean(resetAction)
-    || Boolean(state.alignmentSelectionAction)
-    || state.alignmentConfiguration?.in_progress === true
     || !state.runId
-    || !visibleCandidate?.identity_key;
-  confirmSequenceResetButton.textContent = resetAction
-    ? "Confirming numbering restart…" : "Confirm numbering restart";
+    || !visibleCandidate?.identity_key);
+  setIfChanged(confirmSequenceResetButton, "textContent", resetAction
+    ? "Confirming numbering restart…" : "Confirm numbering restart");
 
   if (resetAction) {
-    scanSequenceWarningText.textContent = `Confirming a new source-number sequence from ${formatSourceImage(visibleCandidate)}. The current marking image remains unchanged.`;
+    setIfChanged(scanSequenceWarningText, "textContent", `Confirming a new source-number sequence from ${formatSourceImage(visibleCandidate)}. The current marking image remains unchanged.`);
   } else if (feedback) {
-    scanSequenceWarningText.textContent = feedback.message;
+    setIfChanged(scanSequenceWarningText, "textContent", feedback.message);
   } else if (showReset) {
-    scanSequenceWarningText.textContent = `Possible camera numbering restart at ${formatSourceImage(visibleCandidate)}. Confirm only if the camera/source numbering actually restarted. A normally late image must remain classified as late.`;
+    setIfChanged(scanSequenceWarningText, "textContent", `Possible camera numbering restart at ${formatSourceImage(visibleCandidate)}. Confirm only if the camera/source numbering actually restarted. A normally late image must remain classified as late.`);
   } else {
-    scanSequenceWarningText.textContent = "";
+    setIfChanged(scanSequenceWarningText, "textContent", "");
   }
 
-  scanLastImage.textContent = currentScan.last_detected_image || "—";
-  scanFileModifiedAt.textContent = currentScan.file_modified_at || "—";
-  scanDetectedAt.textContent = currentScan.detected_at || "—";
-  scanLastError.textContent = currentScan.error || "";
-  scanLastError.hidden = !currentScan.error;
+  setIfChanged(scanLastImage, "textContent", currentScan.last_detected_image || "—");
+  setIfChanged(scanFileModifiedAt, "textContent", currentScan.file_modified_at || "—");
+  setIfChanged(scanDetectedAt, "textContent", currentScan.detected_at || "—");
+  setIfChanged(scanLastError, "textContent", currentScan.error || "");
+  setIfChanged(scanLastError, "hidden", !currentScan.error);
   renderReinitialization();
 }
 
@@ -541,8 +571,7 @@ function reinitializationActionAllowed() {
     && state.reinitialization?.in_progress !== true
     && !state.reinitializationAction
     && !state.initializationAction
-    && !state.alignmentSelectionAction
-    && state.alignmentConfiguration?.in_progress !== true
+
     && !state.dscgrInFlight;
 }
 
@@ -566,34 +595,34 @@ function renderReinitialization() {
     message: `The latest image could not be selected. ${serverError}`,
   } : null);
 
-  markingCurrentImage.textContent = initializationImageName(state.initialization?.selected_image);
-  markingLatestReady.textContent = formatSourceImage(state.imageScan?.latest_ready);
+  setIfChanged(markingCurrentImage, "textContent", initializationImageName(state.initialization?.selected_image));
+  setIfChanged(markingLatestReady, "textContent", formatSourceImage(state.imageScan?.latest_ready));
 
   const measuring = lifecycle === "measuring" || lifecycle === "baseline_ready";
-  restartInitializationButton.textContent = action || serverPending
+  setIfChanged(restartInitializationButton, "textContent", action || serverPending
     ? "Switching to latest image…"
-    : (measuring ? "Re-mark on latest image" : "Use latest image");
-  restartInitializationButton.disabled = !reinitializationActionAllowed();
-  restartInitializationButton.setAttribute("aria-busy", String(Boolean(action || serverPending)));
+    : (measuring ? "Re-mark on latest image" : "Use latest image"));
+  setIfChanged(restartInitializationButton, "disabled", !reinitializationActionAllowed());
+  setAttributeIfChanged(restartInitializationButton, "aria-busy", Boolean(action || serverPending));
 
   if (!state.statusAvailable) {
-    reinitializationStatus.textContent = "connection lost";
-    reinitializationStatus.className = "status error";
+    setIfChanged(reinitializationStatus, "textContent", "connection lost");
+    setIfChanged(reinitializationStatus, "className", "status error");
   } else if (action || serverPending) {
-    reinitializationStatus.textContent = "switching";
-    reinitializationStatus.className = "status running";
+    setIfChanged(reinitializationStatus, "textContent", "switching");
+    setIfChanged(reinitializationStatus, "className", "status running");
   } else if (state.reinitialization?.can_restart === true) {
-    reinitializationStatus.textContent = "ready";
-    reinitializationStatus.className = "status running";
+    setIfChanged(reinitializationStatus, "textContent", "ready");
+    setIfChanged(reinitializationStatus, "className", "status running");
   } else {
-    reinitializationStatus.textContent = "unavailable";
-    reinitializationStatus.className = "status idle";
+    setIfChanged(reinitializationStatus, "textContent", "unavailable");
+    setIfChanged(reinitializationStatus, "className", "status idle");
   }
 
-  reinitializationFeedback.hidden = !feedback;
-  reinitializationFeedback.textContent = feedback?.message || "";
-  reinitializationFeedback.classList.toggle("error", feedback?.kind === "error");
-  reinitializationFeedback.classList.toggle("pending", feedback?.kind === "pending");
+  setIfChanged(reinitializationFeedback, "hidden", !feedback);
+  setIfChanged(reinitializationFeedback, "textContent", feedback?.message || "");
+  toggleClass(reinitializationFeedback, "error", feedback?.kind === "error");
+  toggleClass(reinitializationFeedback, "pending", feedback?.kind === "pending");
 }
 
 async function restartInitializationOnLatestImage() {
@@ -692,8 +721,8 @@ async function restartInitializationOnLatestImage() {
 async function confirmSequenceReset() {
   const sequenceHealth = state.imageScan?.sequence_health || {};
   const candidate = sequenceHealth.reset_candidate || null;
-  if (!state.statusAvailable || state.sequenceResetAction || state.alignmentSelectionAction
-      || state.alignmentConfiguration?.in_progress === true || !state.runId
+  if (!state.statusAvailable || state.sequenceResetAction
+      || !state.runId
       || sequenceHealth.reset_available !== true || !candidate?.identity_key) {
     return;
   }
@@ -773,37 +802,46 @@ function renderExperimentSource(payload) {
   state.experimentSource = payload;
   const selected = Boolean(payload?.selected);
   const imageCount = Number(payload?.image_count || 0);
-  currentRunId.textContent = selected ? payload.run_id : "No experiment selected";
-  currentImageDirectory.textContent = selected ? (payload.container_image_path || "—") : "—";
-  currentImageCount.textContent = String(imageCount);
+  setIfChanged(currentRunId, "textContent", selected ? payload.run_id : "No experiment selected");
+  setIfChanged(currentImageDirectory, "textContent", selected ? (payload.container_image_path || "—") : "—");
+  setIfChanged(currentImageCount, "textContent", String(imageCount));
 
-  refreshImagesButton.disabled = state.sourceActionInFlight
-    || Boolean(state.reinitializationAction)
-    || Boolean(state.alignmentSelectionAction);
+  setIfChanged(refreshImagesButton, "disabled", state.sourceActionInFlight
+    || Boolean(state.reinitializationAction));
 
-  imageSourceStatus.classList.toggle("error", Boolean(state.sourceError));
+  toggleClass(imageSourceStatus, "error", Boolean(state.sourceError));
   if (state.sourceError) {
-    imageSourceStatus.textContent = `Image list refresh failed: ${state.sourceError}`;
+    setIfChanged(imageSourceStatus, "textContent", `Image list refresh failed: ${state.sourceError}`);
   } else if (!selected) {
-    imageSourceStatus.textContent = "Create or select an experiment in Central first.";
+    setIfChanged(imageSourceStatus, "textContent", "Create or select an experiment in Central first.");
   } else if (state.experimentLifecycleStatus === "waiting_for_initial_image") {
-    imageSourceStatus.textContent = "Waiting for the latest ready camera image. Initialization will open automatically.";
+    setIfChanged(imageSourceStatus, "textContent", "Waiting for the latest ready camera image. Initialization will open automatically.");
   } else if (state.experimentLifecycleStatus === "initializing") {
-    imageSourceStatus.textContent = "The latest ready image is fixed as the current marking baseline. Directory monitoring continues without replacing the image currently open below.";
+    setIfChanged(imageSourceStatus, "textContent", "The latest ready image is fixed as the current marking baseline. Directory monitoring continues without replacing the image currently open below.");
   } else if (["baseline_ready", "measuring"].includes(state.experimentLifecycleStatus)) {
-    imageSourceStatus.textContent = "The current marking baseline is ready. The directory is being scanned for later images.";
+    setIfChanged(imageSourceStatus, "textContent", "The current marking baseline is ready. The directory is being scanned for later images.");
   } else if (imageCount === 0) {
-    imageSourceStatus.textContent = "Start the experiment in Central; Gsensor will wait for the latest ready camera image.";
+    setIfChanged(imageSourceStatus, "textContent", "Start the experiment in Central; Gsensor will wait for the latest ready camera image.");
   } else {
-    imageSourceStatus.textContent = `${imageCount} images available. Start the experiment in Central to use the latest ready image as the baseline candidate.`;
+    setIfChanged(imageSourceStatus, "textContent", `${imageCount} images available. Start the experiment in Central to use the latest ready image as the baseline candidate.`);
   }
 }
 
-async function loadStatus() {
+function loadStatus() {
+  if (state.statusRead) return state.statusRead;
+  const reading = requestStatus();
+  state.statusRead = reading;
+  reading.finally(() => { if (state.statusRead === reading) state.statusRead = null; }).catch(() => {});
+  return reading;
+}
+
+async function requestStatus() {
   const request = ++state.statusRequest;
   const initializationRevision = state.initializationRevision;
   try {
-    const payload = await fetchJson("/api/status");
+    const query = state.initializationPayloadRevision
+      ? `?initialization_revision=${encodeURIComponent(state.initializationPayloadRevision)}` : "";
+    const payload = await fetchJson(`/api/status${query}`);
     if (request !== state.statusRequest || initializationRevision !== state.initializationRevision) return null;
     renderStatus(payload, { includeInitialization: !state.initializationAction });
     return payload;
@@ -814,7 +852,15 @@ async function loadStatus() {
   }
 }
 
-async function loadExperimentSource() {
+function loadExperimentSource() {
+  if (state.sourceRead) return state.sourceRead;
+  const reading = requestExperimentSource();
+  state.sourceRead = reading;
+  reading.finally(() => { if (state.sourceRead === reading) state.sourceRead = null; }).catch(() => {});
+  return reading;
+}
+
+async function requestExperimentSource() {
   const request = ++state.sourceRequest;
   const context = state.contextRevision;
   let payload;
@@ -839,28 +885,34 @@ async function refreshOverview() {
 }
 
 async function refreshLiveStatus() {
-  if (state.liveStatusInFlight || state.reinitializationAction
-      || state.alignmentSelectionAction || document.hidden) {
+  if (state.statusRead || state.reinitializationAction
+      || document.hidden) {
     return;
   }
-  state.liveStatusInFlight = true;
   try {
     const payload = await loadStatus();
     if (!payload) return;
     const statusRunId = payload.current_run_id || payload.experiment?.run_id || null;
     const displayedRunId = state.experimentSource?.run_id || null;
-    if (statusRunId !== displayedRunId || (statusRunId && state.experimentSource?.image_count === 0)) {
+    if (statusRunId !== displayedRunId || (statusRunId && state.experimentSource?.image_count === 0
+        && !Number.isInteger(payload.image_scan?.file_count))) {
       await loadExperimentSource().catch(() => {});
     }
   } catch (error) {
-    statusText.textContent = error.message;
-    statusText.className = "status error";
-  } finally {
-    state.liveStatusInFlight = false;
+    setIfChanged(statusText, "textContent", error.message);
+    setIfChanged(statusText, "className", "status error");
   }
 }
 
-async function loadParameterMetadata() {
+function loadParameterMetadata() {
+  if (state.metadataRead) return state.metadataRead;
+  const reading = requestParameterMetadata();
+  state.metadataRead = reading;
+  reading.finally(() => { if (state.metadataRead === reading) state.metadataRead = null; }).catch(() => {});
+  return reading;
+}
+
+async function requestParameterMetadata() {
   const request = ++state.paramsRequest;
   const results = await Promise.allSettled([
     fetchJson("/api/params"),
@@ -889,26 +941,25 @@ function alignmentLabel(method) {
 }
 
 function alignmentSelectionReady() {
-  // During a rolling upgrade the previous service can still confirm initialization.
-  if (!state.alignmentConfiguration) return true;
-  const method = state.alignmentConfiguration.method || state.alignmentConfiguration.configured_method;
-  return state.alignmentCapabilitiesReady && state.alignmentCapabilities[method]?.available === true;
+  const method = state.alignmentConfiguration?.method || state.alignmentConfiguration?.configured_method;
+  return Boolean(method) && state.alignmentCapabilitiesReady && state.alignmentCapabilities[method]?.available === true;
 }
 
 function renderRunParameters() {
   const snapshot = state.experimentParameters;
-  parameterRunLabel.textContent = snapshot?.label || "—";
-  parameterRunId.textContent = snapshot?.run_id || state.runId || "—";
-  parameterRunVersion.textContent = snapshot?.parameter_version ?? "—";
+  setIfChanged(parameterRunLabel, "textContent", snapshot?.label || "—");
+  setIfChanged(parameterRunId, "textContent", snapshot?.run_id || state.runId || "—");
+  setIfChanged(parameterRunVersion, "textContent", snapshot?.parameter_version ?? "—");
   const configuration = snapshot?.alignment_configuration;
   const alignmentMessage = configuration?.confirmed
     ? `Confirmed alignment: ${alignmentLabel(configuration.method)}.`
     : "Alignment method is selected in Central before Start Experiment and is read-only here.";
-  runParametersStatus.textContent = !snapshot
+  const message = !snapshot
     ? (state.runId ? "No run parameter snapshot is available. Parameters become available after Start in Central."
       : "No experiment has started. Parameters become available after Start in Central.")
     : `Effective run parameters · ${alignmentMessage}`;
-  if (!state.statusAvailable) runParametersStatus.textContent = `Status unavailable; displayed values may be outdated. ${runParametersStatus.textContent}`;
+  setIfChanged(runParametersStatus, "textContent", state.statusAvailable ? message
+    : `Status unavailable; displayed values may be outdated. ${message}`);
   const renderKey = JSON.stringify([snapshot?.params || {}, state.paramMeta]);
   if (renderKey === state.parameterRenderKey) return;
   state.parameterRenderKey = renderKey;
@@ -924,25 +975,25 @@ function renderRunParameters() {
     const section = meta.section || "Parameters";
     if (!groups.has(section)) {
       const group = document.createElement("section");
-      group.className = "run-parameter-group";
+      setIfChanged(group, "className", "run-parameter-group");
       const heading = document.createElement("h3");
-      heading.textContent = section;
+      setIfChanged(heading, "textContent", section);
       const list = document.createElement("dl");
-      list.className = "run-parameter-list";
+      setIfChanged(list, "className", "run-parameter-list");
       group.append(heading, list);
       groups.set(section, list);
       runParametersValues.appendChild(group);
     }
     const row = document.createElement("div");
     const label = document.createElement("dt");
-    label.textContent = `${meta.label || key}${meta.unit ? ` (${meta.unit})` : ""}`;
+    setIfChanged(label, "textContent", `${meta.label || key}${meta.unit ? ` (${meta.unit})` : ""}`);
     if (meta.label && meta.label !== key) {
       const parameterKey = document.createElement("code");
-      parameterKey.textContent = key;
+      setIfChanged(parameterKey, "textContent", key);
       label.appendChild(parameterKey);
     }
     const content = document.createElement("dd");
-    content.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    setIfChanged(content, "textContent", typeof value === "string" ? value : JSON.stringify(value, null, 2));
     row.append(label, content);
     groups.get(section).appendChild(row);
   });
@@ -952,9 +1003,8 @@ function initializationEditable() {
   return state.statusAvailable && state.experimentLifecycleStatus === "initializing"
     && !state.initialized && !state.alignmentConfiguration?.confirmed
     && !state.initializationAction && !state.reinitializationAction
-    && !state.alignmentSelectionAction
     && state.reinitialization?.in_progress !== true
-    && state.alignmentConfiguration?.in_progress !== true && !state.dscgrInFlight
+    && !state.dscgrInFlight
     && (!state.confirmedSessionId || state.confirmedSessionId !== state.initialization?.session_id);
 }
 
@@ -962,8 +1012,6 @@ function renderInitialization(payload) {
   if (state.initialization?.session_id !== payload?.session_id) {
     state.initializationFeedback = null;
     state.confirmedSessionId = null;
-    state.alignmentSelectionAction = null;
-    state.alignmentSelectionFeedback = null;
   }
   ensure3DSnapshotScope(payload);
   state.initialization = payload;
@@ -971,61 +1019,73 @@ function renderInitialization(payload) {
   const step = payload?.current_step || null;
   const selected3DChoice = payload?.selected_3d_choice;
   const editable = initializationEditable();
-  initStepTitle.textContent = hasSession ? payload.status : "Not started";
-  initStepPrompt.textContent = step?.prompt || (selected3DChoice
+  setIfChanged(initStepTitle, "textContent", hasSession ? payload.status : "Not started");
+  setIfChanged(initStepPrompt, "textContent", step?.prompt || (selected3DChoice
     ? (state.experimentLifecycleStatus === "initializing"
       ? `Previewing 3D choice ${selected3DChoice}. Compare other candidates or confirm this selection.`
       : `Confirmed 3D choice ${selected3DChoice}.`)
-    : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when a latest ready image is available."));
+    : (hasSession ? "Waiting for the next initialization step." : "Start the experiment in Central. Marking opens when a latest ready image is available.")));
   const feedback = state.initializationFeedback;
-  initSaveStatus.textContent = feedback?.message || (hasSession ? `${payload.selected_image || ""}` : "idle");
-  initSaveStatus.classList.toggle("error", feedback?.kind === "error");
-  initSaveStatus.classList.toggle("pending", Boolean(state.initializationAction));
-  initCanvas.setAttribute("aria-busy", String(Boolean(state.initializationAction)));
-  initCanvas.setAttribute("aria-disabled", String(!editable || !state.imageReady || step?.type !== "point"));
+  setIfChanged(initSaveStatus, "textContent", feedback?.message || (hasSession ? `${payload.selected_image || ""}` : "idle"));
+  toggleClass(initSaveStatus, "error", feedback?.kind === "error");
+  toggleClass(initSaveStatus, "pending", Boolean(state.initializationAction));
+  setAttributeIfChanged(initCanvas, "aria-busy", Boolean(state.initializationAction));
+  setAttributeIfChanged(initCanvas, "aria-disabled", !editable || !state.imageReady || step?.type !== "point");
 
-  undoInitButton.disabled = !editable || !payload?.can_undo;
-  resetInitButton.disabled = !editable || !hasSession;
-  confirm3DChoiceButton.disabled = !editable
+  setIfChanged(undoInitButton, "disabled", !editable || !payload?.can_undo);
+  setIfChanged(resetInitButton, "disabled", !editable || !hasSession);
+  setIfChanged(confirm3DChoiceButton, "disabled", !editable
     || !alignmentSelectionReady()
     || payload?.status !== "ready_for_3d"
-    || selected3DChoice == null;
-  runDscgrButton.disabled = !state.statusAvailable || payload?.status !== "ready_for_3d"
+    || selected3DChoice == null);
+  setIfChanged(runDscgrButton, "disabled", !state.statusAvailable || payload?.status !== "ready_for_3d"
     || state.dscgrInFlight || Boolean(state.initializationAction)
-    || Boolean(state.reinitializationAction) || state.reinitialization?.in_progress === true
-    || Boolean(state.alignmentSelectionAction) || state.alignmentConfiguration?.in_progress === true;
+    || Boolean(state.reinitializationAction) || state.reinitialization?.in_progress === true);
 
   fullModeControls.querySelectorAll("button").forEach((button) => {
-    button.disabled = !editable || !hasSession || step?.key !== "is_full";
+    setIfChanged(button, "disabled", !editable || !hasSession || step?.key !== "is_full");
     const selected = String(payload?.is_full) === button.dataset.fullMode;
-    button.classList.toggle("selected", selected);
+    toggleClass(button, "selected", selected);
   });
 
   renderCandidateControls(payload);
-  renderPointList(payload);
   renderCornerControls(payload);
   renderCornerReferenceInset(payload);
   maybeLoadInitializationImage(payload);
-  drawInitialization();
-  drawSelected3DPreview();
-  render3DSnapshots();
+  const previous = state.initializationVisual;
+  if (previous?.payload !== payload || previous?.imageKey !== state.currentImageKey
+      || previous?.imageReady !== state.imageReady) {
+    const key = JSON.stringify([state.runId, payload, state.currentImageKey, state.imageReady]);
+    if (previous?.key !== key) {
+      renderPointList(payload);
+      drawInitialization();
+      drawSelected3DPreview();
+    }
+    state.initializationVisual = { payload, imageKey: state.currentImageKey, imageReady: state.imageReady, key };
+  }
   renderReinitialization();
 }
 
 function renderCandidateControls(payload) {
-  candidateControls.innerHTML = "";
   const candidates = payload?.candidates_3d || [];
-  candidateControlsWrap.hidden = candidates.length === 0;
-  candidates.forEach((candidate) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "ghost";
-    button.dataset.choice = String(candidate.choice);
-    button.textContent = candidate.label || `Choice ${candidate.choice}`;
-    button.disabled = !initializationEditable()
-      || !["ready_for_3d_choice", "ready_for_3d"].includes(payload?.status);
-    button.classList.toggle("selected", payload?.selected_3d_choice === candidate.choice);
-    candidateControls.appendChild(button);
+  const key = JSON.stringify([payload?.session_id, candidates.map(item => [item.choice, item.label])]);
+  if (key !== state.candidateRenderKey) {
+    candidateControls.replaceChildren();
+    candidates.forEach(candidate => {
+      const button = document.createElement("button");
+      button.type = "button";
+      setIfChanged(button, "className", "ghost");
+      button.dataset.choice = String(candidate.choice);
+      setIfChanged(button, "textContent", candidate.label || `Choice ${candidate.choice}`);
+      candidateControls.appendChild(button);
+    });
+    state.candidateRenderKey = key;
+  }
+  setIfChanged(candidateControlsWrap, "hidden", candidates.length === 0);
+  candidateControls.querySelectorAll("button").forEach(button => {
+    setIfChanged(button, "disabled", !initializationEditable()
+      || !["ready_for_3d_choice", "ready_for_3d"].includes(payload?.status));
+    toggleClass(button, "selected", String(payload?.selected_3d_choice) === button.dataset.choice);
   });
 }
 
@@ -1060,28 +1120,29 @@ function renderCornerControls(payload) {
     && canCompareCorner(payload);
   const activeCorner = activeCornerReference(payload);
   cornerControls.querySelectorAll("button").forEach((button) => {
-    button.disabled = !enabled;
-    button.classList.toggle("selected", activeCorner === button.dataset.corner);
+    setIfChanged(button, "disabled", !enabled);
+    toggleClass(button, "selected", activeCorner === button.dataset.corner);
   });
 }
 
 function renderCornerReferenceInset(payload) {
   const corner = activeCornerReference(payload);
   if (!corner || !state.imageReady) {
-    cornerReferenceInset.hidden = true;
+    setIfChanged(cornerReferenceInset, "hidden", true);
     cornerReferenceImage.removeAttribute("src");
     return;
   }
 
-  cornerReferenceImage.src = `/static/imgs/corner_${corner}.jpg`;
-  cornerReferenceImage.alt = `Corner ${corner}`;
-  cornerReferenceInset.hidden = false;
+  const source = `/static/imgs/corner_${corner}.jpg`;
+  if (cornerReferenceImage.getAttribute("src") !== source) cornerReferenceImage.src = source;
+  setIfChanged(cornerReferenceImage, "alt", `Corner ${corner}`);
+  setIfChanged(cornerReferenceInset, "hidden", false);
 }
 
 function appendPointListItem(key, point, computed) {
   const item = document.createElement("li");
   const coords = Array.isArray(point) ? point.slice(0, 2).map((value) => Number(value).toFixed(1)).join(", ") : "";
-  item.textContent = `${computed ? "*" : ""}${key}: ${coords}`;
+  setIfChanged(item, "textContent", `${computed ? "*" : ""}${key}: ${coords}`);
   pointList.appendChild(item);
 }
 
@@ -1090,10 +1151,10 @@ function maybeLoadInitializationImage(payload) {
     state.currentImageKey = null;
     initImage = null;
     state.imageReady = false;
-    initCanvas.width = 0;
-    initCanvas.height = 0;
-    canvasEmpty.hidden = false;
-    canvasEmpty.textContent = "No image loaded";
+    setIfChanged(initCanvas, "width", 0);
+    setIfChanged(initCanvas, "height", 0);
+    setIfChanged(canvasEmpty, "hidden", false);
+    setIfChanged(canvasEmpty, "textContent", "No image loaded");
     return;
   }
   const imageKey = `${state.runId}:${payload.session_id}:${payload.selected_image}`;
@@ -1104,8 +1165,8 @@ function maybeLoadInitializationImage(payload) {
   state.imageReady = false;
   initCanvas.width = 0;
   initCanvas.height = 0;
-  canvasEmpty.hidden = false;
-  canvasEmpty.textContent = "Loading initialization image…";
+  setIfChanged(canvasEmpty, "hidden", false);
+  setIfChanged(canvasEmpty, "textContent", "Loading initialization image…");
   const image = new Image();
   initImage = image;
   image.onload = () => {
@@ -1113,14 +1174,14 @@ function maybeLoadInitializationImage(payload) {
     state.imageReady = true;
     initCanvas.width = image.naturalWidth;
     initCanvas.height = image.naturalHeight;
-    canvasEmpty.hidden = true;
+    setIfChanged(canvasEmpty, "hidden", true);
     renderInitialization(state.initialization);
   };
   image.onerror = () => {
     if (state.currentImageKey !== imageKey || initImage !== image) return;
     state.imageReady = false;
-    canvasEmpty.hidden = false;
-    canvasEmpty.textContent = "Image preview could not be loaded. Refresh Images to try again.";
+    setIfChanged(canvasEmpty, "hidden", false);
+    setIfChanged(canvasEmpty, "textContent", "Image preview could not be loaded. Refresh Images to try again.");
     initCanvas.setAttribute("aria-disabled", "true");
   };
   image.src = `/api/initialization/image/${encodeURIComponent(payload.session_id)}?_=${Date.now()}`;
@@ -1180,6 +1241,7 @@ function ensure3DSnapshotScope(payload) {
   state.threeDView.viewInitialized = false;
   state.threeDView.yaw = default3DView.yaw;
   state.threeDView.pitch = default3DView.pitch;
+  render3DSnapshots();
 }
 
 function captureCurrent3DSnapshot() {
@@ -1215,17 +1277,17 @@ function render3DSnapshots() {
   const items = state.threeDSnapshots.order
     .map((key) => state.threeDSnapshots.items.get(key))
     .filter(Boolean);
-  threeDSnapshots.hidden = items.length === 0;
-  clear3DSnapshotsButton.disabled = items.length === 0;
+  setIfChanged(threeDSnapshots, "hidden", items.length === 0);
+  setIfChanged(clear3DSnapshotsButton, "disabled", items.length === 0);
   threeDSnapshotGrid.innerHTML = "";
   items.forEach((item) => {
     const wrapper = document.createElement("figure");
-    wrapper.className = "three-d-snapshot";
+    setIfChanged(wrapper, "className", "three-d-snapshot");
     const image = document.createElement("img");
     image.src = item.image;
     image.alt = item.label;
     const caption = document.createElement("span");
-    caption.textContent = `${item.label} (${formatRadians(item.yaw)}, ${formatRadians(item.pitch)})`;
+    setIfChanged(caption, "textContent", `${item.label} (${formatRadians(item.yaw)}, ${formatRadians(item.pitch)})`);
     wrapper.appendChild(image);
     wrapper.appendChild(caption);
     threeDSnapshotGrid.appendChild(wrapper);
@@ -1253,13 +1315,13 @@ function saved3DViewForSelectedCandidate() {
 function drawSelected3DPreview() {
   const patch = selected3DPatch(state.initialization);
   const choice = state.initialization?.selected_3d_choice;
-  threeDPreview.hidden = !patch;
-  reset3DViewButton.disabled = !patch;
+  setIfChanged(threeDPreview, "hidden", !patch);
+  setIfChanged(reset3DViewButton, "disabled", !patch);
   if (!patch) {
     clear3DPreview();
     return;
   }
-  threeDPreviewTitle.textContent = choice ? `Choice ${choice}` : "Selected candidate";
+  setIfChanged(threeDPreviewTitle, "textContent", choice ? `Choice ${choice}` : "Selected candidate");
   applyInitial3DView(patch);
   draw3DPreview(patch);
 }
@@ -1721,16 +1783,15 @@ async function performInitializationAction(endpoint, fields, pendingMessage, suc
 async function runDscgr() {
   if (!state.statusAvailable || state.dscgrInFlight || state.initializationAction
       || state.reinitializationAction || state.reinitialization?.in_progress === true
-      || state.alignmentSelectionAction || state.alignmentConfiguration?.in_progress === true
       || !state.initialization?.session_id || state.initialization.status !== "ready_for_3d") {
     return;
   }
   state.dscgrInFlight = true;
   const context = state.contextRevision;
   const sessionId = state.initialization.session_id;
-  runDscgrButton.disabled = true;
+  setIfChanged(runDscgrButton, "disabled", true);
   renderInitialization(state.initialization);
-  dscgrStatus.textContent = "running";
+  setIfChanged(dscgrStatus, "textContent", "running");
   try {
     const result = await fetchJson("/api/dscgr/run", {
       method: "POST",
@@ -1738,14 +1799,14 @@ async function runDscgr() {
     });
     if (context !== state.contextRevision || sessionId !== state.initialization?.session_id) return;
     const count = Array.isArray(result.processed_ptrs) ? result.processed_ptrs.length : 0;
-    dscgrStatus.textContent = `done: ${count} frames, ${result.output_dir || ""}`;
+    setIfChanged(dscgrStatus, "textContent", `done: ${count} frames, ${result.output_dir || ""}`);
     try {
       await loadStatus();
     } catch (error) {
-      dscgrStatus.textContent = `Run completed: ${count} frames. Status refresh failed; wait for reconnection.`;
+      setIfChanged(dscgrStatus, "textContent", `Run completed: ${count} frames. Status refresh failed; wait for reconnection.`);
     }
   } catch (error) {
-    if (context === state.contextRevision && sessionId === state.initialization?.session_id) dscgrStatus.textContent = error.message;
+    if (context === state.contextRevision && sessionId === state.initialization?.session_id) setIfChanged(dscgrStatus, "textContent", error.message);
   } finally {
     state.dscgrInFlight = false;
     renderInitialization(state.initialization);
@@ -1773,7 +1834,7 @@ runParametersDialog.addEventListener("click", (event) => {
 });
 
 refreshImagesButton.addEventListener("click", async () => {
-  if (state.sourceActionInFlight || state.reinitializationAction || state.alignmentSelectionAction) return;
+  if (state.sourceActionInFlight || state.reinitializationAction) return;
   state.sourceActionInFlight = true;
   const context = state.contextRevision;
   state.sourceError = null;
@@ -1837,9 +1898,8 @@ confirm3DChoiceButton.addEventListener("click", async () => {
     return;
   }
   captureCurrent3DSnapshot();
-  const fields = state.alignmentConfiguration ? { alignment_method: state.alignmentConfiguration.method } : {};
-  const successMessage = state.alignmentConfiguration
-    ? "Candidate and alignment confirmed; baseline established." : "Candidate confirmed; baseline established.";
+  const fields = { alignment_method: state.alignmentConfiguration.method };
+  const successMessage = "Candidate and alignment confirmed; baseline established.";
   await performInitializationAction("confirm", fields, "Confirming selected candidate…", successMessage, { refresh: true });
 });
 
@@ -1892,8 +1952,8 @@ refreshOverlayButton.addEventListener("click", () => {
 });
 
 measurementOverlay.addEventListener("error", () => {
-  measurementOverlay.hidden = true;
-  measurementOverlayCaption.textContent = "Overlay is not available yet.";
+  setIfChanged(measurementOverlay, "hidden", true);
+  setIfChanged(measurementOverlayCaption, "textContent", "Overlay is not available yet.");
 });
 
 undoInitButton.addEventListener("click", async () => {
@@ -1909,7 +1969,7 @@ resetInitButton.addEventListener("click", async () => {
 
 initCanvas.addEventListener("click", (event) => {
   submitInitializationPoint(event).catch((error) => {
-    initSaveStatus.textContent = error.message;
+    setIfChanged(initSaveStatus, "textContent", error.message);
   });
 });
 
@@ -1926,7 +1986,7 @@ async function initializePage() {
 initializePage();
 
 function refreshPage() {
-  if (state.reinitializationAction || state.alignmentSelectionAction) return;
+  if (state.reinitializationAction) return;
   Promise.allSettled([loadParameterMetadata(), refreshOverview()]);
 }
 window.addEventListener("focus", refreshPage);

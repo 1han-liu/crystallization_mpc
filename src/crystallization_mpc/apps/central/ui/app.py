@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import copy
+import hashlib
 import os
 import json
 import stat
@@ -25,7 +27,9 @@ from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.archive import ExperimentArchive
 from crystallization_mpc.infra.storage_paths import system_path
+from crystallization_mpc.infra.file_version import file_version
 from crystallization_mpc.apps.central.runtime_controls import RuntimeRequestStore
+from crystallization_mpc.apps.central.delivery import DeliveryLane, DeliveryBusy, DeliveryCancelled
 from crystallization_mpc.apps.central.params import (
     ParameterValidationError,
     apply_derived_params,
@@ -62,7 +66,6 @@ from crystallization_mpc.infra.rabbitmq.topology import declare_exchange, declar
 from crystallization_mpc.messaging.idgen import next_seq
 from crystallization_mpc.messaging.commands import (
     CONTROLLER_ADD_SEED_COMMAND,
-    CONTROLLER_ADAPTATION_SET_COMMAND,
     CONTROLLER_RUNTIME_UPDATE_COMMAND,
     EXPERIMENT_MODE_LIVE,
     EXPERIMENT_SELECT_COMMAND,
@@ -76,7 +79,6 @@ from crystallization_mpc.messaging.commands import (
 )
 from crystallization_mpc.messaging.contracts import (
     ControllerAddSeedPayload,
-    ControllerAdaptationPayload,
     ExperimentStartPayload,
     ExperimentStopPayload,
     GsensorActivationPayload,
@@ -105,6 +107,7 @@ LATEST_OVERLAY_FILENAME = "gsensor_detection_latest.jpg"
 FINAL_OVERLAY_FILENAME = "gsensor_detection_final.jpg"
 GSENSOR_ACTIVATION_STATE_FILENAME = ".central_gsensor_activation.json"
 GSENSOR_PROCESSING_STATE_FILENAME = "gsensor_processing_state.json"
+CONTROLLER_OBSERVATION_MAX_AGE_SEC = 5.0
 logger = logging.getLogger(__name__)
 
 
@@ -178,12 +181,6 @@ class ExperimentCreateRequest(ExperimentContext):
     label: str | None = Field(default=None, max_length=120)
 
 
-class AdaptationUpdate(ExperimentContext):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    enabled: bool
-
-
 class CentralApp:
     def __init__(
         self,
@@ -198,6 +195,10 @@ class CentralApp:
         self.include_broadcast = include_broadcast
         self._conn = None
         self._ch = None
+        self._delivery_guard = None
+
+    def independent(self):
+        return CentralApp(self.url, self.exchange, self.queue_name, self.include_broadcast)
 
     def _is_connection_open(self) -> bool:
         return self._conn is not None and bool(getattr(self._conn, "is_open", False))
@@ -237,10 +238,16 @@ class CentralApp:
     ) -> None:
         last_error: Optional[Exception] = None
         for attempt in range(2):
+            if self._delivery_guard:
+                self._delivery_guard()
             try:
                 ch = self._require_channel()
+                if self._delivery_guard:
+                    self._delivery_guard()
                 publish(ch, self.exchange, routing_key, payload, persistent=persistent)
                 return
+            except DeliveryCancelled:
+                raise
             except Exception as exc:
                 last_error = exc
                 logger.warning(
@@ -248,7 +255,7 @@ class CentralApp:
                     attempt + 1,
                     exc_info=True,
                 )
-                self.connect(force=True)
+                self.close()
         raise RuntimeError("RabbitMQ publish failed after reconnect.") from last_error
 
     def publish_params(
@@ -260,12 +267,15 @@ class CentralApp:
         *,
         parameter_sections: Dict[str, Dict[str, object]] | None = None,
         include_parameter_sections: bool = True,
+        experiment: Dict[str, Any] | None = None,
     ) -> Dict[str, Dict[str, Any]]:
         seq = next_seq()
         messages: Dict[str, Dict[str, Any]] = {}
+        identity = ({"run_id": experiment["run_id"], "experiment_started_at": experiment["started_at"]}
+                    if experiment is not None else {})
 
         if shared or gsensor:
-            payload = {"version": version, "params": {**shared, **gsensor}}
+            payload = {"version": version, "params": {**shared, **gsensor}, **identity}
             env = build_envelope(
                 src=ROLE,
                 dst="gsensor",
@@ -280,7 +290,7 @@ class CentralApp:
         if shared or controller:
             sections = parameter_sections or {"shared": shared, "gsensor": gsensor, "controller": controller}
             policies = parameter_policies()
-            payload = {"version": version, "params": {**shared, **controller}}
+            payload = {"version": version, "params": {**shared, **controller}, **identity}
             if include_parameter_sections:
                 payload["parameter_sections"] = {
                     section: {key: value for key, value in values.items() if key in policies[section]}
@@ -446,55 +456,6 @@ class CentralApp:
         )
         return env
 
-    def build_controller_adaptation_command(
-        self,
-        run_id: str,
-        *,
-        event_id: str,
-        enabled: bool,
-        mode: str,
-        requested_at: str,
-        seq: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        payload = ControllerAdaptationPayload(
-            run_id=run_id,
-            event_id=event_id,
-            enabled=enabled,
-            mode=mode,
-            requested_at=requested_at,
-        )
-        return build_envelope(
-            src=ROLE,
-            dst="controller",
-            msg_type="command",
-            name=CONTROLLER_ADAPTATION_SET_COMMAND,
-            seq=next_seq() if seq is None else seq,
-            payload=payload.to_dict(),
-        )
-
-    def publish_controller_adaptation_command(
-        self,
-        run_id: str,
-        *,
-        enabled: bool,
-        mode: str,
-        event_id: str | None = None,
-        requested_at: str | None = None,
-    ) -> Dict[str, Any]:
-        env = self.build_controller_adaptation_command(
-            run_id,
-            event_id=event_id or uuid4().hex,
-            enabled=enabled,
-            mode=mode,
-            requested_at=requested_at or utc_ts(),
-        )
-        self._publish_with_reconnect(
-            route(ROLE, "controller"),
-            env,
-            persistent=True,
-        )
-        return env
-
     def publish_controller_runtime_command(
         self, payload: ControllerRuntimeUpdatePayload,
     ) -> Dict[str, Any]:
@@ -592,16 +553,29 @@ class CentralApp:
         self._publish_with_reconnect(route(ROLE, "gsensor"), env, persistent=True)
         return env
 
-def _locked_service_state(method):
-    @wraps(method)
-    def call(self, *args, **kwargs):
-        with self._lock:
-            return method(self, *args, **kwargs)
-    return call
+def _action_lock(name, *, lifecycle=False, timeout=0.1):
+    """Serialize one actual conflict domain; never use the snapshot lock for I/O."""
+    def decorate(method):
+        @wraps(method)
+        def call(self, *args, **kwargs):
+            lock = getattr(self, name)
+            if not lock.acquire(timeout=timeout):
+                raise DeliveryBusy("A related operation is still preparing; retry the same request.")
+            try:
+                self._check_ui_context()
+                try:
+                    return method(self, *args, **kwargs)
+                finally:
+                    if lifecycle:
+                        self._publish_local_status()
+            finally:
+                lock.release()
+        return call
+    return decorate
 
 
 class CentralService:
-    def __init__(self, publisher: CentralApp | None = None) -> None:
+    def __init__(self, publisher: CentralApp | None = None, *, stop_publisher: CentralApp | None = None) -> None:
         self.ui_mode = resolve_ui_mode()
         self.default_params_path = Path(os.getenv("PARAMS_DEFAULT_FILE", str(DEFAULT_PARAMS_PATH)))
         self.param_meta_path = Path(os.getenv("PARAM_META_FILE", str(DEFAULT_PARAM_META_PATH)))
@@ -632,6 +606,13 @@ class CentralService:
         )
         self.target: Literal["sigma", "G"] = self.run_configuration.control_target  # type: ignore[assignment]
         self.publisher = publisher or CentralApp()
+        self.stop_publisher = stop_publisher or (
+            self.publisher.independent() if isinstance(self.publisher, CentralApp) else CentralApp()
+        )
+        if self.stop_publisher is self.publisher:
+            raise ValueError("Stop delivery requires an independent publisher connection.")
+        self._ordinary_delivery = DeliveryLane(self.publisher, "central-command-delivery")
+        self._stop_delivery = DeliveryLane(self.stop_publisher, "central-stop-delivery", capacity=8)
         self.process_source = ProcessSourceMonitor.from_env(
             getattr(self.publisher, "url", os.getenv("RABBIT_URL", "amqp://guest:guest@localhost:5672/%2F")),
             getattr(self.publisher, "exchange", os.getenv("RABBIT_EXCHANGE", EXCHANGE)),
@@ -652,9 +633,28 @@ class CentralService:
         self.status_rejection_count = 0
         self._consumer_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._preparation_lock = threading.RLock()
+        self._operation_cache_lock = threading.RLock()
+        self._operation_cache = None
+        self._runtime_action_lock = threading.RLock()
+        self._activation_lock = threading.RLock()
+        self._message_lock = threading.RLock()
+        self._end_lock = threading.RLock()
+        self._ui_context = threading.local()
+        self._status_stop = threading.Event()
+        self._status_thread = None
+        self._status_generation = 0
+        self._stopping_runs = set()
+        self._controller_observation = {"available": False, "status": "unavailable", "active": False,
+                                        "error": "Waiting for Controller status.", "observed_at": None}
+        self._controller_observed_monotonic = None
+        self._status_snapshot = {"observed_at": None, "controller": copy.deepcopy(self._controller_observation),
+                                 "runtime_request": None, "runtime_history": [], "runtime_history_error": None,
+                                 "archive": None, "archive_error": None,
+                                 "process_source": self.process_source.status()}
         self.runtime_request_store = RuntimeRequestStore(self.experiment_root)
-        # History requests can take seconds. Never acquire this lock while
-        # holding the UI/command lock, or a slow historical run blocks live UI.
+        # History requests own their coordination; their network/storage work
+        # never holds the live status snapshot lock.
         self._runtime_history_sync_lock = threading.RLock()
         self._runtime_history_cursors: dict[str, int] = {}
         self.runtime_history_error: str | None = None
@@ -663,6 +663,7 @@ class CentralService:
         self.runtime_export_error: str | None = None
         self.runtime_export_enabled = os.getenv("CENTRAL_RUNTIME_INFLUX_ENABLED", os.getenv("CONTROLLER_INFLUX_ENABLED", "false")).lower() == "true"
         self.archive = ExperimentArchive(self.experiments, controller_status=self.controller_status)
+        self._publish_local_status()
 
     def _sync_runtime_history(self, run_id: str, controller: dict[str, Any], *, all_pages=False):
         # Serialize cursor advancement with explicit history refreshes without
@@ -720,14 +721,10 @@ class CentralService:
         try:
             while not self._runtime_monitor_stop.is_set():
                 try:
-                    runs = self.experiments.list().get("experiments", [])
+                    run_id = self.experiments.current_run_id()
                     controller = self.controller_status()
-                    for run in runs:
-                        if self._runtime_monitor_stop.is_set():
-                            break
-                        self._sync_runtime_history(run["run_id"], controller)
-                        with self._lock:
-                            self.runtime_request_store.observe(run["run_id"], controller)
+                    if run_id is not None:
+                        self._sync_runtime_history(run_id, controller)
                     if self.runtime_export_enabled:
                         if writer is None:
                             writer = create_runtime_writer(self.experiment_root)
@@ -753,14 +750,126 @@ class CentralService:
 
     @contextmanager
     def ui_action(self, context: ExperimentContext | None = None):
-        """Check the displayed run and execute its action without a UI switch race."""
-        with self._lock:
-            if context is not None and "expected_run_id" in context.model_fields_set:
-                if context.expected_run_id != self.experiments.current_run_id():
-                    raise InvalidExperimentStateError(
-                        "The selected experiment changed. Refresh the page before retrying this action."
-                    )
+        """Carry displayed identity to the operation's own commit/prepare lock."""
+        previous = getattr(self._ui_context, "value", None)
+        self._ui_context.value = context
+        try:
             yield
+        finally:
+            self._ui_context.value = previous
+
+    def _check_ui_context(self):
+        context = getattr(self._ui_context, "value", None)
+        if context is not None and "expected_run_id" in context.model_fields_set:
+            if context.expected_run_id != self.experiments.current_run_id():
+                raise InvalidExperimentStateError("The selected experiment changed. Refresh before retrying.")
+
+    def _deliver(self, key, run_id, action, *, stop=False, completed=None):
+        lane = self._stop_delivery if stop else self._ordinary_delivery
+        def deliver(publisher):
+            if not stop and not key.startswith("select:"):
+                self._require_run_open(run_id)
+            return action(publisher)
+        job = lane.submit(key, run_id, deliver, completed)
+        delivery, result = lane.wait(job)
+        return delivery, result
+
+    def _require_run_open(self, run_id):
+        with self._lock:
+            ending = run_id in self._stopping_runs
+        manifest = self.experiments.registry.get(run_id)
+        if ending or manifest.status in {ExperimentStatus.STOPPING, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+            raise DeliveryCancelled("Experiment has ended; this command was not delivered.")
+
+    def _deliver_runtime(self, event, method):
+        def completed(job):
+            self.runtime_request_store.update_delivery(event.run_id, event.event_id, job.public())
+        delivery, _ = self._deliver(f"runtime:{event.run_id}:{event.event_id}", event.run_id,
+                                    lambda p: getattr(p, method)(event), completed=completed)
+        entry = self.runtime_request_store.get(event.run_id)
+        if entry and entry["command"]["event_id"] == event.event_id:
+            entry["delivery"] = delivery
+        return entry
+
+    @staticmethod
+    def _require_delivery(delivery):
+        if delivery["status"] == "cancelled":
+            raise DeliveryCancelled(delivery["error"] or "Experiment ended before delivery.")
+        if delivery["status"] == "unconfirmed":
+            raise RuntimeError(delivery["error"] or "Command delivery is unconfirmed.")
+
+    def _publish_local_status(self):
+        # Registry/activation files are never read while holding the snapshot lock.
+        with self._lock:
+            self._status_generation += 1
+            generation = self._status_generation
+        try:
+            experiments = self.experiments.list()
+            current = next((x for x in experiments["experiments"]
+                            if x["run_id"] == experiments["current_run_id"]), None)
+            with self._lock:
+                if generation != self._status_generation:
+                    return
+                gsensor = dict(self._status_snapshot.get("gsensor") or {})
+                same_run = self.last_gsensor_status and self.last_gsensor_status.get("run_id") == experiments["current_run_id"]
+                gsensor.update(last_status=copy.deepcopy(self.last_gsensor_status) if same_run else None,
+                    received_at=self.last_gsensor_status_received_at if same_run else None,
+                    consumer_error=self.last_status_consumer_error, last_rejection_error=self.last_rejected_status_error,
+                    message_count=self.status_message_count, rejection_count=self.status_rejection_count)
+                if (gsensor.get("activation") or {}).get("run_id") != experiments["current_run_id"]:
+                    gsensor["activation"] = None
+                self._status_snapshot = {**self._status_snapshot, "experiments": experiments,
+                                         "current_experiment": current, "gsensor": gsensor}
+        except Exception:
+            logger.exception("Could not publish local experiment status.")
+
+    def _status_monitor(self):
+        while not self._status_stop.is_set():
+            try:
+                self.refresh_status()
+            except Exception:
+                logger.exception("Central status refresh failed; retaining last complete snapshot.")
+            # AMQP bursts must not increase the remote polling rate.
+            self._status_stop.wait(1)
+
+    def refresh_status(self):
+        with self._lock:
+            generation = self._status_generation
+        controller = self._fetch_controller_status()
+        controller["observed_at"] = utc_ts()
+        observed_monotonic = time.monotonic()
+        with self._lock:
+            self._controller_observation = controller
+            self._controller_observed_monotonic = observed_monotonic
+        snapshot = self._collect_system_status(controller)
+        snapshot["_controller_observed_monotonic"] = observed_monotonic
+        with self._lock:
+            if generation != self._status_generation:
+                # Messages/actions can advance local lifecycle during HTTP or
+                # storage waits. Publish the observation without rewinding it.
+                latest = self._status_snapshot
+                previous_run = (snapshot.get("current_experiment") or {}).get("run_id")
+                current_run = (latest.get("current_experiment") or {}).get("run_id")
+                snapshot.update(experiments=latest["experiments"], current_experiment=latest["current_experiment"])
+                activation = snapshot["gsensor"].get("activation")
+                snapshot["gsensor"] = copy.deepcopy(latest["gsensor"])
+                if previous_run == current_run:
+                    snapshot["gsensor"]["activation"] = activation
+                else:
+                    snapshot.update(runtime_request=None, runtime_history=[], archive=None, archive_error=None)
+            self._status_snapshot = snapshot
+
+    def system_status(self):
+        with self._lock:
+            payload = copy.deepcopy(self._status_snapshot)
+        observed = payload.pop("_controller_observed_monotonic", None)
+        controller = payload["controller"]
+        controller["age_s"] = None if observed is None else max(0, time.monotonic() - observed)
+        controller["stale"] = observed is None or controller["age_s"] > CONTROLLER_OBSERVATION_MAX_AGE_SEC
+        if controller["stale"]:
+            controller.update(available=False, error="Controller observation is stale; waiting for background refresh.")
+        payload["delivery"] = {"ordinary": self._ordinary_delivery.status(), "stop": self._stop_delivery.status()}
+        return payload
 
     def _gsensor_activation_path(
         self, run_id: str, *, run_directory: Path | None = None,
@@ -1020,7 +1129,7 @@ class CentralService:
         }
 
     def gsensor_activation_status(self, *, experiment: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        with self._lock:
+        with self._activation_lock:
             try:
                 if experiment is not None:
                     # system_status already resolved the current manifest and
@@ -1055,8 +1164,8 @@ class CentralService:
                     "blocked_reason": "Repair the persisted activation state before retrying.",
                 }
 
-    @_locked_service_state
-    def set_gsensor_activation(
+    @_action_lock("_activation_lock")
+    def _prepare_gsensor_activation(
         self,
         request: GsensorActivationRequest | Dict[str, Any],
     ) -> Dict[str, Any]:
@@ -1167,32 +1276,31 @@ class CentralService:
             # The pending intent is durable before either service can receive it.
             self._save_gsensor_activation_state(state)
 
-        messages: Dict[str, Dict[str, Any]] = {}
-        transport_error = None
-        try:
-            messages = self.publisher.publish_gsensor_activation_command(
-                command,
-                enabled=request.enabled,
-            )
-        except Exception as exc:
-            transport_error = f"Delivery not confirmed: {type(exc).__name__}"
+        return {"manifest": manifest, "command": command, "enabled": request.enabled, "retrying": retrying}
 
-        # A synchronous in-memory status publisher can acknowledge and clear the
-        # request during publish. Reload and never resurrect such an acknowledgment.
-        latest = self._load_gsensor_activation_state(manifest, create=True)
-        latest_pending = latest.get("pending")
-        if (
-            latest_pending is not None
-            and latest_pending.get("revision") == command.revision
-            and latest_pending.get("event_id") == command.event_id
-        ):
-            latest_pending["transport_error"] = transport_error
-            latest["pending"] = latest_pending
-            self._save_gsensor_activation_state(latest)
+    def set_gsensor_activation(self, request):
+        prepared = self._prepare_gsensor_activation(request)
+        if "command" not in prepared:
+            return prepared
+        manifest, command = prepared["manifest"], prepared["command"]
+        run_id, enabled = manifest.run_id, prepared["enabled"]
+        def completed(job):
+            with self._activation_lock:
+                latest = self._load_gsensor_activation_state(manifest, create=True)
+                pending = latest.get("pending")
+                if pending and pending.get("event_id") == command.event_id:
+                    pending["transport_error"] = job.error
+                    pending["delivery"] = job.public()
+                    self._save_gsensor_activation_state(latest)
+        delivery, messages = self._deliver(f"activation:{run_id}:{command.event_id}", run_id,
+            lambda p: p.publish_gsensor_activation_command(command, enabled=enabled), completed=completed)
+        with self._activation_lock:
+            latest = self._load_gsensor_activation_state(manifest, create=True)
         return {
             "requested": True,
-            "idempotent": retrying,
-            "commands": messages,
+            "idempotent": prepared["retrying"],
+            "commands": messages or {},
+            "delivery": delivery,
             "activation": self._gsensor_activation_public_state(manifest, latest),
         }
 
@@ -1317,7 +1425,7 @@ class CentralService:
             "source_file": str(self.run_configuration_store.path),
         }
 
-    @_locked_service_state
+    @_action_lock("_preparation_lock")
     def update_run_configuration(
         self,
         payload: RunConfigurationUpdate | Dict[str, Any],
@@ -1341,7 +1449,7 @@ class CentralService:
             self.run_configuration = configuration
             self.target = configuration.control_target  # type: ignore[assignment]
             self._sync_operation_state_from_run_configuration()
-        # The same command already verified editability under ui_action's lock.
+        # The same command verified editability under the preparation lock.
         # Reuse that result for its response; independent reads still revalidate.
         result = self.run_configuration_payload(locked=False)
         result["saved"] = True
@@ -1385,9 +1493,12 @@ class CentralService:
         )
 
     def start(self) -> None:
-        self.publisher.connect()
         self.process_source.start()
         self.archive.start()
+        if not self._status_thread or not self._status_thread.is_alive():
+            self._status_stop.clear()
+            self._status_thread = threading.Thread(target=self._status_monitor, name="central-status", daemon=True)
+            self._status_thread.start()
         if not self._runtime_monitor_thread or not self._runtime_monitor_thread.is_alive():
             self._runtime_monitor_stop.clear()
             self._runtime_monitor_thread = threading.Thread(target=self._runtime_monitor, name="central-runtime-events", daemon=True)
@@ -1402,12 +1513,16 @@ class CentralService:
         self._consumer_thread.start()
 
     def stop(self) -> None:
+        self._status_stop.set()
+        if self._status_thread:
+            self._status_thread.join(timeout=2)
         self.process_source.stop()
         self.archive.stop()
         self._runtime_monitor_stop.set()
         if self._runtime_monitor_thread:
             self._runtime_monitor_thread.join(timeout=3)
-        self.publisher.close()
+        self._ordinary_delivery.close()
+        self._stop_delivery.close()
 
     def _consume_forever(self) -> None:
         while True:
@@ -1425,7 +1540,7 @@ class CentralService:
                 logger.exception("Central RabbitMQ consumer stopped; retrying.")
                 time.sleep(5)
 
-    @_locked_service_state
+    @_action_lock("_message_lock", lifecycle=True, timeout=-1)
     def on_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
         try:
             if message.get("src") != "gsensor" or message.get("dst") != ROLE:
@@ -1502,8 +1617,9 @@ class CentralService:
             except (KeyError, TypeError, ValueError):
                 # Older valid producers may not have a comparable timestamp.
                 pass
-        if not self._observe_gsensor_activation(payload, manifest):
-            return False
+        with self._activation_lock:
+            if not self._observe_gsensor_activation(payload, manifest):
+                return False
         if payload.enabled:
             self.archive.note_gsensor_enabled(run_id)
         status = payload.status
@@ -1588,6 +1704,16 @@ class CentralService:
         return True
 
     def controller_status(self) -> Dict[str, Any]:
+        with self._lock:
+            result = copy.deepcopy(self._controller_observation)
+            observed = self._controller_observed_monotonic
+        result["age_s"] = None if observed is None else max(0, time.monotonic() - observed)
+        result["stale"] = observed is None or result["age_s"] > CONTROLLER_OBSERVATION_MAX_AGE_SEC
+        if result["stale"]:
+            result.update(available=False, error="Controller status is stale; waiting for background observation.")
+        return result
+
+    def _fetch_controller_status(self) -> Dict[str, Any]:
         try:
             with urllib.request.urlopen(self.controller_status_url, timeout=1.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -1620,8 +1746,7 @@ class CentralService:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return {"available": False, "error": str(exc)}
 
-    @_locked_service_state
-    def system_status(self) -> Dict[str, Any]:
+    def _collect_system_status(self, controller) -> Dict[str, Any]:
         experiments = self.experiments.list()
         current_run_id = experiments.get("current_run_id")
         current = next(
@@ -1633,22 +1758,18 @@ class CentralService:
             None,
         )
         with self._lock:
-            same_run = bool(
-                self.last_gsensor_status
-                and self.last_gsensor_status.get("run_id") == current_run_id
-            )
+            same_run = bool(self.last_gsensor_status and self.last_gsensor_status.get("run_id") == current_run_id)
             gsensor = {
-                "last_status": self.last_gsensor_status if same_run else None,
+                "last_status": copy.deepcopy(self.last_gsensor_status) if same_run else None,
                 "received_at": self.last_gsensor_status_received_at if same_run else None,
                 "consumer_error": self.last_status_consumer_error,
                 "last_rejection_error": self.last_rejected_status_error,
                 "message_count": self.status_message_count,
                 "rejection_count": self.status_rejection_count,
-                "activation": self.gsensor_activation_status(experiment=current),
             }
-        controller = self.controller_status()
-        # The background monitor reconciles full history. A status poll only
-        # observes the latest Controller snapshot and already persisted results.
+        gsensor["activation"] = self.gsensor_activation_status(experiment=current)
+        # Full history has its own monitor. This background snapshot refresh
+        # reconciles the latest Controller observation and durable request.
         request = self.runtime_request_store.observe(current_run_id, controller)
         errors = [self.runtime_history_error, self.runtime_request_store.observation_error]
         try:
@@ -1658,6 +1779,7 @@ class CentralService:
             errors.append(f"History unavailable: {type(exc).__name__}")
         archive = self.archive.status_summary(current) if current else None
         return {
+            "observed_at": utc_ts(),
             "current_experiment": current,
             "experiments": experiments,
             "gsensor": gsensor,
@@ -1746,6 +1868,7 @@ class CentralService:
         state["target"] = self.target
         return state
 
+    @_action_lock("_preparation_lock")
     def update_operation_value(self, key: str, value: Any) -> Dict[str, Any]:
         legacy_fields = {
             "mode": "controller_mode",
@@ -1783,12 +1906,19 @@ class CentralService:
             "value": self.operation_state.get(key),
         }
 
+    def parameter_document_revision(self):
+        return hashlib.sha256(repr(tuple((str(path), file_version(path)) for path in
+            (self.default_params_path, self.params_path, self.param_meta_path))).encode()).hexdigest()
+
     def params_payload(self) -> Dict[str, Any]:
+        revision = self.parameter_document_revision()
         shared, gsensor, controller, version = self.load_params()
         default_shared, default_gsensor, default_controller, default_version = (
             self.load_default_params()
         )
+        manifest = self.experiments.current_manifest()
         result = {
+            "document_revision": revision,
             "version": version,
             "shared": shared,
             "gsensor": gsensor,
@@ -1810,9 +1940,9 @@ class CentralService:
                 controller=controller,
                 version=version,
                 defaults=(default_shared, default_gsensor, default_controller),
+                manifest=manifest,
             ),
         }
-        manifest = self.experiments.current_manifest()
         if manifest is not None and manifest.status not in {
             ExperimentStatus.CREATED, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR,
         }:
@@ -1854,6 +1984,7 @@ class CentralService:
             Dict[str, object],
         ]
         | None = None,
+        manifest: ExperimentManifest | None = None,
     ) -> Dict[str, Any]:
         if shared is None or gsensor is None or controller is None or version is None:
             shared, gsensor, controller, version = self.load_params()
@@ -1872,7 +2003,8 @@ class CentralService:
 
         applied_run_id = None
         applied_at = None
-        manifest = self.experiments.current_manifest()
+        if manifest is None:
+            manifest = self.experiments.current_manifest()
         if (
             manifest is not None
             and manifest.params_snapshot_file
@@ -1901,6 +2033,7 @@ class CentralService:
             "applied_at": applied_at,
         }
 
+    @_action_lock("_preparation_lock")
     def save_params(
         self,
         payload: ParamsUpdate,
@@ -1963,7 +2096,7 @@ class CentralService:
         result["changed"] = changed
         return result
 
-    @_locked_service_state
+    @_action_lock("_runtime_action_lock")
     def update_run_parameters(self, payload: ParamsUpdate) -> Dict[str, Any]:
         """Persist a run-local delta before delivery; never write the startup draft."""
         run_id, controller = self._require_running_controller("Save Parameters")
@@ -1980,21 +2113,19 @@ class CentralService:
                                               or "Controller does not support online parameter updates.")
         # Preserve the exact original request on retry, including requested_at.
         prior = self.runtime_request_store.observe(run_id, controller)
-        original = (prior or {}).get("command") or {}
-        retry = original.get("event_id") == payload.event_id
+        original = (self.runtime_request_store.get_event(run_id, payload.event_id) or {}).get("command") or {}
         event = RunParametersUpdatePayload.from_mapping({
             "run_id": run_id, "event_id": payload.event_id,
             "expected_revision": payload.expected_revision,
             "changes": payload.changes,
-            "requested_at": payload.requested_at or (original.get("requested_at") if retry else utc_ts()),
+            "requested_at": payload.requested_at or original.get("requested_at") or utc_ts(),
             "experiment_started_at": payload.experiment_started_at,
         })
-        if retry:
-            if original != event.to_dict():
-                raise InvalidExperimentStateError("Runtime event_id was reused with different content.")
-            if prior["status"] in {"applied", "rejected"}:
-                return {**self.params_payload(), "requested": False, "runtime_request": prior}
-            entry = prior
+        known = self._known_runtime_request(event, controller, prior)
+        if known:
+            if known["status"] in {"applied", "rejected"}:
+                return {**self.params_payload(), "requested": False, "runtime_request": known}
+            entry = known
         else:
             if prior and prior["status"] not in {"applied", "rejected"}:
                 self._record_runtime_rejection(event, runtime, "A runtime request is unconfirmed; retry that same event.")
@@ -2009,13 +2140,7 @@ class CentralService:
             entry = {"command": event.to_dict(), "status": "pending", "created_at": time.time(),
                      "result": None, "transport_error": None}
         self.runtime_request_store.save(run_id, entry)
-        try:
-            self.publisher.publish_run_parameters_command(event)
-        except Exception as exc:
-            entry["transport_error"] = f"Delivery not confirmed: {type(exc).__name__}"
-        else:
-            entry["transport_error"] = None
-        self.runtime_request_store.save(run_id, entry)
+        entry = self._deliver_runtime(event, "publish_run_parameters_command")
         return {**self.params_payload(), "requested": True, "runtime_request": entry}
 
     def _require_parameter_draft_editable(self) -> None:
@@ -2032,6 +2157,7 @@ class CentralService:
                 "before preparing another parameter draft."
             )
 
+    @_action_lock("_preparation_lock")
     def reset_params_to_defaults(self) -> Dict[str, Any]:
         shared, gsensor, controller, _default_version = self.load_default_params()
         _current_shared, _current_gsensor, _current_controller, current_version = (
@@ -2058,37 +2184,69 @@ class CentralService:
             "derived": derived,
         }
 
+    def operation_payload(self, revision=None):
+        def current_revision():
+            manifest = self.experiments.current_manifest()
+            identity = (manifest.run_id, manifest.started_at, manifest.status.value) if manifest else None
+            return hashlib.sha256(json.dumps([self.parameter_document_revision(), identity,
+                self.run_configuration.to_dict(), self.run_configuration_store.updated_at,
+                self.operation_state], sort_keys=True).encode()).hexdigest()
+        with self._operation_cache_lock:
+            version = current_revision()
+            if revision == version:
+                return {"revision": version, "unchanged": True}
+            if self._operation_cache and self._operation_cache[0] == version:
+                return copy.deepcopy(self._operation_cache[1])
+            payload = {"target": self.target, "state": dict(self.operation_state),
+                       "run_configuration": self.run_configuration_payload(),
+                       "parameters_revision": self.parameter_document_revision(),
+                       "preview": self.preview_publish_payload(), "revision": None}
+            if version == current_revision():
+                payload["revision"] = version
+                self._operation_cache = (version, copy.deepcopy(payload))
+            return payload
+
+    def runtime_request_status(self, run_id, event_id):
+        self.experiments.registry.get(run_id)
+        entry = self.runtime_request_store.get_event(run_id, event_id)
+        return self.runtime_request_store.project(entry, self.controller_status()) if entry else None
+
+    @_action_lock("_preparation_lock", lifecycle=True)
     def create_experiment(self, *, label: str | None = None) -> Dict[str, Any]:
         """Prepare a new run without starting either experiment service."""
 
         self._require_experiment_switch_allowed()
         experiment = self.experiments.create(label=label)
         try:
-            command = self.publisher.publish_experiment_select_command(
-                experiment["run_id"],
-                image_directory=experiment["image_directory"],
-            )
+            delivery, command = self._deliver(f"select:{experiment['run_id']}", experiment["run_id"],
+                lambda p: p.publish_experiment_select_command(experiment["run_id"],
+                                                              image_directory=experiment["image_directory"]))
+            self._require_delivery(delivery)
+        except (DeliveryBusy, DeliveryCancelled):
+            raise
         except Exception as exc:
             raise RuntimeError(
                 "The experiment was created, but its selection could not be delivered "
                 "to Gsensor. Keep this experiment and use Retry Selection before Start."
             ) from exc
-        return {**experiment, "selection_command": command}
+        return {**experiment, "selection_command": command or {}, "delivery": delivery}
 
+    @_action_lock("_preparation_lock", lifecycle=True)
     def select_experiment(self, run_id: str) -> Dict[str, Any]:
         self._require_experiment_switch_allowed(run_id)
         experiment = self.experiments.select(run_id)
         try:
-            command = self.publisher.publish_experiment_select_command(
-                experiment["run_id"],
-                image_directory=experiment["image_directory"],
-            )
+            delivery, command = self._deliver(f"select:{run_id}", run_id,
+                lambda p: p.publish_experiment_select_command(run_id, image_directory=experiment["image_directory"]))
+            self._require_delivery(delivery)
+        except (DeliveryBusy, DeliveryCancelled):
+            raise
         except Exception as exc:
             raise RuntimeError(
                 "The experiment is selected in Central, but delivery to Gsensor failed. "
                 "Keep this experiment and use Retry Selection before Start."
             ) from exc
-        return {**experiment, "selection_command": command}
+        return {**experiment, "selection_command": command or {}, "delivery": delivery}
 
     def _require_experiment_switch_allowed(self, run_id: str | None = None) -> None:
         current_run_id = self.experiments.current_run_id()
@@ -2143,6 +2301,7 @@ class CentralService:
             )
         return controller
 
+    @_action_lock("_preparation_lock", lifecycle=True)
     def start_experiment(self, params: ParamsUpdate | None = None) -> Dict[str, Any]:
         run_id = self.experiments.current_run_id()
         if run_id is None:
@@ -2150,6 +2309,7 @@ class CentralService:
                 "Create or select an experiment before starting it."
             )
         manifest = self.experiments.registry.get(run_id)
+        self._require_run_open(run_id)
         if manifest.status not in {ExperimentStatus.CREATED, ExperimentStatus.STARTING}:
             raise InvalidExperimentStateError(
                 f"Cannot start experiment {run_id} from state {manifest.status.value}."
@@ -2194,6 +2354,7 @@ class CentralService:
             raw_sections = recorded_raw
         else:
             params_snapshot["raw_parameter_sections"] = raw_sections
+        self._require_run_open(run_id)
         experiment = self.experiments.start(
             run_id,
             params_snapshot=params_snapshot,
@@ -2206,32 +2367,41 @@ class CentralService:
         # publish is interrupted, the immutable snapshot can be retried while
         # configuration changes and experiment switching remain locked.
         self.operation_state["experiment_active"] = True
-        try:
-            controller_runtime = {
+        configuration = self.run_configuration
+        controller_runtime = {
                 **params_snapshot["controller"],
-                "mode": self.run_configuration.controller_mode,
-                "exp_sim": self.run_configuration.run_type,
-                "target": self.run_configuration.control_target,
-                "adaptive_mode": self.run_configuration.adaptation_mode,
+                "mode": configuration.controller_mode,
+                "exp_sim": configuration.run_type,
+                "target": configuration.control_target,
+                "adaptive_mode": configuration.adaptation_mode,
                 "exp_sim_G": {
                     "live_gsensor": "experiment",
                     "simulated": "simulation",
                     "presaved_images": "experiment_with_presaved",
-                }[self.run_configuration.growth_rate_source],
+                }[configuration.growth_rate_source],
             }
-            parameter_messages = self.publisher.publish_params(
+        def deliver(publisher):
+            parameter_messages = publisher.publish_params(
                 params_snapshot["shared"],
                 params_snapshot["gsensor"],
                 controller_runtime,
                 int(params_snapshot["version"]),
                 parameter_sections=raw_sections,
                 include_parameter_sections=raw_sections is not None,
+                experiment=experiment,
             )
-            commands = self.publisher.publish_experiment_start_command(
+            self._require_run_open(run_id)
+            commands = publisher.publish_experiment_start_command(
                 experiment,
-                adaptation_enabled=self.run_configuration.adaptation_enabled,
-                adaptation_mode=self.run_configuration.adaptation_mode,
+                adaptation_enabled=configuration.adaptation_enabled,
+                adaptation_mode=configuration.adaptation_mode,
             )
+            return {"parameter_messages": parameter_messages, "commands": commands}
+        try:
+            delivery, messages = self._deliver(f"start:{run_id}", run_id, deliver)
+            self._require_delivery(delivery)
+        except (DeliveryBusy, DeliveryCancelled):
+            raise
         except Exception as exc:
             raise RuntimeError(
                 "The experiment snapshot was saved, but service startup delivery did "
@@ -2239,25 +2409,40 @@ class CentralService:
             ) from exc
         return {
             "triggered": True,
-            "startup_status": "sent",
+            "startup_status": delivery["status"],
+            "delivery": delivery,
             "key": "experiment_active",
             "value": True,
-            "parameter_messages": parameter_messages,
+            "parameter_messages": (messages or {}).get("parameter_messages", {}),
             "parameters": self.params_payload(),
-            "commands": commands,
+            "commands": (messages or {}).get("commands", {}),
             "experiment": experiment,
             "gsensor_activation": self.gsensor_activation_status(),
         }
 
+    @_action_lock("_end_lock", lifecycle=True)
     def finish_experiment(self, run_id: str) -> Dict[str, Any]:
         manifest = self.experiments.registry.get(run_id)
         current_run_id = self.experiments.current_run_id()
+        if manifest.status not in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR} and run_id != current_run_id:
+            raise InvalidExperimentStateError("Only the current experiment can be ended while it is active.")
+        with self._lock:
+            self._stopping_runs.add(run_id)
+        self._ordinary_delivery.cancel_run(run_id)
+        deliveries = []
+
+        def publish_stop(**kwargs):
+            target = "controller" if kwargs.get("controller_only") else "gsensor" if kwargs.get("gsensor_only") else "both"
+            delivery, _ = self._deliver(f"stop:{run_id}:{target}", run_id,
+                lambda p: p.publish_experiment_stop_command(run_id, **kwargs), stop=True)
+            deliveries.append(delivery)
+            self._require_delivery(delivery)
 
         if manifest.status in {ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
             experiment = self.experiments.get(run_id)
             # An explicit End may still need to finish this exact interrupted
             # Controller session. Do not infer ownership from history alone.
-            controller = self.controller_status()
+            controller = self._fetch_controller_status()
             controller_started_at = controller.get("started_at")
             recovery = controller.get("recovery") or {}
             interrupted = (
@@ -2276,17 +2461,19 @@ class CentralService:
             )
             if matching_interrupted:
                 try:
-                    self.publisher.publish_experiment_stop_command(
-                        run_id, experiment_started_at=manifest.started_at,
+                    publish_stop(
+                        experiment_started_at=manifest.started_at,
                         reason="central_end_failed_controller", controller_only=True,
                     )
+                except (DeliveryBusy, DeliveryCancelled):
+                    raise
                 except Exception as exc:
                     raise RuntimeError(
                         "Recovery stop delivery did not complete. The experiment remains terminal; "
                         "retry End for this same run after checking Controller status."
                     ) from exc
                 experiment["recovery_stop"] = {
-                    "requested": True, "status": "sent", "run_id": run_id,
+                    "requested": True, "status": deliveries[-1]["status"], "run_id": run_id,
                     "experiment_started_at": manifest.started_at,
                 }
             # An error notification can terminate the registry before Gsensor
@@ -2317,17 +2504,19 @@ class CentralService:
                 )
                 if matching_gsensor:
                     try:
-                        self.publisher.publish_experiment_stop_command(
-                            run_id, experiment_started_at=manifest.started_at,
+                        publish_stop(
+                            experiment_started_at=manifest.started_at,
                             reason="central_end_gsensor_finalization", gsensor_only=True,
                         )
+                    except (DeliveryBusy, DeliveryCancelled):
+                        raise
                     except Exception as exc:
                         raise RuntimeError(
                             "Gsensor finalization stop delivery did not complete. The experiment remains terminal; "
                             "retry End for this same run after checking Gsensor status."
                         ) from exc
                     experiment["gsensor_finalization_stop"] = {
-                        "requested": True, "status": "sent", "run_id": run_id,
+                        "requested": True, "status": deliveries[-1]["status"], "run_id": run_id,
                         "experiment_started_at": manifest.started_at,
                     }
         elif manifest.status == ExperimentStatus.CREATED:
@@ -2347,8 +2536,7 @@ class CentralService:
             # be recovered by pressing Retry End for this same run.
             self.operation_state["experiment_active"] = False
             try:
-                self.publisher.publish_experiment_stop_command(
-                    run_id,
+                publish_stop(
                     experiment_started_at=manifest.started_at,
                     reason=(
                         "central_retry_end_experiment"
@@ -2356,6 +2544,8 @@ class CentralService:
                         else "central_end_experiment"
                     ),
                 )
+            except (DeliveryBusy, DeliveryCancelled):
+                raise
             except Exception as exc:
                 raise RuntimeError(
                     "The experiment is marked as stopping, but service stop delivery "
@@ -2364,34 +2554,28 @@ class CentralService:
 
         if run_id == current_run_id:
             self.operation_state["experiment_active"] = False
+        if deliveries:
+            experiment["delivery"] = deliveries[-1]
         return experiment
 
+    @_action_lock("_runtime_action_lock")
     def add_seed(self) -> Dict[str, Any]:
         """Record one operator-confirmed seed addition in the live Controller."""
 
         run_id, _controller = self._require_running_controller("Add Seed")
-        command = self.publisher.publish_controller_add_seed_command(run_id)
+        event_id, added_at = uuid4().hex, utc_ts()
+        command = CentralApp.build_controller_add_seed_command(self.publisher, run_id, event_id=event_id, added_at=added_at)
+        delivery, sent = self._deliver(f"seed:{run_id}:{event_id}", run_id,
+            lambda p: p.publish_controller_add_seed_command(run_id, event_id=event_id, added_at=added_at))
+        self._require_delivery(delivery)
         return {
             "requested": True,
+            "delivery": delivery,
             "event": dict(command["payload"]),
-            "command": command,
+            "command": sent or command,
         }
 
-    def set_adaptation(self, enabled: bool) -> Dict[str, Any]:
-        """Start or stop Controller parameter adaptation for the current run."""
-
-        run_id, controller = self._require_running_controller("Adaptation")
-        runtime = controller.get("runtime_controls") or {}
-        result = self.update_controller_runtime(ControllerRuntimeUpdatePayload(
-            run_id, uuid4().hex, runtime.get("revision", 0),
-            {"adaptation_enabled": enabled}, utc_ts(),
-        ))
-        # Keep existing clients working while the top-level runtime controls
-        # replace the old duplicate button.
-        result["event"] = result["runtime_request"]["command"]
-        return result
-
-    @_locked_service_state
+    @_action_lock("_runtime_action_lock")
     def update_controller_runtime(self, event: ControllerRuntimeUpdatePayload) -> Dict[str, Any]:
         run_id, controller = self._require_running_controller("Runtime controls")
         if event.run_id != run_id:
@@ -2400,12 +2584,11 @@ class CentralService:
         if not runtime.get("supported"):
             raise InvalidExperimentStateError("Controller does not support runtime updates.")
         prior = self.runtime_request_store.observe(run_id, controller)
-        if prior and prior["command"]["event_id"] == event.event_id:
-            if prior["command"] != event.to_dict():
-                raise InvalidExperimentStateError("Runtime event_id was reused with different content.")
-            if prior["status"] in {"applied", "rejected"}:
-                return {"requested": False, "runtime_request": prior}
-            entry = prior
+        known = self._known_runtime_request(event, controller, prior)
+        if known:
+            if known["status"] in {"applied", "rejected"}:
+                return {"requested": False, "runtime_request": known}
+            entry = known
         else:
             if prior and prior["status"] not in {"applied", "rejected"}:
                 self._record_runtime_rejection(event, runtime, "A runtime request is unconfirmed; retry that same event.")
@@ -2420,14 +2603,18 @@ class CentralService:
         # Persist the exact event before delivery; an interrupted request can be
         # recovered after refresh or Central restart without a new event ID.
         self.runtime_request_store.save(run_id, entry)
-        try:
-            self.publisher.publish_controller_runtime_command(event)
-        except Exception as exc:
-            entry["transport_error"] = f"Delivery not confirmed: {type(exc).__name__}"
-        else:
-            entry["transport_error"] = None
-        self.runtime_request_store.save(run_id, entry)
+        entry = self._deliver_runtime(event, "publish_controller_runtime_command")
         return {"requested": True, "runtime_request": entry}
+
+    def _known_runtime_request(self, event, controller, latest):
+        known = self.runtime_request_store.get_event(event.run_id, event.event_id)
+        if known and known["command"] != event.to_dict():
+            raise InvalidExperimentStateError("Runtime event_id was reused with different content.")
+        known = self.runtime_request_store.project(known, controller) if known else None
+        if (known and known["status"] not in {"applied", "rejected"}
+                and latest and latest["command"]["event_id"] != event.event_id):
+            raise InvalidExperimentStateError("A newer runtime request is recorded; inspect this event's confirmation before retrying.")
+        return known
 
     def _record_runtime_rejection(self, event, runtime, reason):
         # Preserve the existing in-flight request; record this separate refusal
@@ -2714,14 +2901,8 @@ def finish_experiment(run_id: str, payload: ExperimentContext | None = None) -> 
 
 
 @web_app.get("/api/operation/state")
-def get_operation_state() -> Dict[str, Any]:
-    preview = service.preview_publish_payload()
-    return {
-        "target": service.target,
-        "state": service.operation_state,
-        "run_configuration": service.run_configuration_payload(),
-        "preview": preview,
-    }
+def get_operation_state(revision: str | None = None) -> Dict[str, Any]:
+    return service.operation_payload(revision)
 
 
 @web_app.get("/api/system/status")
@@ -2743,9 +2924,7 @@ def get_operation_meta() -> Dict[str, Any]:
 def update_target(payload: TargetUpdate) -> Dict[str, Any]:
     try:
         with service.ui_action(payload):
-            updated = service.run_configuration.to_dict()
-            updated["control_target"] = payload.target
-            result = service.update_run_configuration(updated)
+            result = service.update_operation_value("target", payload.target)["run_configuration"]
             return {
                 "saved": True,
                 "target": service.target,
@@ -2807,16 +2986,22 @@ def runtime_history(run_id: str, before: int | None = Query(None, ge=1), limit: 
         raise _experiment_http_exception(exc) from exc
 
 
-@web_app.post("/api/operation/controller/adaptation")
-def set_adaptation(payload: AdaptationUpdate) -> Dict[str, Any]:
+@web_app.get("/api/operation/controller/runtime/request")
+def runtime_request_status(run_id: str, event_id: str) -> Dict[str, Any]:
     try:
-        with service.ui_action(payload):
-            return service.set_adaptation(payload.enabled)
+        entry = service.runtime_request_status(run_id, event_id)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Runtime request not found for this experiment.")
+    return {"runtime_request": entry}
 
 
 def _experiment_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, DeliveryBusy):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, DeliveryCancelled):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, ExperimentNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, InvalidExperimentIdentifierError):

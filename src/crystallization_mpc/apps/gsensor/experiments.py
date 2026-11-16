@@ -243,6 +243,7 @@ class GsensorExperimentManager:
         image_path = self.registry.image_dir(run_id)
         return {
             "run_id": manifest.run_id,
+            "label": manifest.label,
             "image_directory": image_directory,
             "mode": mode,
             "container_image_path": str(image_path),

@@ -7,9 +7,11 @@ import math
 import os
 import time
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
+from crystallization_mpc.infra.file_version import file_version
 
 ROLE = "central"
 logger = logging.getLogger(__name__)
@@ -72,31 +74,45 @@ def _dict_to_list(params: Dict[str, object]) -> List[Dict[str, object]]:
     return [{"key": key, "default": value} for key, value in params.items()]
 
 
+@lru_cache(maxsize=16)
+def _yaml_document(path: str, version: tuple[int, ...]):
+    with open(path, "r", encoding="utf-8") as stream:
+        return _require_yaml().safe_load(stream) or {}
+
+
+def _read_yaml_document(path: str):
+    path = str(Path(path).absolute())
+    for _ in range(3):
+        version = file_version(path)
+        if version is None:
+            return None
+        document = _yaml_document(path, version)
+        if version == file_version(path):
+            # Callers derive/modify values; cached documents remain private.
+            return copy.deepcopy(document)
+    raise ParameterValidationError("Parameter file changed while reading; retry the operation.")
+
+
 def load_params_document(path: str) -> Dict[str, object]:
-    if not os.path.exists(path):
+    data = _read_yaml_document(path)
+    if data is None:
         print(f"[{ROLE}] params file not found: {path}")
         return {"version": 1, "params": {"shared": [], "gsensor": [], "controller": []}}
-    yaml = _require_yaml()
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    return data
 
 
 def load_param_meta(path: str) -> Dict[str, Dict[str, Any]]:
-    if not os.path.exists(path):
+    data = _read_yaml_document(path)
+    if data is None:
         return {}
-    yaml = _require_yaml()
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
     params = data.get("params", {}) or {}
     return {str(key): dict(value or {}) for key, value in params.items()}
 
 
 def load_operation_meta(path: str) -> List[Dict[str, Any]]:
-    if not os.path.exists(path):
+    data = _read_yaml_document(path)
+    if data is None:
         return []
-    yaml = _require_yaml()
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
     sections = data.get("sections", []) or []
     result: List[Dict[str, Any]] = []
     for section in sections:
@@ -186,6 +202,35 @@ def _write_params_document(destination: Path, data: Dict[str, Any]) -> None:
             temporary.unlink()
 
 
+def _merge_missing_defaults(document, default_document):
+    if not isinstance(document, dict) or not isinstance(document.get("params"), dict):
+        raise ParameterValidationError("The runtime parameter file must contain a params mapping.")
+    upgraded = copy.deepcopy(document)
+    added = []
+    for section in ("shared", "gsensor", "controller"):
+        entries = upgraded["params"].get(section)
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("key"), str) for item in entries
+        ):
+            raise ParameterValidationError(f"Invalid runtime parameter section: {section}.")
+        existing = {item["key"] for item in entries}
+        for item in default_document.get("params", {}).get(section, []) or []:
+            if item["key"] not in existing:
+                entries.append(copy.deepcopy(item))
+                existing.add(item["key"])
+                added.append(f"{section}.{item['key']}")
+        upgraded["params"][section] = entries
+    return upgraded, added
+
+
+@lru_cache(maxsize=16)
+def _runtime_candidate(runtime_path, runtime_version, default_path, default_version):
+    return _merge_missing_defaults(_yaml_document(runtime_path, runtime_version),
+                                  _yaml_document(default_path, default_version))
+
+
 def load_runtime_params(
     runtime_path: str,
     default_path: str,
@@ -203,34 +248,23 @@ def load_runtime_params(
     if runtime.resolve() == defaults.resolve() or not defaults.exists():
         return load_params(runtime_path)
 
+    runtime_version, default_version = file_version(runtime), file_version(defaults)
+    if runtime_version is not None and default_version is not None:
+        checked, missing = _runtime_candidate(str(runtime.absolute()), runtime_version,
+                                             str(defaults.absolute()), default_version)
+        if (not missing and runtime_version == file_version(runtime)
+                and default_version == file_version(defaults)):
+            return _params_from_document(copy.deepcopy(checked))
+
     with _parameter_file_lock(runtime):
         # Another service may already have upgraded the same mounted file.
         original = runtime.read_bytes()
         yaml = _require_yaml()
         document = yaml.safe_load(original)
         default_document = load_params_document(default_path)
-        if not isinstance(document, dict) or not isinstance(document.get("params"), dict):
-            raise ParameterValidationError("The runtime parameter file must contain a params mapping.")
-        upgraded = copy.deepcopy(document)
-        added = []
-        for section in ("shared", "gsensor", "controller"):
-            entries = upgraded["params"].get(section)
-            if entries is None:
-                entries = []
-            if not isinstance(entries, list) or any(
-                not isinstance(item, dict) or not isinstance(item.get("key"), str)
-                for item in entries
-            ):
-                raise ParameterValidationError(f"Invalid runtime parameter section: {section}.")
-            existing = {item["key"] for item in entries}
-            for item in default_document.get("params", {}).get(section, []) or []:
-                if item["key"] not in existing:
-                    entries.append(copy.deepcopy(item))
-                    existing.add(item["key"])
-                    added.append(f"{section}.{item['key']}")
-            upgraded["params"][section] = entries
+        upgraded, added = _merge_missing_defaults(document, default_document)
         if not added:
-            return load_params(runtime_path)
+            return _params_from_document(document)
 
         version = document.get("version", 1)
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -244,11 +278,14 @@ def load_runtime_params(
             "Upgraded parameter draft to version %s; added %s; backup: %s",
             upgraded["version"], ", ".join(added), backup,
         )
-        return load_params(runtime_path)
+        return _params_from_document(upgraded)
 
 
 def load_params(path: str) -> Tuple[Dict[str, object], Dict[str, object], Dict[str, object], int]:
-    data = load_params_document(path)
+    return _params_from_document(load_params_document(path))
+
+
+def _params_from_document(data):
     params = data.get("params", {}) or {}
     version = int(data.get("version", 1))
     shared = _list_to_dict(params.get("shared"))

@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from itertools import chain
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -54,7 +55,7 @@ from crystallization_mpc.apps.gsensor.image_watcher import (
 )
 from crystallization_mpc.apps.gsensor.initialization import (
     GsensorInitializationManager,
-    list_supported_images,
+    IMAGE_EXTENSIONS,
 )
 from crystallization_mpc.apps.gsensor.status_publisher import (
     RabbitStatusPublisher,
@@ -362,6 +363,9 @@ class GsensorService:
         # Values are revision identities (name + mtime_ns + size), not filenames.
         self.processed_image_files: set[str] = set()
         self.processed_image_records: Dict[str, Dict[str, Any]] = {}
+        self.processed_image_count = 0
+        self._image_record_revision = 0
+        self._saved_discovery_key: tuple[int, str | None] | None = None
         self.image_observations: Dict[str, ImageObservation] = {}
         self.latest_discovered_image: Dict[str, Any] | None = None
         self.latest_ready_image: Dict[str, Any] | None = None
@@ -378,6 +382,7 @@ class GsensorService:
         self.file_modified_at: str | None = None
         self.detected_at: str | None = None
         self.pending_image_count = 0
+        self.image_file_count: int | None = None
         self.last_image_scan_at: str | None = None
         self.image_scan_status = "stopped"
         self.image_scan_error: str | None = None
@@ -391,6 +396,9 @@ class GsensorService:
         self._control_lock = threading.RLock()
         self._publication_lock = threading.RLock()
         self._image_scan_lock = threading.RLock()
+        # All recovery writers use this order: scanner, checkpoint, state.
+        # Activation-only writes need no scanner and never export a processor.
+        self._checkpoint_lock = threading.RLock()
         try:
             self.current_experiment = self.experiments.current()
         except Exception as exc:
@@ -415,14 +423,14 @@ class GsensorService:
     def start(self) -> None:
         with self._lock:
             restored_disabled = self.experiment_lifecycle_status == GrowthRateStatus.DISABLED.value
-            if restored_disabled:
-                self._persist_activation_state_locked()
             should_resume = self.gsensor_enabled and self.experiment_lifecycle_status in {
                 GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE.value,
                 GrowthRateStatus.INITIALIZING.value,
                 GrowthRateStatus.BASELINE_READY.value,
                 GrowthRateStatus.MEASURING.value,
             }
+        if restored_disabled:
+            self._persist_activation_state()
         if should_resume:
             self.start_image_scanning()
         elif restored_disabled:
@@ -464,6 +472,11 @@ class GsensorService:
         with self._lock:
             self.last_message = msg
         if msg.get("msg_type") == "params" and msg.get("name") == PARAMS_UPDATE_MESSAGE:
+            run_id = msg.get("payload", {}).get("run_id")
+            if run_id is not None and self.experiments.registry.get(run_id).status in {
+                ExperimentStatus.STOPPING, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR,
+            }:
+                raise ValueError("Central has ended this experiment; late startup parameters rejected.")
             params = msg.get("payload", {}).get("params", {})
             if isinstance(params, dict):
                 with self._lock:
@@ -544,6 +557,9 @@ class GsensorService:
     def _reset_image_discovery_locked(self) -> None:
         self.processed_image_files.clear()
         self.processed_image_records.clear()
+        self.processed_image_count = 0
+        self._image_record_revision = 0
+        self._saved_discovery_key = None
         self.image_observations.clear()
         self.latest_discovered_image = None
         self.latest_ready_image = None
@@ -560,6 +576,7 @@ class GsensorService:
         self.file_modified_at = None
         self.detected_at = None
         self.pending_image_count = 0
+        self.image_file_count = None
 
     def _reset_experiment_runtime_locked(self) -> None:
         self.measurement_valid_frame_count = 0
@@ -636,15 +653,10 @@ class GsensorService:
     def _processing_state_document_locked(self) -> Dict[str, Any]:
         if self.current_experiment is None:
             raise ExperimentNotSelectedError("No experiment is selected.")
-        processor_state = None
-        if self.growth_rate_processor is not None:
-            export_state = getattr(self.growth_rate_processor, "export_state", None)
-            if callable(export_state):
-                processor_state = export_state()
         initialization_payload = self.initialization.payload()
         if initialization_payload.get("session_id") is None:
             initialization_payload = None
-        return {
+        document = {
             "schema_version": GSENSOR_PROCESSING_SCHEMA_VERSION,
             "run_id": self.current_experiment["run_id"],
             "updated_at": utc_ts(),
@@ -670,7 +682,7 @@ class GsensorService:
                 "measurement_revision": self.parameter_revision,
                 "measurement_ready": self.parameter_measurement_ready,
                 "pending_event_id": self.pending_parameter_event_id,
-                "events": copy.deepcopy(self.parameter_events),
+                "events": self.parameter_events,
             },
             "alignment_configuration": {
                 key: value
@@ -681,7 +693,6 @@ class GsensorService:
             "initialization": initialization_payload,
             "initialized_at": self.initialized_at,
             "baseline": self.baseline,
-            "processed_images": list(self.processed_image_records.values()),
             "image_discovery": {
                 "latest_ready": self.latest_ready_image,
                 "sequence_watermark": self.sequence_watermark,
@@ -693,20 +704,58 @@ class GsensorService:
                 "reset_candidate": self.sequence_reset_candidate,
                 "ignored_images": sorted(self.ignored_image_files),
             },
-            "processor": processor_state,
+            "processor": None,
             "last_growth_rate_result": self.last_growth_rate_result,
             "latest_overlay_path": self.latest_overlay_path,
             "final_overlay_path": self.final_overlay_path,
         }
+        document = copy.deepcopy(document)
+        # Image records contain scalar identities/counters. Copy each row once;
+        # deep-copying the ledger extends the state lock on every frame.
+        document["processed_images"] = [dict(row) for row in self.processed_image_records.values()]
+        return document
 
-    def _persist_processing_state_locked(self) -> None:
-        if self.current_experiment is None:
-            return
-        path = self.experiments.save_processing_state(
-            self.current_experiment["run_id"],
-            self._processing_state_document_locked(),
-        )
-        self.processing_state_path = str(path)
+    def _processing_checkpoint(self) -> tuple[Dict[str, Any], tuple[int, str | None]]:
+        """Capture one frame/parameter boundary; caller owns the scanner."""
+        with self._lock:
+            document = self._processing_state_document_locked()
+            processor = self.growth_rate_processor
+            discovery_key = self._discovery_checkpoint_key_locked()
+        export = getattr(processor, "export_state", None)
+        if callable(export):
+            document["processor"] = export()
+        return document, discovery_key
+
+    def _persist_processing_state(self) -> None:
+        with self._image_scan_lock, self._checkpoint_lock:
+            with self._lock:
+                if self.current_experiment is None:
+                    return
+                self._saved_discovery_key = None
+            document, discovery_key = self._processing_checkpoint()
+            path = self.experiments.save_processing_state(document["run_id"], document)
+            with self._lock:
+                if self.current_experiment and self.current_experiment["run_id"] == document["run_id"]:
+                    self.processing_state_path = str(path)
+                    self._saved_discovery_key = discovery_key
+
+    def _discovery_checkpoint_key_locked(self) -> tuple[int, str | None]:
+        ready = self.latest_ready_image
+        return self._image_record_revision, ready.get("identity_key") if ready else None
+
+    def _persist_discovery_changes(self) -> None:
+        with self._lock:
+            changed = self._discovery_checkpoint_key_locked() != self._saved_discovery_key
+        if changed:
+            self._persist_processing_state()
+
+    def _store_image_record_locked(self, identity: str, record: Dict[str, Any]) -> None:
+        previous = self.processed_image_records.get(identity)
+        self.processed_image_count += int(record.get("disposition") not in {"late", "backlog"})
+        if previous is not None:
+            self.processed_image_count -= int(previous.get("disposition") not in {"late", "backlog"})
+        self.processed_image_records[identity] = record
+        self._image_record_revision += 1
 
     def _restore_processing_state_locked(self) -> None:
         if self.current_experiment is None:
@@ -749,6 +798,8 @@ class GsensorService:
             restored_records[identity_key] = dict(item)
 
         self.processed_image_records = restored_records
+        self.processed_image_count = sum(row.get("disposition") not in {"late", "backlog"}
+                                         for row in restored_records.values())
         self.processed_image_files = set(restored_records)
         self.image_observations = {}
         self.latest_discovered_image = None
@@ -980,6 +1031,7 @@ class GsensorService:
         )
         self.recovery_status = "restored"
         self.recovery_error = None
+        self._saved_discovery_key = self._discovery_checkpoint_key_locked()
 
     def start_experiment(self, message: Dict[str, Any]) -> None:
         with self._control_lock:
@@ -997,6 +1049,10 @@ class GsensorService:
                 raise ValueError(
                     "experiment.start image_directory does not match the selected experiment."
                 )
+            if self.experiments.registry.get(payload.run_id).status in {
+                ExperimentStatus.STOPPING, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR,
+            }:
+                raise ValueError("Central has ended this experiment; late Start rejected.")
             active_statuses = {
                 GrowthRateStatus.DISABLED,
                 GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE,
@@ -1079,7 +1135,8 @@ class GsensorService:
                 self.last_lifecycle_message = message
                 self.recovery_status = "not_needed"
                 self.recovery_error = None
-                self._persist_processing_state_locked()
+        if duplicate_status is None:
+            self._persist_processing_state()
         if duplicate_status is not None:
             self._publish_growth_rate_status(duplicate_status)
             return
@@ -1099,22 +1156,27 @@ class GsensorService:
             "last_command_error": self.gsensor_last_command_error,
         }
 
-    def _persist_activation_state_locked(self) -> None:
+    def _persist_activation_state(self) -> None:
         # A disable may interrupt processor.process(). Update only the gate on
         # disk until that frame commits its complete processor snapshot.
-        if self.current_experiment is None:
-            return
-        run_id = self.current_experiment["run_id"]
-        state = self.experiments.load_processing_state(run_id)
+        with self._checkpoint_lock:
+            with self._lock:
+                if self.current_experiment is None:
+                    return
+                run_id = self.current_experiment["run_id"]
+                activation = {
+                    "updated_at": utc_ts(),
+                    "lifecycle_status": self.experiment_lifecycle_status,
+                    "gsensor_activation": self._activation_state_locked(),
+                }
+            state = self.experiments.load_processing_state(run_id)
+            if state is not None:
+                state.update(activation)
+                path = self.experiments.save_processing_state(run_id, state)
+                with self._lock:
+                    self.processing_state_path = str(path)
         if state is None:
-            self._persist_processing_state_locked()
-            return
-        state.update({
-            "updated_at": utc_ts(),
-            "lifecycle_status": self.experiment_lifecycle_status,
-            "gsensor_activation": self._activation_state_locked(),
-        })
-        self.processing_state_path = str(self.experiments.save_processing_state(run_id, state))
+            self._persist_processing_state()
 
     def set_gsensor_enabled(
         self,
@@ -1139,7 +1201,9 @@ class GsensorService:
                 if (
                     not self._experiment_in_progress_locked()
                     or self.experiment_lifecycle_status == GrowthRateStatus.STOPPING.value
-                    or self.experiments.registry.get(command.run_id).status in TERMINAL_EXPERIMENT_STATUSES
+                    or self.experiments.registry.get(command.run_id).status in {
+                        ExperimentStatus.STOPPING, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR,
+                    }
                 ):
                     raise ValueError("Gsensor can only be enabled or disabled during an active experiment.")
                 if command.revision < self.gsensor_control_revision:
@@ -1179,9 +1243,11 @@ class GsensorService:
                     if not enabled:
                         self.active = False
                         self._measurement_stop.set()
-                    try:
-                        self._persist_activation_state_locked()
-                    except Exception as exc:
+            if not duplicate:
+                try:
+                    self._persist_activation_state()
+                except Exception as exc:
+                    with self._lock:
                         if enabled:
                             for key, value in previous.items():
                                 setattr(self, key, value)
@@ -1194,7 +1260,8 @@ class GsensorService:
                             ):
                                 setattr(self, key, previous[key])
                         self.gsensor_last_command_error = str(exc)
-                        raise
+                    raise
+            with self._lock:
                 # Retried enable after recovery acknowledges the old command,
                 # without granting fresh permission to run.
                 should_run = self.gsensor_enabled
@@ -1206,9 +1273,10 @@ class GsensorService:
                     self.start_image_scanning()
                 else:
                     self.stop_image_scanning()
-                    with self._image_scan_lock, self._lock:
-                        self.image_scan_status = "disabled"
-                        self._persist_processing_state_locked()
+                    with self._image_scan_lock:
+                        with self._lock:
+                            self.image_scan_status = "disabled"
+                        self._persist_discovery_changes()
             except Exception as exc:
                 with self._publication_lock, self._lock:
                     if self.gsensor_enabled:
@@ -1218,7 +1286,7 @@ class GsensorService:
                     self._measurement_stop.set()
                     self.experiment_lifecycle_status = GrowthRateStatus.DISABLED.value
                     self.gsensor_last_command_error = str(exc)
-                    self._persist_activation_state_locked()
+                self._persist_activation_state()
                 self._publish_growth_rate_status(GrowthRateStatus.DISABLED)
                 raise
             with self._lock:
@@ -1265,7 +1333,8 @@ class GsensorService:
                 self.experiment_lifecycle_status = GrowthRateStatus.STOPPING.value
                 self.experiment_lifecycle_error = None
                 self.last_lifecycle_message = message
-                self._persist_activation_state_locked()
+        if duplicate_status is None:
+            self._persist_activation_state()
         if duplicate_status == GrowthRateStatus.COMPLETED:
             self._mark_archive_finalized(payload.run_id)
             self._publish_growth_rate_status(
@@ -1276,8 +1345,8 @@ class GsensorService:
         if duplicate_status == GrowthRateStatus.STOPPED:
             with self._lock:
                 self.experiment_lifecycle_status = GrowthRateStatus.COMPLETED.value
-                self._persist_processing_state_locked()
-                self._mark_archive_finalized(payload.run_id)
+            self._persist_processing_state()
+            self._mark_archive_finalized(payload.run_id)
             self._publish_growth_rate_status(
                 GrowthRateStatus.COMPLETED,
                 message_name=GROWTH_RATE_COMPLETED_MESSAGE,
@@ -1294,12 +1363,12 @@ class GsensorService:
                 )
         with self._lock:
             self.experiment_lifecycle_status = GrowthRateStatus.STOPPED.value
-            self._persist_processing_state_locked()
+        self._persist_processing_state()
         self._publish_growth_rate_status(GrowthRateStatus.STOPPED)
         with self._lock:
             self.experiment_lifecycle_status = GrowthRateStatus.COMPLETED.value
-            self._persist_processing_state_locked()
-            self._mark_archive_finalized(payload.run_id)
+        self._persist_processing_state()
+        self._mark_archive_finalized(payload.run_id)
         self._publish_growth_rate_status(
             GrowthRateStatus.COMPLETED,
             message_name=GROWTH_RATE_COMPLETED_MESSAGE,
@@ -1674,7 +1743,7 @@ class GsensorService:
             if not self.gsensor_enabled or self._measurement_stop.is_set() or self._processing_transition_pending:
                 return
             selection = dict(self.experiments.require_current())
-            processed_before = self.processed_image_files | self.ignored_image_files
+            processed_before = frozenset(chain(self.processed_image_files, self.ignored_image_files))
             observations_before = dict(self.image_observations)
             lifecycle_status = self.experiment_lifecycle_status
             processor = self.growth_rate_processor
@@ -1718,6 +1787,7 @@ class GsensorService:
                 item.image_name: item for item in result.observations
             }
             self.pending_image_count = result.pending_image_count
+            self.image_file_count = len(result.file_identities)
             self.last_image_scan_at = result.scanned_at
             self.image_scan_error = result.last_error
             for field in ("latest_discovered_image", "latest_ready_image"):
@@ -1756,7 +1826,7 @@ class GsensorService:
                     disposition="late",
                 )
                 self.processed_image_files.add(detection.identity_key)
-                self.processed_image_records[detection.identity_key] = record
+                self._store_image_record_locked(detection.identity_key, record)
                 self.late_image_count += 1
                 self.last_late_image = record
                 if detection.sequence_number in {0, 1} and self.sequence_watermark > 2:
@@ -1766,7 +1836,6 @@ class GsensorService:
                 self._record_latest_ready_locked(
                     self._latest_initialization_detection(tuple(accepted))
                 )
-            handled_before = set(self.processed_image_files)
 
         if (
             lifecycle_status == GrowthRateStatus.WAITING_FOR_INITIAL_IMAGE.value
@@ -1834,7 +1903,7 @@ class GsensorService:
                 for detection in accepted:
                     is_baseline = detection.identity_key == latest.identity_key
                     self.processed_image_files.add(detection.identity_key)
-                    self.processed_image_records[detection.identity_key] = (
+                    self._store_image_record_locked(detection.identity_key,
                         self._detected_image_record(
                             detection,
                             frame_seq=0 if is_baseline else None,
@@ -1857,7 +1926,7 @@ class GsensorService:
                 self.experiment_lifecycle_error = None
                 self.image_scan_status = "monitoring_during_initialization"
                 self.active = False
-                self._persist_processing_state_locked()
+            self._persist_processing_state()
             self._publish_growth_rate_status(
                 GrowthRateStatus.INITIALIZING,
                 frame_seq=0,
@@ -1870,7 +1939,6 @@ class GsensorService:
                 selection,
                 tuple(accepted),
                 processor,
-                processed_before=handled_before,
                 scan_pending_count=result.pending_image_count,
                 scanned_at=result.scanned_at,
                 scan_error=result.last_error,
@@ -1882,23 +1950,22 @@ class GsensorService:
                 return
             if lifecycle_status == GrowthRateStatus.INITIALIZING.value:
                 self.image_scan_status = "monitoring_during_initialization"
-                self._persist_processing_state_locked()
-                return
-            self.image_scan_status = (
-                "running" if accepted else "waiting_for_image"
-            )
-            for detection in accepted:
-                self.processed_image_files.add(detection.identity_key)
-                self.processed_image_records[detection.identity_key] = self._detected_image_record(
-                    detection, frame_seq=None, disposition="observed"
+            else:
+                self.image_scan_status = (
+                    "running" if accepted else "waiting_for_image"
                 )
-                self._advance_sequence_watermark_locked(detection, frame_seq=0)
-                self.last_detected_image = detection.image_name
-                self.file_modified_at = detection.file_modified_at
-                self.detected_at = detection.detected_at
-                self.last_measurement_step_at = detection.detected_at
-                self.measurement_step_count += 1
-            self._persist_processing_state_locked()
+                for detection in accepted:
+                    self.processed_image_files.add(detection.identity_key)
+                    self._store_image_record_locked(detection.identity_key, self._detected_image_record(
+                        detection, frame_seq=None, disposition="observed"
+                    ))
+                    self._advance_sequence_watermark_locked(detection, frame_seq=0)
+                    self.last_detected_image = detection.image_name
+                    self.file_modified_at = detection.file_modified_at
+                    self.detected_at = detection.detected_at
+                    self.last_measurement_step_at = detection.detected_at
+                    self.measurement_step_count += 1
+        self._persist_discovery_changes()
 
     @staticmethod
     def _latest_initialization_detection(
@@ -2000,7 +2067,6 @@ class GsensorService:
         detections: tuple[DetectedImage, ...],
         processor: GrowthRateProcessor | None,
         *,
-        processed_before: set[str],
         scan_pending_count: int,
         scanned_at: str,
         scan_error: str | None,
@@ -2008,7 +2074,6 @@ class GsensorService:
         with self._lock:
             if not self.gsensor_enabled or self._measurement_stop.is_set() or self._processing_transition_pending:
                 return
-        processed = set(processed_before)
         remaining = len(detections)
 
         if processor is None:
@@ -2040,9 +2105,8 @@ class GsensorService:
                 ):
                     # Two filenames/revisions can carry the same sequence in one scan.
                     record = self._detected_image_record(detection, frame_seq=None, disposition="late")
-                    self.processed_image_records[detection.identity_key] = record
+                    self._store_image_record_locked(detection.identity_key, record)
                     self.processed_image_files.add(detection.identity_key)
-                    processed.add(detection.identity_key)
                     self.late_image_count += 1
                     self.last_late_image = record
                     remaining -= 1
@@ -2059,7 +2123,6 @@ class GsensorService:
                 captured_at=detection.file_modified_at,
                 detected_at=detection.detected_at,
             )
-            processed.add(detection.identity_key)
             remaining -= 1
             self._record_processed_frame(detection, frame_result)
             self._publish_growth_rate_sample(frame_result)
@@ -2070,7 +2133,6 @@ class GsensorService:
             )
 
         with self._lock:
-            self.processed_image_files.update(processed)
             self.pending_image_count = scan_pending_count + remaining
             self.last_image_scan_at = scanned_at
             self.image_scan_error = scan_error
@@ -2080,7 +2142,7 @@ class GsensorService:
                 self.image_scan_status = "running"
             else:
                 self.image_scan_status = "waiting_for_image"
-            self._persist_processing_state_locked()
+        self._persist_discovery_changes()
 
     def _record_processed_frame(
         self,
@@ -2090,7 +2152,7 @@ class GsensorService:
         payload = result.to_dict()
         with self._lock:
             self.processed_image_files.add(detection.identity_key)
-            self.processed_image_records[detection.identity_key] = (
+            self._store_image_record_locked(detection.identity_key,
                 self._detected_image_record(
                     detection,
                     frame_seq=result.frame_seq,
@@ -2121,11 +2183,11 @@ class GsensorService:
             self.processed_image_records[detection.identity_key]["parameter_revision"] = self.parameter_revision
             self.last_processing_error = result.error
             self.latest_overlay_path = result.overlay_path
-            # Archive every completed frame before checkpointing it as consumed.
-            # A concurrent Stop still withholds the sample from Controller, but
-            # must not remove an already completed observation from the archive.
-            self._persist_growth_rate_result(result)
-            self._persist_processing_state_locked()
+        # Archive every completed frame before checkpointing it as consumed.
+        # A concurrent Stop still withholds the sample from Controller, but
+        # must not remove an already completed observation from the archive.
+        self._persist_growth_rate_result(result)
+        self._persist_processing_state()
         logger.warning(
             "Gsensor online frame done: run_id=%s frame_seq=%s image=%s valid=%s error=%s",
             result.run_id,
@@ -2192,6 +2254,9 @@ class GsensorService:
         return load_param_meta(str(self.param_meta_path))
 
     def current_params(self) -> Dict[str, Any]:
+        with self._lock:
+            if self._experiment_in_progress_locked() and self.experiment_params is not None:
+                return copy.deepcopy(self.experiment_params)
         shared, gsensor, _controller, _version = self._load_persisted_params()
         with self._lock:
             if self._experiment_in_progress_locked() and self.experiment_params is not None:
@@ -2411,18 +2476,21 @@ class GsensorService:
         # incremented frame counter with the previous edge/filter state. Drain
         # the frame worker before checkpointing preparation, without disabling
         # the active processor or withholding its already computed sample.
-        with self._image_scan_lock, self._lock:
-            self.parameter_events[identity["event_id"]] = event
-            self.pending_parameter_event_id = identity["event_id"]
+        with self._image_scan_lock:
+            with self._lock:
+                self.parameter_events[identity["event_id"]] = event
+                self.pending_parameter_event_id = identity["event_id"]
             try:
-                self._persist_processing_state_locked()
+                self._persist_processing_state()
             except Exception:
-                self.parameter_events.pop(identity["event_id"], None)
-                self.pending_parameter_event_id = None
+                with self._lock:
+                    self.parameter_events.pop(identity["event_id"], None)
+                    self.pending_parameter_event_id = None
                 raise
-            if candidate is not None:
-                self._prepared_parameter_processors[identity["event_id"]] = candidate
-            return self._parameter_result(event)
+            with self._lock:
+                if candidate is not None:
+                    self._prepared_parameter_processors[identity["event_id"]] = candidate
+                return self._parameter_result(event)
 
     def _build_parameter_processor(self, event: Dict[str, Any]) -> Any:
         """Build a fresh segment from confirmed marks, never from old edges."""
@@ -2502,17 +2570,19 @@ class GsensorService:
                                            alignment_effective_after_frame_seq=self.measurement_step_count)
                     previous = {key: getattr(self, key) for key in updates}
                     old_event = copy.deepcopy(event)
-                    try:
-                        for key, value in updates.items():
-                            setattr(self, key, value)
-                        event.update(phase="applied", effective_after_frame_seq=self.measurement_step_count, error=None)
-                        self._persist_processing_state_locked()
-                    except Exception:
+                    for key, value in updates.items():
+                        setattr(self, key, value)
+                    event.update(phase="applied", effective_after_frame_seq=self.measurement_step_count, error=None)
+                try:
+                    self._persist_processing_state()
+                except Exception:
+                    with self._lock:
                         for key, value in previous.items():
                             setattr(self, key, value)
                         event.clear()
                         event.update(old_event)
-                        raise
+                    raise
+                with self._lock:
                     self._prepared_parameter_processors.pop(event_id, None)
                     return self._parameter_result(event)
         finally:
@@ -2522,24 +2592,27 @@ class GsensorService:
                 self._publish_transition_availability()
 
     def _abort_parameters(self, identity: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
-        with self._image_scan_lock, self._lock:
-            event = self._check_parameter_event(identity, payload)
-            if event is None:
-                raise ValueError("Runtime parameters were not prepared.")
-            if event["phase"] != "prepared":
-                return self._parameter_result(event)
-            previous = copy.deepcopy(event)
-            event.update(phase="rejected", error="Parameter update aborted before commit.")
-            self.pending_parameter_event_id = None
+        with self._image_scan_lock:
+            with self._lock:
+                event = self._check_parameter_event(identity, payload)
+                if event is None:
+                    raise ValueError("Runtime parameters were not prepared.")
+                if event["phase"] != "prepared":
+                    return self._parameter_result(event)
+                previous = copy.deepcopy(event)
+                event.update(phase="rejected", error="Parameter update aborted before commit.")
+                self.pending_parameter_event_id = None
             try:
-                self._persist_processing_state_locked()
+                self._persist_processing_state()
             except Exception:
-                event.clear()
-                event.update(previous)
-                self.pending_parameter_event_id = identity["event_id"]
+                with self._lock:
+                    event.clear()
+                    event.update(previous)
+                    self.pending_parameter_event_id = identity["event_id"]
                 raise
-            self._prepared_parameter_processors.pop(identity["event_id"], None)
-            return self._parameter_result(event)
+            with self._lock:
+                self._prepared_parameter_processors.pop(identity["event_id"], None)
+                return self._parameter_result(event)
 
     def _publish_parameter_result(self, result: Dict[str, Any]) -> None:
         envelope = build_envelope(src=ROLE, dst="controller", msg_type="status",
@@ -2630,7 +2703,7 @@ class GsensorService:
         params["alignment_method"] = configuration["method"]
         return {
             "run_id": run_id,
-            "label": self.experiments.registry.get(run_id).label,
+            "label": self.current_experiment.get("label"),
             "parameter_version": self.experiment_parameter_version,
             "params": params,
             "alignment_configuration": configuration,
@@ -2824,11 +2897,12 @@ class GsensorService:
             verify_image_readable(snapshot)
             initialization = GsensorInitializationManager()
             payload = initialization.start_image(snapshot, source_folder=source.parent)
-            with self._lock:
-                checkpoint = self._processing_state_document_locked()
+            with self._checkpoint_lock:
+                checkpoint, _ = self._processing_checkpoint()
                 archive_path = self.experiments.save_reinitialization_snapshot(
                     selection["run_id"], checkpoint, kind="processing",
                 )
+            with self._lock:
                 run_directory = source.parent.parent
                 generation = self.initialization_generation + 1
                 updates = {
@@ -2856,6 +2930,8 @@ class GsensorService:
                     "latest_ready_image": self._detected_image_record(latest, frame_seq=None, disposition="ready"),
                     "processed_image_files": set(self.processed_image_files),
                     "processed_image_records": dict(self.processed_image_records),
+                    "processed_image_count": self.processed_image_count,
+                    "_image_record_revision": self._image_record_revision,
                     "missing_sequence_ranges": list(self.missing_sequence_ranges),
                     "image_observations": {item.image_name: item for item in scan.observations},
                     "pending_image_count": scan.pending_image_count,
@@ -2864,7 +2940,8 @@ class GsensorService:
                     "sequence_watermark_record": self.sequence_watermark_record,
                 }
                 previous = {key: getattr(self, key) for key in updates}
-                try:
+            try:
+                with self._lock:
                     for key, value in updates.items():
                         setattr(self, key, value)
                     # Distinguish an intentional baseline jump from absent
@@ -2885,18 +2962,19 @@ class GsensorService:
                         if item.identity_key in self.processed_image_files:
                             continue
                         self.processed_image_files.add(item.identity_key)
-                        self.processed_image_records[item.identity_key] = {
+                        self._store_image_record_locked(item.identity_key, {
                             **self._detected_image_record(item, frame_seq=None, disposition="backlog"),
                             "reason": "reinitialization", "initialization_generation": generation,
-                        }
+                        })
                     self._advance_sequence_watermark_locked(
                         latest, frame_seq=self.measurement_step_count, record_gap=False,
                     )
-                    self._persist_processing_state_locked()
-                except Exception:
+                self._persist_processing_state()
+            except Exception:
+                with self._lock:
                     for key, value in previous.items():
                         setattr(self, key, value)
-                    raise
+                raise
         except Exception:
             # This snapshot has not become the active committed marking image.
             snapshot.unlink(missing_ok=True)
@@ -2909,22 +2987,23 @@ class GsensorService:
     ) -> Dict[str, Any]:
         """Accept an operator-confirmed counter restart without replaying old files."""
 
-        with self._image_scan_lock, self._lock:
-            if not self.gsensor_enabled or self._processing_transition_pending:
-                raise ValueError("Cannot reset the image sequence while GSensor is disabled.")
-            selection = self.experiments.require_current()
-            if selection["run_id"] != run_id or not self._experiment_in_progress_locked():
-                raise ValueError("Refresh the current active experiment before resetting its sequence.")
-            if self.experiment_lifecycle_status == GrowthRateStatus.STOPPING.value:
-                raise ValueError("Cannot reset the image sequence while stopping.")
-            candidate = self.sequence_reset_candidate
-            if candidate is None:
-                raise ValueError("No suspected sequence restart is available.")
-            if candidate["identity_key"] != candidate_identity_key:
-                raise ValueError("The reset candidate changed. Refresh status before confirming.")
-            raw_sequence = candidate.get("source_sequence")
-            if type(raw_sequence) is not int:
-                raise ValueError("The reset candidate has no numeric source sequence.")
+        with self._control_lock, self._image_scan_lock:
+            with self._lock:
+                if not self.gsensor_enabled or self._processing_transition_pending:
+                    raise ValueError("Cannot reset the image sequence while GSensor is disabled.")
+                selection = self.experiments.require_current()
+                if selection["run_id"] != run_id or not self._experiment_in_progress_locked():
+                    raise ValueError("Refresh the current active experiment before resetting its sequence.")
+                if self.experiment_lifecycle_status == GrowthRateStatus.STOPPING.value:
+                    raise ValueError("Cannot reset the image sequence while stopping.")
+                candidate = self.sequence_reset_candidate
+                if candidate is None:
+                    raise ValueError("No suspected sequence restart is available.")
+                if candidate["identity_key"] != candidate_identity_key:
+                    raise ValueError("The reset candidate changed. Refresh status before confirming.")
+                raw_sequence = candidate.get("source_sequence")
+                if type(raw_sequence) is not int:
+                    raise ValueError("The reset candidate has no numeric source sequence.")
 
             # Existing high-numbered files belong to the previous counter epoch.
             # Ignore their exact revisions, including files that were still pending.
@@ -2934,28 +3013,34 @@ class GsensorService:
             )
             if candidate_identity_key not in snapshot.file_identities:
                 raise ValueError("The reset image changed or disappeared. Wait for a fresh scan.")
-            self.ignored_image_files.update(snapshot.file_identities - {candidate_identity_key})
-            self.ignored_image_files.discard(candidate_identity_key)
-            self.processed_image_files.discard(candidate_identity_key)
-            self.processed_image_records.pop(candidate_identity_key, None)
-            self.sequence_epoch += 1
-            self.sequence_watermark = raw_sequence - 1
-            self.sequence_watermark_record = None
-            self.latest_discovered_image = None
-            self.latest_ready_image = None
-            self.last_late_image = None
-            self.sequence_reset_candidate = None
-            self.image_observations.clear()
-            self.image_discovery_revision += 1
-            self.image_scan_error = None
-            self._persist_processing_state_locked()
+            with self._lock:
+                self.ignored_image_files.update(snapshot.file_identities - {candidate_identity_key})
+                self.ignored_image_files.discard(candidate_identity_key)
+                self.processed_image_files.discard(candidate_identity_key)
+                removed = self.processed_image_records.pop(candidate_identity_key, None)
+                if removed is not None:
+                    self.processed_image_count -= int(removed.get("disposition") not in {"late", "backlog"})
+                    self._image_record_revision += 1
+                self.sequence_epoch += 1
+                self.sequence_watermark = raw_sequence - 1
+                self.sequence_watermark_record = None
+                self.latest_discovered_image = None
+                self.latest_ready_image = None
+                self.last_late_image = None
+                self.sequence_reset_candidate = None
+                self.image_observations.clear()
+                self.image_discovery_revision += 1
+                self.image_scan_error = None
+            self._persist_processing_state()
         return self.status()
 
-    def status(self) -> Dict[str, Any]:
+    def status(self, initialization_revision: str | None = None) -> Dict[str, Any]:
         with self._lock:
             current_params = self.current_params()
-            initialization_payload = self.initialization.payload()
-            initialization_status = initialization_payload.get("status") or self.initialization_status
+            revision = self.initialization.revision
+            initialization_unchanged = initialization_revision == revision
+            initialization_payload = None if initialization_unchanged else self.initialization.payload()
+            initialization_status = self.initialization.status or self.initialization_status
             if initialization_status == "not_started":
                 initialization_status = self.initialization_status
             current_missing_ranges = [
@@ -2976,7 +3061,7 @@ class GsensorService:
                 sequence_status = "ok"
             else:
                 sequence_status = "waiting"
-            return {
+            snapshot = {
                 "role": ROLE,
                 "active": self.active,
                 "gsensor_activation": self._activation_state_locked(),
@@ -2993,6 +3078,8 @@ class GsensorService:
                 "initialization_status": initialization_status,
                 "initialized_at": self.initialized_at,
                 "initialization": initialization_payload,
+                "initialization_revision": revision,
+                "initialization_unchanged": initialization_unchanged,
                 "queue": self.queue_name,
                 "exchange": self.exchange,
                 "param_count": len(current_params),
@@ -3040,8 +3127,7 @@ class GsensorService:
                     "last_error": self.last_influx_error,
                     "success_count": self.influx_write_success_count,
                     "failure_count": self.influx_write_failure_count,
-                    "archive": (self.measurement_writer.status(self.current_experiment.get("run_id") if self.current_experiment else None)
-                                if isinstance(self.measurement_writer, DurableInfluxWriter) else None),
+                    "archive": None,
                 },
                 "experiment": self.current_experiment,
                 "current_run_id": (
@@ -3064,10 +3150,8 @@ class GsensorService:
                 },
                 "image_scan": {
                     "status": self.image_scan_status,
-                    "processed_count": sum(
-                        record.get("disposition") not in {"late", "backlog"}
-                        for record in self.processed_image_records.values()
-                    ),
+                    "file_count": self.image_file_count,
+                    "processed_count": self.processed_image_count,
                     "last_detected_image": self.last_detected_image,
                     "file_modified_at": self.file_modified_at,
                     "detected_at": self.detected_at,
@@ -3096,39 +3180,47 @@ class GsensorService:
                     },
                 },
             }
+        if initialization_unchanged:
+            del snapshot["initialization"]
+        if isinstance(self.measurement_writer, DurableInfluxWriter):
+            snapshot["influx_persistence"]["archive"] = self.measurement_writer.status(
+                snapshot["current_run_id"], wait=False,
+            )
+        return snapshot
 
     def current_experiment_image_source(self) -> Dict[str, Any]:
-        with self._lock:
-            selection = self.experiments.current()
-            if selection is None:
-                return {
-                    "selected": False,
-                    "run_id": None,
-                    "image_directory": None,
-                    "container_image_path": None,
-                    "image_count": 0,
-                    "first_image": None,
-                    "latest_image": None,
-                }
-
-            images = list_supported_images(selection["container_image_path"])
-            images.sort(key=lambda path: (
-                parse_image_sequence(path.name) is not None,
-                parse_image_sequence(path.name) or 0,
-                path.name.casefold(),
-            ))
+        selection = self.experiments.current()
+        if selection is None:
             return {
-                "selected": True,
-                "run_id": selection["run_id"],
-                "image_directory": selection["image_directory"],
-                "container_image_path": selection["container_image_path"],
-                "image_count": len(images),
-                "first_image": images[0].name if images else None,
-                "latest_image": (
-                    self.latest_ready_image["image_name"] if self.latest_ready_image else None
-                ),
-                "latest_discovered_image": images[-1].name if images else None,
+                "selected": False, "run_id": None, "image_directory": None,
+                "container_image_path": None, "image_count": 0,
+                "first_image": None, "latest_image": None,
             }
+        count = 0
+        first = latest = None
+        with os.scandir(selection["container_image_path"]) as entries:
+            for entry in entries:
+                if os.path.splitext(entry.name)[1].lower() not in IMAGE_EXTENSIONS or not entry.is_file():
+                    continue
+                sequence = parse_image_sequence(entry.name)
+                key = sequence is not None, sequence or 0, entry.name.casefold()
+                item = key, entry.name
+                if first is None or key < first[0]:
+                    first = item
+                if latest is None or key >= latest[0]:
+                    latest = item
+                count += 1
+        with self._lock:
+            same_run = self.current_experiment and self.current_experiment["run_id"] == selection["run_id"]
+            ready = self.latest_ready_image if same_run else None
+            ready_name = ready["image_name"] if ready else None
+        return {
+            "selected": True, "run_id": selection["run_id"],
+            "image_directory": selection["image_directory"],
+            "container_image_path": selection["container_image_path"],
+            "image_count": count, "first_image": first[1] if first else None,
+            "latest_image": ready_name, "latest_discovered_image": latest[1] if latest else None,
+        }
 
     def measurement_overlay_path(self, kind: str, run_id: str | None = None) -> Path:
         if kind not in {"latest", "final"}:
@@ -3174,19 +3266,22 @@ class GsensorService:
         session_id: str,
         action: Callable[[], Dict[str, Any]],
     ) -> Dict[str, Any]:
-        with self._lock:
-            self.require_active_initialization(session_id)
-            return self.persist_initialization_progress(action())
+        with self._control_lock, self._image_scan_lock:
+            with self._lock:
+                self.require_active_initialization(session_id)
+                payload = action()
+            return self.persist_initialization_progress(payload)
 
     def persist_initialization_progress(
         self,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        with self._lock:
-            self.initialization_status = str(
-                payload.get("status") or self.initialization_status
-            )
-            self._persist_processing_state_locked()
+        with self._control_lock, self._image_scan_lock:
+            with self._lock:
+                self.initialization_status = str(
+                    payload.get("status") or self.initialization_status
+                )
+            self._persist_processing_state()
         return payload
 
     def select_initialization_3d_choice(
@@ -3233,132 +3328,134 @@ class GsensorService:
                 )
             selected_method = self._require_locked_alignment_method(alignment_method)
             configured = self._alignment_configuration_locked()["configured_method"]
-            capability = next(
-                (item for item in alignment_capabilities() if item.method == selected_method),
-                None,
-            )
-            if capability is None or not capability.available:
-                reason = capability.reason if capability is not None else "not available"
-                raise ValueError(f"Alignment method {selected_method!r} is unavailable: {reason}")
-            uv_struct_list, kernel = initialize_DSCGR(
-                self.initialization,
-                session_id=session_id,
-            )
-            completed_at = utc_ts()
-            baseline = self._build_baseline_locked(
-                payload,
-                uv_struct_list,
-                completed_at=completed_at,
-            )
-            experiment_directory = Path(selection["container_image_path"]).parent
-            output_directory = self._measurement_output_directory_locked()
-            latest_overlay_path = output_directory / LATEST_OVERLAY_FILENAME
-            final_overlay_path = output_directory / FINAL_OVERLAY_FILENAME
-            debug_directory = (
-                self.dscgr_output_root_path
-                / str(selection["run_id"])
-                / "hough_debug"
-                if self.hough_debug_enabled
-                else None
-            )
-            processor = self.growth_rate_processor_factory(
-                run_id=selection["run_id"],
-                params=copy.deepcopy(self.experiment_params or self.current_params()),
-                uv_struct_list=uv_struct_list,
-                kernel=kernel,
-                latest_overlay_path=latest_overlay_path,
-                final_overlay_path=final_overlay_path,
-                debug_directory=debug_directory,
-                initial_image_path=payload["selected_image"],
-                alignment_method=selected_method,
-            )
-            # Tracking/Kalman/registration state belongs to the new marking.
-            # Only public counters continue so Controller never rejects it as
-            # an old frame; algorithm_step and edge histories remain fresh.
-            processor.frame_seq = self.measurement_step_count
-            processor.valid_frame_count = self.measurement_valid_frame_count
-            processor.invalid_frame_count = self.measurement_invalid_frame_count
-            configuration = {
-                "method": selected_method,
-                "locked_method": selected_method,
-                "locked": True,
-                "configured_method": configured,
-                "confirmed": True,
-                "confirmed_at": completed_at,
-                "revision": self.alignment_revision,
-                "effective_after_frame_seq": self.measurement_step_count,
-            }
-            snapshot = {
-                "schema_version": 1,
-                "run_id": selection["run_id"],
-                "completed_at": completed_at,
-                "parameter_version": self.experiment_parameter_version,
-                "initialization": payload,
-                "baseline": baseline,
-                "alignment_configuration": configuration,
-                "initialization_generation": self.initialization_generation,
-                "frame_seq_base": self.measurement_step_count,
-            }
-            # A crash between the two writes may leave a prepared, immutable
-            # initialization snapshot. Only an uncommitted run may replace it.
-            first_confirmation = not self.initialization_history
+        capability = next(
+            (item for item in alignment_capabilities() if item.method == selected_method),
+            None,
+        )
+        if capability is None or not capability.available:
+            reason = capability.reason if capability is not None else "not available"
+            raise ValueError(f"Alignment method {selected_method!r} is unavailable: {reason}")
+        uv_struct_list, kernel = initialize_DSCGR(
+            self.initialization,
+            session_id=session_id,
+        )
+        completed_at = utc_ts()
+        baseline = self._build_baseline_locked(
+            payload,
+            uv_struct_list,
+            completed_at=completed_at,
+        )
+        experiment_directory = Path(selection["container_image_path"]).parent
+        output_directory = self._measurement_output_directory_locked()
+        latest_overlay_path = output_directory / LATEST_OVERLAY_FILENAME
+        final_overlay_path = output_directory / FINAL_OVERLAY_FILENAME
+        debug_directory = (
+            self.dscgr_output_root_path
+            / str(selection["run_id"])
+            / "hough_debug"
+            if self.hough_debug_enabled
+            else None
+        )
+        processor = self.growth_rate_processor_factory(
+            run_id=selection["run_id"],
+            params=copy.deepcopy(self.experiment_params or self.current_params()),
+            uv_struct_list=uv_struct_list,
+            kernel=kernel,
+            latest_overlay_path=latest_overlay_path,
+            final_overlay_path=final_overlay_path,
+            debug_directory=debug_directory,
+            initial_image_path=payload["selected_image"],
+            alignment_method=selected_method,
+        )
+        # Tracking/Kalman/registration state belongs to the new marking.
+        # Only public counters continue so Controller never rejects it as
+        # an old frame; algorithm_step and edge histories remain fresh.
+        processor.frame_seq = self.measurement_step_count
+        processor.valid_frame_count = self.measurement_valid_frame_count
+        processor.invalid_frame_count = self.measurement_invalid_frame_count
+        configuration = {
+            "method": selected_method,
+            "locked_method": selected_method,
+            "locked": True,
+            "configured_method": configured,
+            "confirmed": True,
+            "confirmed_at": completed_at,
+            "revision": self.alignment_revision,
+            "effective_after_frame_seq": self.measurement_step_count,
+        }
+        snapshot = {
+            "schema_version": 1,
+            "run_id": selection["run_id"],
+            "completed_at": completed_at,
+            "parameter_version": self.experiment_parameter_version,
+            "initialization": payload,
+            "baseline": baseline,
+            "alignment_configuration": configuration,
+            "initialization_generation": self.initialization_generation,
+            "frame_seq_base": self.measurement_step_count,
+        }
+        # A crash between the two writes may leave a prepared, immutable
+        # initialization snapshot. Only an uncommitted run may replace it.
+        first_confirmation = not self.initialization_history
+        if first_confirmation:
+            self._discard_uncommitted_initialization_locked(selection["run_id"])
+        updates = {
+            "initialized": True,
+            "initialization_status": str(payload.get("status") or "ready_for_3d"),
+            "initialized_at": completed_at,
+            "uv_struct_list": processor.uv_structs,
+            "kernel": kernel,
+            "growth_rate_processor": processor,
+            "latest_overlay_path": str(latest_overlay_path),
+            "final_overlay_path": None,
+            "baseline": baseline,
+            "experiment_lifecycle_status": GrowthRateStatus.MEASURING.value,
+            "image_scan_status": "baseline_ready",
+            "confirmed_alignment_method": selected_method,
+            "alignment_confirmed_at": completed_at,
+            "alignment_effective_after_frame_seq": self.measurement_step_count,
+            "alignment_change_error": None,
+            "initialization_history": list(self.initialization_history),
+        }
+        previous = {key: getattr(self, key) for key in updates}
+        new_history_path: Path | None = None
+        try:
             if first_confirmation:
-                self._discard_uncommitted_initialization_locked(selection["run_id"])
-            updates = {
-                "initialized": True,
-                "initialization_status": str(payload.get("status") or "ready_for_3d"),
-                "initialized_at": completed_at,
-                "uv_struct_list": processor.uv_structs,
-                "kernel": kernel,
-                "growth_rate_processor": processor,
-                "latest_overlay_path": str(latest_overlay_path),
-                "final_overlay_path": None,
-                "baseline": baseline,
-                "experiment_lifecycle_status": GrowthRateStatus.MEASURING.value,
-                "image_scan_status": "baseline_ready",
-                "confirmed_alignment_method": selected_method,
-                "alignment_confirmed_at": completed_at,
-                "alignment_effective_after_frame_seq": self.measurement_step_count,
-                "alignment_change_error": None,
-                "initialization_history": list(self.initialization_history),
-            }
-            previous = {key: getattr(self, key) for key in updates}
-            new_history_path: Path | None = None
-            try:
-                if first_confirmation:
-                    self.experiments.save_initialization(snapshot)
-                    initialization_file = GSENSOR_INITIALIZATION_FILENAME
-                else:
-                    new_history_path = self.experiments.save_reinitialization_snapshot(
-                        selection["run_id"], snapshot, kind="initialization",
-                    )
-                    initialization_file = new_history_path.relative_to(experiment_directory).as_posix()
-                updates["initialization_history"].append({
-                    "generation": self.initialization_generation,
-                    "session_id": session_id,
-                    "initialization_file": initialization_file,
-                    "completed_at": completed_at,
-                    "frame_seq_base": self.measurement_step_count,
-                })
+                self.experiments.save_initialization(snapshot)
+                initialization_file = GSENSOR_INITIALIZATION_FILENAME
+            else:
+                new_history_path = self.experiments.save_reinitialization_snapshot(
+                    selection["run_id"], snapshot, kind="initialization",
+                )
+                initialization_file = new_history_path.relative_to(experiment_directory).as_posix()
+            updates["initialization_history"].append({
+                "generation": self.initialization_generation,
+                "session_id": session_id,
+                "initialization_file": initialization_file,
+                "completed_at": completed_at,
+                "frame_seq_base": self.measurement_step_count,
+            })
+            with self._lock:
                 for key, value in updates.items():
                     setattr(self, key, value)
-                # This atomic recovery record commits the confirmation. Nothing
-                # may publish readiness or scan images until it is durable.
-                self._persist_processing_state_locked()
-            except Exception:
+            # This atomic recovery record commits the confirmation. Nothing
+            # may publish readiness or scan images until it is durable.
+            self._persist_processing_state()
+        except Exception:
+            with self._lock:
                 for key, value in previous.items():
                     setattr(self, key, value)
-                try:
-                    if new_history_path is not None:
-                        new_history_path.unlink(missing_ok=True)
-                    elif first_confirmation:
-                        self._discard_uncommitted_initialization_locked(
-                            selection["run_id"], expected_snapshot=snapshot
-                        )
-                except Exception:
-                    logger.exception("Unable to clean up uncommitted initialization snapshot.")
-                raise
-            image_name = baseline["image_name"]
+            try:
+                if new_history_path is not None:
+                    new_history_path.unlink(missing_ok=True)
+                elif first_confirmation:
+                    self._discard_uncommitted_initialization_locked(
+                        selection["run_id"], expected_snapshot=snapshot
+                    )
+            except Exception:
+                logger.exception("Unable to clean up uncommitted initialization snapshot.")
+            raise
+        image_name = baseline["image_name"]
 
         self._publish_growth_rate_status(
             GrowthRateStatus.BASELINE_READY,
@@ -3512,8 +3609,8 @@ def get_ui_config() -> Dict[str, str | bool]:
 
 
 @web_app.get("/api/status")
-def get_status() -> Dict[str, Any]:
-    return service.status()
+def get_status(initialization_revision: str | None = None) -> Dict[str, Any]:
+    return service.status(initialization_revision=initialization_revision)
 
 
 @web_app.post("/api/image-scan/confirm-sequence-reset")
@@ -3579,7 +3676,8 @@ def get_initialization_image(session_id: str) -> FileResponse:
 @web_app.get("/api/initialization/step")
 def get_initialization_step(session_id: str | None = Query(default=None)) -> Dict[str, Any]:
     try:
-        return service.initialization.payload(session_id)
+        with service._lock:
+            return service.initialization.payload(session_id)
     except Exception as exc:
         _raise_http_error(exc)
 

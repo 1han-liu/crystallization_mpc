@@ -98,6 +98,7 @@ class OnlineParametersMixin:
 
 
     def _update_run_parameters(self, payload):
+        self._require_command_run_live(payload.get('run_id'))
         if payload.get('run_id') != self.current_run_id:
             raise ValueError('Parameter message belongs to another experiment.')
         event_id = payload.get('event_id')

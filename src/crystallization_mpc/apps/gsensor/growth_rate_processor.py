@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 import numpy as np
+from crystallization_mpc.infra.file_version import file_version
 
 from crystallization_mpc.apps.gsensor.alignment import (
     ALIGNMENT_STATE_VERSION,
@@ -144,6 +145,8 @@ class GrowthRateProcessor:
             )
         self.aligner = create_aligner(self.alignment_method)
         self.aligner_initialized = False
+        self._alignment_sidecar = None
+        self._alignment_sidecar_version = None
         self.segmentation_runner = segmentation_runner
         if alignment_state_path is not None:
             self.alignment_state_path = Path(alignment_state_path)
@@ -570,12 +573,19 @@ class GrowthRateProcessor:
         if self.aligner_initialized:
             if self.alignment_state_path is None:
                 raise ValueError("alignment_state_path is required to persist alignment state.")
-            alignment["sidecar"] = save_alignment_state(
-                self.alignment_state_path,
-                method=self.alignment_method,
-                frame_sequence=self.frame_seq,
-                state=self.aligner.export_state(),
-            )
+            cached = self._alignment_sidecar
+            if (cached is None or cached["frame_sequence"] != self.frame_seq
+                    or cached["method"] != self.alignment_method
+                    or self._alignment_sidecar_version != file_version(self.alignment_state_path)):
+                cached = save_alignment_state(
+                    self.alignment_state_path,
+                    method=self.alignment_method,
+                    frame_sequence=self.frame_seq,
+                    state=self.aligner.export_state(),
+                )
+                self._alignment_sidecar = cached
+                self._alignment_sidecar_version = file_version(self.alignment_state_path)
+            alignment["sidecar"] = dict(cached)
         return {
             "schema_version": GSENSOR_PROCESSING_SCHEMA_VERSION,
             "run_id": self.run_id,
@@ -591,6 +601,8 @@ class GrowthRateProcessor:
     def restore_state(self, state: Mapping[str, Any]) -> None:
         """Restore a state produced by :meth:`export_state`."""
 
+        self._alignment_sidecar = None
+        self._alignment_sidecar_version = None
         validate_processing_schema_version(state.get("schema_version"))
         if str(state.get("run_id") or "") != self.run_id:
             raise ValueError("Growth-rate processor state run_id does not match.")
@@ -641,6 +653,8 @@ class GrowthRateProcessor:
                     expected_sha256=str(sidecar.get("sha256") or ""),
                 )
                 self.aligner.restore_state(aligner_state)
+                self._alignment_sidecar = dict(sidecar)
+                self._alignment_sidecar_version = file_version(self.alignment_state_path)
             elif sidecar is not None:
                 raise ValueError("Uninitialized alignment state must not contain a sidecar.")
             self.aligner_initialized = initialized

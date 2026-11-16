@@ -9,22 +9,47 @@ import copy
 import json
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from uuid import uuid4
+from crystallization_mpc.infra.file_version import file_version
 
 
 class RuntimeHistory:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.RLock()
+        self._queries = OrderedDict()
+        self._loaded_version = None
+
+    def _cached(self, key):
+        cached = self._queries.get(key)
+        if cached is not None and cached[0] == file_version(self.path):
+            self._queries.move_to_end(key)
+            return True, copy.deepcopy(cached[1])
+        return False, None
+
+    def _remember(self, key, value):
+        self._queries[key] = (self._loaded_version, copy.deepcopy(value))
+        self._queries.move_to_end(key)
+        while len(self._queries) > 64:
+            self._queries.popitem(last=False)
+        return copy.deepcopy(value)
 
     def _load(self):
-        if not self.path.exists():
-            return {"schema_version": 1, "entries": []}
-        data = json.loads(self.path.read_text())
-        if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("entries"), list):
-            raise ValueError("Invalid runtime history journal.")
-        return data
+        for _ in range(3):
+            version = file_version(self.path)
+            if version is None:
+                self._loaded_version = None
+                return {"schema_version": 1, "entries": []}
+            data = json.loads(self.path.read_text())
+            if version != file_version(self.path):
+                continue
+            if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("entries"), list):
+                raise ValueError("Invalid runtime history journal.")
+            self._loaded_version = version
+            return data
+        raise ValueError("Runtime history changed while reading; retry the operation.")
 
     def _write(self, data):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +71,20 @@ class RuntimeHistory:
                     os.close(directory)
         finally:
             temporary.unlink(missing_ok=True)
+            self._queries.clear()
+
+    @staticmethod
+    def _merge(previous, entry):
+        if previous["command"] != entry["command"]:
+            raise ValueError("Runtime history event identity reused.")
+        result, old_result = entry.get("result"), previous.get("result")
+        if (old_result and not result) or ((old_result or {}).get("status") in {"applied", "rejected"}
+                                          and (result or {}).get("status") == "pending"):
+            return previous
+        merged = {**previous, **entry, "sequence": previous["sequence"]}
+        if result and result.get("status") == "applied" and not result.get("no_change") and previous.get("grafana_sync") == "not_applicable":
+            merged["grafana_sync"] = "pending"
+        return merged
 
     def save(self, entry):
         entry = copy.deepcopy(entry)
@@ -55,22 +94,18 @@ class RuntimeHistory:
         if result and (result.get("run_id") != run_id or result.get("event_id") != event_id):
             raise ValueError("Runtime history result identity mismatch.")
         with self.lock:
+            key = ("event", run_id, event_id)
+            found, previous = self._cached(key)
+            if found and previous is not None and self._merge(previous, entry) == previous:
+                return
             data = self._load()
             entries = data["entries"]
             previous = next((item for item in entries if item["command"]["run_id"] == run_id
                              and item["command"]["event_id"] == event_id), None)
             if previous is not None:
-                if previous["command"] != command:
-                    raise ValueError("Runtime history event identity reused.")
-                if previous.get("result") and not result:
-                    return  # A late pending response cannot erase a confirmed outcome.
-                if ((previous.get("result") or {}).get("status") in {"applied", "rejected"}
-                        and (result or {}).get("status") == "pending"):
-                    return  # Tick-boundary refresh requests have an explicit pending result.
-                merged = {**previous, **entry, "sequence": previous["sequence"]}
-                if result and result.get("status") == "applied" and not result.get("no_change") and previous.get("grafana_sync") == "not_applicable":
-                    merged["grafana_sync"] = "pending"
+                merged = self._merge(previous, entry)
                 if merged == previous:
+                    self._remember(key, previous)
                     return
                 entries[entries.index(previous)] = merged
             else:
@@ -97,19 +132,31 @@ class RuntimeHistory:
     def get(self, run_id: str, event_id: str):
         """Find a confirmed request independently of the recent-event window."""
         with self.lock:
-            return copy.deepcopy(next((item for item in self._load()["entries"]
+            key = ("event", run_id, event_id)
+            found, entry = self._cached(key)
+            if found:
+                return entry
+            return self._remember(key, next((item for item in self._load()["entries"]
                                        if item["command"]["run_id"] == run_id
                                        and item["command"]["event_id"] == event_id), None))
 
     def pending_exports(self):
         with self.lock:
-            return copy.deepcopy([item for item in self._load()["entries"]
+            found, entries = self._cached(("exports",))
+            if found:
+                return entries
+            entries = [item for item in self._load()["entries"]
                                   if (item.get("result") or {}).get("status") == "applied"
                                   and not item["result"].get("no_change")
-                                  and item.get("grafana_sync") not in {"synced", "time_unavailable"}])
+                                  and item.get("grafana_sync") not in {"synced", "time_unavailable"}]
+            return self._remember(("exports",), entries) if len(entries) <= 64 else copy.deepcopy(entries)
 
     def latest_fields(self, run_id):
         with self.lock:
+            key = ("fields", run_id)
+            found, entries = self._cached(key)
+            if found:
+                return entries
             entries = sorted((item for item in self._load()["entries"] if item["command"]["run_id"] == run_id),
                              key=lambda item: item["sequence"], reverse=True)
             selected, seen = [], set()
@@ -118,7 +165,7 @@ class RuntimeHistory:
                 if keys - seen:
                     selected.append(entry)
                     seen.update(keys)
-            return copy.deepcopy(selected)
+            return self._remember(key, selected)
 
     def mark_export(self, entry, error=None):
         self.save({**entry, "grafana_sync": "failed" if error else "synced", "grafana_error": error})

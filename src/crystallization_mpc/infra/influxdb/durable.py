@@ -178,9 +178,13 @@ class DurableInfluxWriter:
             row = self.connection.execute("SELECT delivered_at_ns FROM telemetry_outbox WHERE event_id=?", (event_id,)).fetchone()
             return row is not None and row[0] is not None
 
-    def status(self, run_id: str | None = None) -> dict[str, Any]:
-        with self._lock:
+    def status(self, run_id: str | None = None, *, wait: bool = True) -> dict[str, Any]:
+        if not self._lock.acquire(blocking=wait):
+            return {"enabled": True, "available": False, "state": "busy", "pending_count": None}
+        try:
             return _queue_status(self.connection, run_id)
+        finally:
+            self._lock.release()
 
     def flush_once(self, writer: Any) -> bool:
         """Deliver one batch, for the worker and deterministic recovery tests."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from crystallization_mpc.infra.runtime_history import RuntimeHistory
+from crystallization_mpc.experiments import ExperimentRegistry, ExperimentStatus
 from crystallization_mpc.apps.controller.numeric import encode_nonfinite, decode_nonfinite
 
 import copy
@@ -52,7 +53,6 @@ from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.infra.rabbitmq.consumer import start_consumer
 from crystallization_mpc.messaging.commands import (
     CONTROLLER_ADD_SEED_COMMAND,
-    CONTROLLER_ADAPTATION_SET_COMMAND,
     CONTROLLER_RUNTIME_UPDATE_COMMAND,
     EXPERIMENT_START_COMMAND,
     EXPERIMENT_STOP_COMMAND,
@@ -64,7 +64,6 @@ from crystallization_mpc.messaging.commands import (
 )
 from crystallization_mpc.messaging.contracts import (
     ControllerAddSeedPayload,
-    ControllerAdaptationPayload,
     ExperimentStartPayload,
     ExperimentStopPayload,
     GrowthRateStatusPayload,
@@ -130,6 +129,8 @@ class ControllerService(OnlineParametersMixin):
         self.current_run_id: str | None = None
         self.started_at: str | None = None
         self.stopped_at: str | None = None
+        self._ended_sessions = set()
+        self._command_registry = ExperimentRegistry(self.settings.experiment_root) if self.settings.experiment_root else None
         self.last_frame_seq: int | None = None
         self.last_sample: dict[str, Any] | None = None
         self.last_valid_sample: GrowthRateSamplePayload | None = None
@@ -619,11 +620,6 @@ class ControllerService(OnlineParametersMixin):
                 raise ValueError("controller.add_seed must come from Central.")
             return self._add_seed(payload)
 
-        if msg_type == "command" and name == CONTROLLER_ADAPTATION_SET_COMMAND:
-            if source != "central":
-                raise ValueError("controller.adaptation.set must come from Central.")
-            return self._set_adaptation(payload)
-
         if msg_type == "command" and name == CONTROLLER_RUNTIME_UPDATE_COMMAND:
             if source != "central":
                 raise ValueError("controller.runtime.update must come from Central.")
@@ -663,6 +659,8 @@ class ControllerService(OnlineParametersMixin):
         raise ValueError(f"Unsupported Controller message: {msg_type}/{name}.")
 
     def _apply_parameters(self, payload):
+        if payload.get('run_id') is not None:
+            self._require_command_run_live(payload['run_id'])
         from .algorithm.parameters import build_parameters, parameters_to_workspace
         supplied = payload.get('params')
         if not isinstance(supplied, Mapping):
@@ -714,9 +712,21 @@ class ControllerService(OnlineParametersMixin):
             return False
         return True
 
+    def _require_command_run_live(self, run_id):
+        if run_id == self.current_run_id and self.stopped_at is not None:
+            raise ValueError('Command belongs to an ended experiment.')
+        if self._command_registry is not None:
+            manifest = self._command_registry.get(run_id)
+            if manifest.status in {ExperimentStatus.STOPPING, ExperimentStatus.COMPLETED, ExperimentStatus.ERROR}:
+                raise ValueError('Central has ended this experiment; late command rejected.')
+
     def _start_experiment(self, payload):
         command = ExperimentStartPayload.from_mapping(payload)
         with self._lock:
+            self._require_command_run_live(command.run_id)
+            if ((command.run_id, command.started_at) in self._ended_sessions
+                    or (self.current_run_id == command.run_id and self.stopped_at is not None)):
+                raise ValueError('A finished experiment cannot be restarted by a late Start.')
             if not self._adapter_configured:
                 raise ValueError('Controller has not received initial parameters.')
             if self.controller_active and self.current_run_id != command.run_id:
@@ -740,6 +750,10 @@ class ControllerService(OnlineParametersMixin):
     def _stop_experiment(self, payload):
         command = ExperimentStopPayload.from_mapping(payload)
         with self._lock:
+            started_at = payload.get('experiment_started_at') or (
+                self.started_at if command.run_id == self.current_run_id else None)
+            if started_at:
+                self._ended_sessions.add((command.run_id, started_at))
             if command.run_id != self.current_run_id:
                 raise ValueError('Stop belongs to another experiment.')
             self.controller_active = self.controller_active_old = False
@@ -749,8 +763,7 @@ class ControllerService(OnlineParametersMixin):
             self.state = ControllerState.STOPPED
             self.stopped_at = command.stopped_at
             # Source stop toggles activation; it does not destroy the workspace.
-            self._modified_queue.clear()
-            self.runtime_pending = None
+            self._reject_pending_runtime_locked('Experiment ended before assignment.')
             self.process_wait = None
             self._try_persist_state_locked()
             try:
@@ -766,6 +779,7 @@ class ControllerService(OnlineParametersMixin):
                        persistence_enabled=self.measurement_writer is not None)
 
     def _add_seed(self, payload):
+        self._require_command_run_live(payload.get('run_id'))
         if payload.get('run_id') != self.current_run_id:
             raise ValueError('Seed message belongs to another experiment.')
         self.seed_event_count += 1
@@ -773,13 +787,8 @@ class ControllerService(OnlineParametersMixin):
         return self.submit_operator_map({'add_seed_request': True}, event_id=payload.get('event_id'), command=payload)
 
 
-    def _set_adaptation(self, payload):
-        return self._update_runtime({'run_id':payload.get('run_id'),'event_id':payload.get('event_id'),
-            'changes':{'adaptation_enabled':payload.get('enabled'),'adaptation_mode':payload.get('mode')},
-            'requested_at':payload.get('requested_at')})
-
-
     def _update_runtime(self, payload):
+        self._require_command_run_live(payload.get('run_id'))
         if payload.get('run_id') != self.current_run_id:
             raise ValueError('Runtime message belongs to another experiment.')
         aliases = {'control_target':'target','adaptation_enabled':'adaptive','adaptation_mode':'adaptive_mode'}
@@ -847,6 +856,7 @@ class ControllerService(OnlineParametersMixin):
                 self.gsensor_transition_occurred_at = occurred_at
 
     def _set_gsensor_enabled(self, payload, *, enabled):
+        self._require_command_run_live(payload.get('run_id'))
         if payload.get('run_id') != self.current_run_id:
             raise ValueError('G activation belongs to another experiment.')
         self.gsensor_desired_enabled = enabled

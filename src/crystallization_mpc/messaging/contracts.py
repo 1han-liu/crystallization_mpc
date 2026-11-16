@@ -184,46 +184,6 @@ class ControllerAddSeedPayload:
 
 
 @dataclass(frozen=True)
-class ControllerAdaptationPayload:
-    """One requested runtime change to Controller parameter adaptation."""
-
-    run_id: str
-    event_id: str
-    enabled: bool
-    mode: str
-    requested_at: str
-
-    def __post_init__(self) -> None:
-        _required_text(self.run_id, "run_id")
-        _required_text(self.event_id, "event_id")
-        if not isinstance(self.enabled, bool):
-            raise ValueError("enabled must be a boolean.")
-        if self.mode not in CONTROLLER_ADAPTATION_MODES:
-            allowed = ", ".join(CONTROLLER_ADAPTATION_MODES)
-            raise ValueError(f"mode must be one of: {allowed}.")
-        _required_text(self.requested_at, "requested_at")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "event_id": self.event_id,
-            "enabled": self.enabled,
-            "mode": self.mode,
-            "requested_at": self.requested_at,
-        }
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "ControllerAdaptationPayload":
-        return cls(
-            run_id=_mapping_text(payload, "run_id"),
-            event_id=_mapping_text(payload, "event_id"),
-            enabled=_mapping_bool(payload, "enabled"),
-            mode=_mapping_text(payload, "mode"),
-            requested_at=_mapping_text(payload, "requested_at"),
-        )
-
-
-@dataclass(frozen=True)
 class GrowthRateSamplePayload:
     run_id: str
     frame_seq: int
@@ -556,7 +516,6 @@ __all__ = [
     "CONTROLLER_ADAPTATION_MODES",
     "GROWTH_RATE_UNIT",
     "ControllerAddSeedPayload",
-    "ControllerAdaptationPayload",
     "ExperimentStartPayload",
     "ExperimentStopPayload",
     "GsensorActivationPayload",

@@ -17,6 +17,7 @@ const state = {
   lastRenderedExperimentStatus: null,
   experimentActionInFlight: false,
   experimentActionName: null,
+  experimentActionId: 0,
   parameterActionInFlight: false,
   parameterError: null,
   parameterRefreshError: null,
@@ -26,6 +27,9 @@ const state = {
   parameterDrafts: {},
   parameterViewNeedsRefresh: false,
   startupParameterPreview: null,
+  operationRevision: null,
+  parameterDocumentRevision: null,
+  parameterFormSignature: null,
   latestOverlayKey: null,
   lastOverlayRefreshAt: 0,
   controllerStatus: null,
@@ -46,6 +50,8 @@ const state = {
   runtimeInFlight: false,
   runtimeRequest: null,
   runtimeError: "",
+  runtimeLookupError: "",
+  runtimeRemotePending: null,
   runtimeHistory: [],
   runtimeHistoryError: "",
   historyRunId: null,
@@ -61,6 +67,7 @@ const state = {
   configurationRequestId: 0,
   gsensorStatusRunId: null,
   selectionSentRunId: null,
+  deliveries: { ordinary: [], stop: [] },
   selectionRetryRunId: null,
   startSentRunId: null,
   processWaitRunId: null,
@@ -159,24 +166,64 @@ const runConfigurationControls = [
   growthRateSourceSelect,
 ];
 
-function mutationInFlight() {
-  return state.experimentActionInFlight || state.parameterActionInFlight
-    || state.runConfigurationInFlight || state.seedActionInFlight
-    || state.gsensorActivationInFlight || state.runtimeInFlight;
+function experimentContextKey() {
+  return JSON.stringify([state.experimentActionId, state.currentRunId,
+    currentExperiment()?.started_at || null, runtimeRunActive()]);
 }
 
-function invalidatePendingReads() {
+function beginExperimentAction(name) {
+  const actionId = ++state.experimentActionId;
   state.experimentRequestId += 1;
   state.operationRequestId += 1;
   state.parameterRequestId += 1;
   state.configurationRequestId += 1;
   state.gsensorActivationRequestId += 1;
+  state.experimentActionInFlight = true;
+  state.experimentActionName = name;
+  if (name === "end") {
+    // End supersedes local edit requests. Their late responses cannot update
+    // this context, or clear a subsequent operation's progress indicator.
+    state.runtimeInFlight = false;
+    state.parameterActionInFlight = false;
+    state.runConfigurationInFlight = false;
+    state.seedActionInFlight = false;
+    state.gsensorActivationInFlight = false;
+    state.startSentRunId = null;
+  }
+  return actionId;
+}
+
+function setIfChanged(element, property, value) {
+  const next = ["textContent", "className", "title"].includes(property) ? String(value ?? "") : value;
+  if (element[property] !== next) element[property] = next;
+}
+
+function toggleClass(element, name, enabled) {
+  const next = Boolean(enabled);
+  if (element.classList.contains(name) !== next) element.classList.toggle(name, next);
+  return next;
+}
+
+function runtimeUpdateBlocked(retry = false) {
+  // Runtime controls and the parameter drawer share Controller's revision.
+  // This conflict group never gates status, End, Add Seed or GSensor actions.
+  return state.experimentActionInFlight || state.runtimeInFlight || state.parameterActionInFlight
+    || (!retry && (runtimeUnconfirmed()
+      || (state.runtimeRemotePending && state.runtimeRemotePending !== state.runtimeRequest?.command?.event_id)
+      || Boolean(state.controllerStatus?.runtime_controls?.pending)
+      || Boolean(state.controllerStatus?.run_parameters?.pending)));
+}
+
+function deliveryMessage(delivery) {
+  if (!delivery || delivery.status === "sent") return "Sent";
+  if (delivery.status === "queued" || delivery.status === "sending") return `Accepted; delivery ${delivery.status}`;
+  return `Delivery ${delivery.status}${delivery.error ? ": " + delivery.error : ""}`;
 }
 
 function clearCentralOverlay(message = "Waiting for an overlay for this experiment.") {
-  centralOverlayImage.hidden = true;
+  setIfChanged(centralOverlayImage, "hidden", true);
   centralOverlayImage.removeAttribute("src");
-  centralOverlayCaption.textContent = message;
+  setIfChanged(centralOverlayCaption, "textContent", message);
   state.latestOverlayKey = null;
   state.lastOverlayRefreshAt = 0;
 }
@@ -193,17 +240,17 @@ function markSystemStatusUnavailable(message, label = "offline") {
   state.systemStatusFresh = false;
   renderProcessSource();
   state.controllerStatus = null;
-  systemRefreshStatus.textContent = label;
-  systemRefreshStatus.className = "status error";
-  controllerLiveStatus.textContent = "unavailable";
-  controllerLiveStatus.className = "status error";
-  gsensorLiveStatus.textContent = "unconfirmed";
-  gsensorLiveStatus.className = "status error";
+  setIfChanged(systemRefreshStatus, "textContent", label);
+  setIfChanged(systemRefreshStatus, "className", "status error");
+  setIfChanged(controllerLiveStatus, "textContent", "unavailable");
+  setIfChanged(controllerLiveStatus, "className", "status error");
+  setIfChanged(gsensorLiveStatus, "textContent", "unconfirmed");
+  setIfChanged(gsensorLiveStatus, "className", "status error");
   [gsensorLiveFrame, gsensorLiveImage, controllerLastFrame, controllerValidCount,
     controllerInvalidCount, controllerSeedCount, controllerLastSeedAt,
-    controllerAdaptationStatus].forEach((element) => { element.textContent = "—"; });
-  controllerLiveError.textContent = message;
-  controllerLiveError.hidden = false;
+    controllerAdaptationStatus].forEach((element) => { setIfChanged(element, "textContent", "—"); });
+  setIfChanged(controllerLiveError, "textContent", message);
+  setIfChanged(controllerLiveError, "hidden", false);
   state.gsensorActivationError = message;
   state.gsensorActivationErrorSource = "status";
   clearCentralOverlay("Status is unconfirmed. Refresh to view the current experiment overlay.");
@@ -259,40 +306,40 @@ function renderProcessSource() {
     disabled: "OPC UA source monitoring is disabled in Central configuration.",
     unavailable: "Status refresh is unavailable. Any values below are the last received observations.",
   };
-  document.querySelector("#process-source-card").dataset.state = kind;
+  setIfChanged(document.querySelector("#process-source-card").dataset, "state", kind);
   const badge = document.querySelector("#process-source-status");
-  badge.textContent = labels[kind] || labels.unavailable;
-  badge.className = `status ${ready ? "running" : ["invalid", "disconnected"].includes(kind) ? "error" : "idle"}`;
-  document.querySelector("#process-source-message").textContent = messages[kind] || messages.unavailable;
+  setIfChanged(badge, "textContent", labels[kind] || labels.unavailable);
+  setIfChanged(badge, "className", `status ${ready ? "running" : ["invalid", "disconnected"].includes(kind) ? "error" : "idle"}`);
+  setIfChanged(document.querySelector("#process-source-message"), "textContent", messages[kind] || messages.unavailable);
   for (const name of ["T", "T_j", "c", "count_middle", "T_j_set"]) {
     const field = source?.fields?.[name];
     const value = field?.value;
-    document.querySelector(`#process-source-${name}`).textContent = typeof value === "number" && Number.isFinite(value)
-      ? `${value.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 })}${name.startsWith("T") ? " °C" : ""}` : "—";
+    setIfChanged(document.querySelector(`#process-source-${name}`), "textContent", typeof value === "number" && Number.isFinite(value)
+      ? `${value.toLocaleString(undefined, { maximumFractionDigits: name === "c" ? 6 : 2 })}${name.startsWith("T") ? " °C" : ""}` : "—");
     const age = typeof field?.age_s === "number" ? field.age_s + elapsed : null;
     const ageText = age === null ? "" : age < 0 ? ` · clock ahead ${(-age).toFixed(1)} s` : ` · ${age.toFixed(1)} s ago`;
     const label = field?.timestamp_basis === "source" ? "Source" : field?.timestamp_basis === "gather" ? "Collected" : "Timestamp";
-    document.querySelector(`#process-source-${name}-updated`).textContent = !field?.received_at
+    setIfChanged(document.querySelector(`#process-source-${name}-updated`), "textContent", !field?.received_at
       ? "Not received"
-      : `${field.updated_at ? `${label}: ${formatExperimentTime(field.updated_at)}${ageText}` : "Measurement timestamp unavailable"}\nReceived: ${formatExperimentTime(field.received_at)}`;
+      : `${field.updated_at ? `${label}: ${formatExperimentTime(field.updated_at)}${ageText}` : "Measurement timestamp unavailable"}\nReceived: ${formatExperimentTime(field.received_at)}`);
     const error = document.querySelector(`#process-source-${name}-error`);
-    error.textContent = field?.error || "";
-    error.hidden = !error.textContent;
+    setIfChanged(error, "textContent", field?.error || "");
+    setIfChanged(error, "hidden", !error.textContent);
   }
-  document.querySelector("#process-source-sample").textContent = source?.last_received_at
+  setIfChanged(document.querySelector("#process-source-sample"), "textContent", source?.last_received_at
     ? `Latest telemetry received: ${formatExperimentTime(source.last_received_at)}. Values remain visible between updates.`
-    : "No telemetry received yet.";
+    : "No telemetry received yet.");
   const controller = state.controllerStatus;
   const process = controller?.integrations?.process;
-  document.querySelector("#process-source-control").textContent = !state.systemStatusFresh || !controller?.available || !process
+  setIfChanged(document.querySelector("#process-source-control"), "textContent", !state.systemStatusFresh || !controller?.available || !process
     ? "Controller process mode is unconfirmed."
     : !process.enabled ? "Controller process input is disabled."
       : !process.write_enabled ? "Controller process input is enabled · read-only mode."
-        : "Controller process input and equipment writes are enabled for Experiment runs.";
+        : "Controller process input and equipment writes are enabled for Experiment runs.");
 }
 
 function runConfigurationLocked() {
-  if (!state.systemStatusFresh || mutationInFlight()) {
+  if (!state.systemStatusFresh || state.experimentActionInFlight || state.runConfigurationInFlight) {
     return true;
   }
   const status = currentExperiment()?.status;
@@ -368,9 +415,9 @@ function renderProcessWaitStatus() {
       && current.status !== "stopping" && !state.recoveryEndPending) {
     state.processWaitRunId = current.run_id;
     state.growthWaitRunId = growthWaiting ? current.run_id : null;
-    commandStatus.textContent = processWaiting ? "Waiting for process data"
-      : "Waiting for G data";
-    commandStatus.className = "status idle";
+    setIfChanged(commandStatus, "textContent", processWaiting ? "Waiting for process data"
+      : "Waiting for G data");
+    setIfChanged(commandStatus, "className", "status idle");
     setExperimentMessage(processWaitMessage());
   } else if (state.processWaitRunId && state.systemStatusFresh) {
     const previousRunId = state.processWaitRunId;
@@ -379,8 +426,8 @@ function renderProcessWaitStatus() {
     state.growthWaitRunId = null;
     if (previousRunId === current?.run_id && controllerRunningForRun(current.run_id)
         && !controllerFailureMessage() && current.status !== "stopping" && !state.recoveryEndPending) {
-      commandStatus.textContent = "running";
-      commandStatus.className = "status success";
+      setIfChanged(commandStatus, "textContent", "running");
+      setIfChanged(commandStatus, "className", "status success");
       setExperimentMessage(wasGrowthWaiting && state.controllerStatus.growth_input?.requested_enabled === false
         ? `Controller is running for ${displayNameForExperiment(current)}. GSensor is Off.`
         : `Controller is running for ${displayNameForExperiment(current)}. Required input data is available.`);
@@ -486,7 +533,11 @@ function runtimeUnconfirmed(request = state.runtimeRequest) {
 function runtimeSessionKey(runId) { return `central-runtime:${runId}`; }
 
 function rememberRuntimeRequest(request) {
+  const previous = state.runtimeRequest;
+  if (previous?.command?.event_id === request?.command?.event_id
+      && !runtimeUnconfirmed(previous) && runtimeUnconfirmed(request)) return;
   state.runtimeRequest = request;
+  if (previous?.command?.event_id !== request?.command?.event_id || !runtimeUnconfirmed(request)) state.runtimeLookupError = "";
   if (!request?.command?.run_id) return;
   try {
     if (runtimeUnconfirmed(request)) {
@@ -498,6 +549,8 @@ function rememberRuntimeRequest(request) {
 }
 
 function observeRuntimeRequest(remote) {
+  state.runtimeRemotePending = remote?.command?.run_id === state.currentRunId && runtimeUnconfirmed(remote)
+    ? remote.command.event_id : null;
   let local = state.runtimeRequest;
   if (local?.command?.run_id !== state.currentRunId) {
     local = null;
@@ -506,29 +559,59 @@ function observeRuntimeRequest(remote) {
   }
   if (local?.status === "rejected" && remote?.command?.event_id !== local.command.event_id) {
     rememberRuntimeRequest(local); // Do not relabel a rejected edit using an older successful request.
-  } else if (!runtimeUnconfirmed(local) || remote?.command?.event_id === local?.command?.event_id
-      || (remote && runtimeUnconfirmed(remote))) {
+  } else if (!runtimeUnconfirmed(local) || remote?.command?.event_id === local?.command?.event_id) {
     rememberRuntimeRequest(remote || local);
   } else {
     rememberRuntimeRequest(local);
   }
 }
 
+let runtimeRequestRead = false;
+
+async function reconcileRuntimeRequest(remote) {
+  const request = state.runtimeRequest;
+  if (runtimeRequestRead || !runtimeUnconfirmed(request) || state.runtimeInFlight || state.parameterActionInFlight
+      || request.command.run_id !== state.currentRunId
+      || remote?.command?.event_id === request.command.event_id) return;
+  const context = experimentContextKey();
+  const eventId = request.command.event_id;
+  const stillCurrent = () => context === experimentContextKey()
+    && state.runtimeRequest?.command?.event_id === eventId;
+  runtimeRequestRead = true;
+  try {
+    const query = new URLSearchParams({run_id: request.command.run_id, event_id: eventId});
+    const payload = await fetchJson(`/api/operation/controller/runtime/request?${query}`);
+    if (stillCurrent() && payload.runtime_request?.command?.run_id === request.command.run_id
+        && payload.runtime_request.command.event_id === eventId) {
+      state.runtimeLookupError = "";
+      rememberRuntimeRequest(payload.runtime_request);
+      syncOnlineParameterValues();
+    }
+  } catch (error) {
+    if (stillCurrent()) state.runtimeLookupError = error.status === 404
+      ? "Central has no record of this event. Retry keeps the same event ID."
+      : `Request confirmation lookup failed: ${error.message}`;
+  } finally {
+    runtimeRequestRead = false;
+  }
+  if (stillCurrent()) renderMutationState();
+}
+
 function renderAdaptiveSelection(mode, disabled) {
   const selected = adaptiveCombinations[mode] || [];
   adaptiveCheckboxes.forEach((box) => {
-    box.checked = selected.includes(box.dataset.adaptiveParameter);
-    box.disabled = disabled;
+    setIfChanged(box, "checked", selected.includes(box.dataset.adaptiveParameter));
+    setIfChanged(box, "disabled", disabled);
   });
-  adaptiveAllCheckbox.checked = mode === "all";
+  setIfChanged(adaptiveAllCheckbox, "checked", mode === "all");
   adaptiveAllCheckbox.indeterminate = false;
-  adaptiveAllCheckbox.disabled = disabled;
+  setIfChanged(adaptiveAllCheckbox, "disabled", disabled);
   if (selected.length > 0 && mode !== "all") state.lastPartialAdaptationMode = mode;
-  adaptationModeSelect.value = mode;
+  setIfChanged(adaptationModeSelect, "value", mode);
 }
 
 function selectAdaptiveMode(mode) {
-  if (!adaptiveCombinations[mode] || adaptationModeSelect.disabled || mutationInFlight()) {
+  if (!adaptiveCombinations[mode] || adaptationModeSelect.disabled) {
     renderRunConfiguration();
     return;
   }
@@ -537,7 +620,7 @@ function selectAdaptiveMode(mode) {
     return;
   }
   // One combined selection is one save/runtime command, never three writes.
-  adaptationModeSelect.value = mode;
+  setIfChanged(adaptationModeSelect, "value", mode);
   if (runtimeRunActive()) return submitRuntimeUpdate({ adaptation_mode: mode });
   return saveRunConfiguration();
 }
@@ -549,9 +632,9 @@ function selectAllAdaptiveParameters() {
 function renderSetpoints(configuration, disabled) {
   Object.entries(setpointInputs).forEach(([key, input]) => {
     if (document.activeElement !== input || input.dataset.dirty !== "true") {
-      input.value = configuration?.[key] ?? "";
+      setIfChanged(input, "value", configuration?.[key] ?? "");
     }
-    input.disabled = disabled;
+    setIfChanged(input, "disabled", disabled);
   });
 }
 
@@ -563,9 +646,9 @@ function renderSetpointExplanation(key) {
   const decimal = /^[+]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text);
   const converted = value * (key === "sigma_set" ? 100 : 1e6);
   const element = document.querySelector(`#conversion-${key}`);
-  element.textContent = decimal && value > 0 && Number.isFinite(converted)
+  setIfChanged(element, "textContent", decimal && value > 0 && Number.isFinite(converted)
     ? `${input.dataset.dirty === "true" ? "Editing preview: " : ""}${Number(converted.toPrecision(8))}${key === "sigma_set" ? "% relative supersaturation" : " μm/s"}`
-    : "Enter a finite positive decimal value.";
+    : "Enter a finite positive decimal value.");
 }
 
 function runtimeChangeDescription(entry, key) {
@@ -597,10 +680,10 @@ function renderConfigurationDetails(configuration, live) {
   Object.keys(setpointInputs).forEach(key => {
     const target = key === "sigma_set" ? "sigma" : "G";
     const element = document.querySelector(`#role-${key}`);
-    element.textContent = !current ? "Target status unconfirmed" : current === target
+    setIfChanged(element, "textContent", !current ? "Target status unconfirmed" : current === target
       ? (live ? "Current target value" : "Selected startup target value")
-      : `Standby value — used after switching to ${target}`;
-    element.classList.toggle("active", current === target);
+      : `Standby value — used after switching to ${target}`);
+    toggleClass(element, "active", current === target);
     renderSetpointExplanation(key);
   });
   const entries = [...state.runtimeHistory];
@@ -614,31 +697,31 @@ function renderConfigurationDetails(configuration, live) {
     const element = document.querySelector(`#feedback-${key}`);
     const entry = live && entries.find(item => item.command?.run_id === state.currentRunId
       && Object.hasOwn(item.command?.changes || {}, key));
-    element.textContent = "";
+    setIfChanged(element, "textContent", "");
     element.classList.remove("error");
     if (!entry) return;
     const result = entry.result || {};
     const identity = result.event_id === entry.command.event_id && result.run_id === state.currentRunId;
     if (entry.status === "applied" && identity) {
       const saved = state.controllerStatus?.recovery?.status !== "persistence_error" && !entry.persistence_error;
-      const refreshOutcome = result.no_change ? "Value unchanged; Controller not refreshed."
-        : result.refreshed ? "Controller refreshed." : "Controller refresh unconfirmed.";
-      element.textContent = `${saved ? "Applied" : "Applied, but not durably saved"}: ${runtimeChangeDescription(entry, key)} ${refreshOutcome} Revision ${result.revision}; effective tick ${result.effective_tick ?? "unavailable"}.`;
+      const refreshOutcome = result.refreshed ? "Controller refreshed."
+        : result.no_change ? "Value unchanged." : "Settings assigned; no automatic Controller refresh.";
+      setIfChanged(element, "textContent", `${saved ? "Applied" : "Applied, but not durably saved"}: ${runtimeChangeDescription(entry, key)} ${refreshOutcome} Revision ${result.revision}; effective tick ${result.effective_tick ?? "unavailable"}.`);
       if (state.controllerStatus?.runtime_controls?.history_error) element.textContent += " History persistence incomplete.";
       if (entry.persistence_error) element.textContent += ` ${entry.persistence_error}`;
-      element.classList.toggle("error", !saved);
+      toggleClass(element, "error", !saved);
     } else if (entry.status === "rejected") {
-      element.textContent = `Rejected: ${result.reason || entry.transport_error || "Update was not accepted."}`;
+      setIfChanged(element, "textContent", `Rejected: ${result.reason || entry.transport_error || "Update was not accepted."}`);
       element.classList.add("error");
     } else {
-      element.textContent = `${entry.status === "timeout" ? "Confirmation timed out. " : ""}Waiting for the next control tick and a valid measurement to refresh Controller.${entry.transport_error ? " " + entry.transport_error : ""}`;
+      setIfChanged(element, "textContent", `${entry.status === "timeout" ? "Confirmation timed out. " : ""}Waiting for Controller to confirm assignment at an iteration boundary.${entry.transport_error ? " " + entry.transport_error : ""}`);
     }
   });
   const panel = document.querySelector("#runtime-fitting");
   const status = observedControllerForRun();
   const adaptation = live ? status?.adaptation : null;
   if (!adaptation) {
-    panel.textContent = "Fitting diagnostics unavailable. No confirmed live Controller data.";
+    setIfChanged(panel, "textContent", "Fitting diagnostics unavailable. No confirmed live Controller data.");
     panel.classList.remove("error");
     return;
   }
@@ -650,14 +733,14 @@ function renderConfigurationDetails(configuration, live) {
   const refresh = status.runtime_controls?.refresh;
   const refreshText = refresh ? ` Controller refresh ${refresh.state || "unavailable"}; count ${refresh.count ?? "unavailable"}; segment ${refresh.segment_id ?? "unavailable"}; effective tick ${refresh.effective_tick ?? "unavailable"}.`
     + (refresh.reason ? ` ${refresh.reason}.` : "") : "";
-  panel.textContent = `Adaptation ${adaptation.enabled ? "enabled" : "disabled"}. Selected parameters: ${modes}. `
+  setIfChanged(panel, "textContent", `Adaptation ${adaptation.enabled ? "enabled" : "disabled"}. Selected parameters: ${modes}. `
     + (!adaptation.enabled ? "Parameter updates stopped; control continues with existing parameters. Historical fitting results: " : "")
     + (fitting ? `${states[fitting.last_status] || "Status unavailable"}. Samples ${value("sample_count")}/${value("minimum_samples")}; completed fits ${value("fit_count")}; failures ${value("failure_count")}. Last successful fit: ${fitting.last_success_at ? formatExperimentTime(fitting.last_success_at) : "unavailable"}.`
       + (fitting.last_failure_reason ? ` Last failure: ${fitting.last_failure_reason}.` : "")
       + (fitting.pause_reason ? ` Current reason: ${fitting.pause_reason}.` : "") : "Fitting diagnostics unavailable.")
     + (fitting?.segment_id !== undefined ? ` Current fitting segment ${fitting.segment_id}; segment samples ${fitting.segment_sample_count ?? fitting.sample_count ?? "unavailable"}.` : "")
-    + refreshText;
-  panel.classList.toggle("error", (adaptation.enabled && fitting?.last_status === "fit_failed") || refresh?.state === "failed");
+    + refreshText);
+  toggleClass(panel, "error", (adaptation.enabled && fitting?.last_status === "fit_failed") || refresh?.state === "failed");
 }
 
 async function loadRuntimeHistory(older = false) {
@@ -666,9 +749,9 @@ async function loadRuntimeHistory(older = false) {
   const rows = document.querySelector("#runtime-history-rows");
   if (!runId || state.historyLoading) return;
   state.historyLoading = true;
-  document.querySelector("#runtime-history-older").disabled = true;
-  document.querySelector("#runtime-history-refresh").disabled = true;
-  message.textContent = "Loading confirmed and pending changes…";
+  setIfChanged(document.querySelector("#runtime-history-older"), "disabled", true);
+  setIfChanged(document.querySelector("#runtime-history-refresh"), "disabled", true);
+  setIfChanged(message, "textContent", "Loading confirmed and pending changes…");
   try {
     const query = new URLSearchParams({ run_id: runId, limit: "30" });
     if (older && state.historyRunId === runId && state.historyCursor) query.set("before", state.historyCursor);
@@ -681,7 +764,7 @@ async function loadRuntimeHistory(older = false) {
       const result = entry.result || {};
       const tr = document.createElement("tr");
       const changes = Object.keys(entry.command.changes).map(key => runtimeChangeDescription(entry, key)).join(" ");
-      const refreshOutcome = result.no_change ? "; unchanged, no refresh" : result.refreshed ? "; Controller refreshed" : entry.status === "pending" ? "; waiting for tick-boundary refresh" : "";
+      const refreshOutcome = result.no_change ? "; unchanged" : result.refreshed ? "; Controller refreshed" : entry.status === "pending" ? "; waiting for assignment confirmation" : "";
       const outcome = `${entry.status}${refreshOutcome}; revision ${result.revision ?? "unavailable"}; effective tick ${result.effective_tick ?? "unavailable"}${result.reason ? "; " + result.reason : ""}${entry.persistence === "persistence_error" ? "; active state not durably saved" : ""}`;
       const sync = !page.grafana_enabled ? "Not configured" : (entry.grafana_sync === "synced" ? "Synced"
         : entry.grafana_sync === "not_applicable" ? "No change annotation" : `Incomplete: ${entry.grafana_error || entry.grafana_sync || "pending"}`);
@@ -690,20 +773,20 @@ async function loadRuntimeHistory(older = false) {
           : result.processed_at ? `${result.source === "central" ? "Central decision" : "Controller processed"}: ${formatExperimentTime(result.processed_at)}; not an application timestamp`
             : "Not confirmed", changes, outcome, sync]) {
         const td = document.createElement("td");
-        td.textContent = text;
+        setIfChanged(td, "textContent", text);
         tr.append(td);
       }
       rows.append(tr);
     }
-    message.textContent = page.error || page.grafana_error || "Available recorded history only; missing legacy events are not reconstructed.";
-    message.classList.toggle("error", Boolean(page.error || page.grafana_error));
-    document.querySelector("#runtime-history-older").hidden = !page.next_cursor;
+    setIfChanged(message, "textContent", page.error || page.grafana_error || "Available recorded history only; missing legacy events are not reconstructed.");
+    toggleClass(message, "error", Boolean(page.error || page.grafana_error));
+    setIfChanged(document.querySelector("#runtime-history-older"), "hidden", !page.next_cursor);
   } catch (error) {
-    if (state.currentRunId === runId) { message.textContent = `History unavailable: ${error.message}`; message.classList.add("error"); }
+    if (state.currentRunId === runId) { setIfChanged(message, "textContent", `History unavailable: ${error.message}`); message.classList.add("error"); }
   } finally {
     state.historyLoading = false;
-    document.querySelector("#runtime-history-older").disabled = false;
-    document.querySelector("#runtime-history-refresh").disabled = false;
+    setIfChanged(document.querySelector("#runtime-history-older"), "disabled", false);
+    setIfChanged(document.querySelector("#runtime-history-refresh"), "disabled", false);
   }
 }
 
@@ -713,26 +796,25 @@ function renderLiveConfiguration() {
   const ready = runtimeReady();
   const configuration = runtime?.configuration;
   const displayedConfiguration = configuration || state.runConfiguration;
-  runConfigurationControls.forEach((control) => { control.disabled = true; });
-  adaptationEnableLabel.textContent = configuration ? "Adaptation" : "Adaptation at Start (unconfirmed)";
-  const disabled = !ready || mutationInFlight() || runtimeUnconfirmed()
-    || Boolean(runtime?.pending) || Boolean(state.controllerStatus?.run_parameters?.pending);
+  runConfigurationControls.forEach((control) => { setIfChanged(control, "disabled", true); });
+  setIfChanged(adaptationEnableLabel, "textContent", configuration ? "Adaptation" : "Adaptation at Start (unconfirmed)");
+  const disabled = !ready || runtimeUpdateBlocked();
   if (displayedConfiguration) {
-    controlTargetSelect.value = displayedConfiguration.control_target;
-    adaptationEnabledSelect.value = String(displayedConfiguration.adaptation_enabled);
+    setIfChanged(controlTargetSelect, "value", displayedConfiguration.control_target);
+    setIfChanged(adaptationEnabledSelect, "value", String(displayedConfiguration.adaptation_enabled));
   } else {
-    controlTargetSelect.value = "";
-    adaptationEnabledSelect.value = "";
+    setIfChanged(controlTargetSelect, "value", "");
+    setIfChanged(adaptationEnabledSelect, "value", "");
   }
-  controlTargetSelect.disabled = disabled;
-  adaptationEnabledSelect.disabled = disabled;
+  setIfChanged(controlTargetSelect, "disabled", disabled);
+  setIfChanged(adaptationEnabledSelect, "disabled", disabled);
   renderAdaptiveSelection(displayedConfiguration?.adaptation_mode || "", disabled);
   renderSetpoints(configuration || state.params?.controller, disabled);
   renderConfigurationDetails(configuration, true);
   const request = state.runtimeRequest;
   const timedOut = runtimeUnconfirmed() && Date.now() / 1000 - (request.created_at || 0) >= 30;
-  retryRuntimeButton.hidden = !runtimeUnconfirmed();
-  retryRuntimeButton.disabled = !runtimeReady() || mutationInFlight();
+  setIfChanged(retryRuntimeButton, "hidden", !runtimeUnconfirmed());
+  setIfChanged(retryRuntimeButton, "disabled", !runtimeReady() || runtimeUpdateBlocked(true));
   let label = "live";
   let message = `Actual Controller settings · revision ${runtime?.revision ?? "—"}. Changes affect this run only.`;
   if (!ready) {
@@ -748,12 +830,13 @@ function renderLiveConfiguration() {
       : " Saved start settings are shown; they are not confirmed as active. Editing is locked.";
   } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
     label = timedOut || request?.status === "timeout" ? "confirmation timeout" : "awaiting confirmation";
-    message = `Request ${request?.command?.event_id || "…"}: waiting for the next control tick and a valid measurement to apply settings and refresh Controller. Retry uses the same event.`;
+    message = `Request ${request?.command?.event_id || "…"}: ${deliveryMessage(request?.delivery)}. Waiting for Controller to confirm assignment at an iteration boundary. Retry uses the same event.`;
     if (request?.transport_error) message += ` ${request.transport_error}`;
+    if (state.runtimeLookupError) message += ` ${state.runtimeLookupError}`;
   } else if (request?.status === "applied") {
     label = "applied";
-    message += request.result.no_change ? " Last request did not change values; no Controller refresh."
-      : ` Last request applied at revision ${request.result.revision}, effective tick ${request.result.effective_tick}; Controller refresh ${request.result.refreshed ? "completed" : "unconfirmed"}.`;
+    message += request.result.no_change ? " Last request did not change values."
+      : ` Last request applied at revision ${request.result.revision}, effective tick ${request.result.effective_tick}. ${request.result.refreshed ? "Controller refreshed." : "No automatic Controller refresh."}`;
   } else if (request?.status === "rejected") {
     label = "rejected";
     message = request.result?.reason || "Controller rejected the update; prior settings remain.";
@@ -768,11 +851,11 @@ function renderLiveConfiguration() {
     if (label === "applied" || label === "live") label = "active — history incomplete";
     message += ` ${state.runtimeHistoryError} Controller settings remain authoritative; history may be incomplete.`;
   }
-  runConfigurationStatus.textContent = label;
-  runConfigurationStatus.className = ["rejected", "unconfirmed", "Controller error", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
-    ? "status error" : (label === "applied" ? "status success" : "status running");
-  runConfigurationMessage.textContent = message;
-  runConfigurationMessage.classList.toggle("error", Boolean(state.runtimeError || state.runtimeHistoryError) || ["rejected", "Controller error"].includes(label) || persistenceFailed);
+  setIfChanged(runConfigurationStatus, "textContent", label);
+  setIfChanged(runConfigurationStatus, "className", ["rejected", "unconfirmed", "Controller error", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
+    ? "status error" : (label === "applied" ? "status success" : "status running"));
+  setIfChanged(runConfigurationMessage, "textContent", message);
+  toggleClass(runConfigurationMessage, "error", Boolean(state.runtimeError || state.runtimeHistoryError) || ["rejected", "Controller error"].includes(label) || persistenceFailed);
 }
 
 function applyRunConfigurationPayload(payload) {
@@ -792,70 +875,70 @@ function renderRunConfiguration() {
     return;
   }
 
-  runTypeSelect.value = configuration.run_type;
-  controllerModeSelect.value = configuration.controller_mode;
-  controlTargetSelect.value = configuration.control_target;
-  adaptationEnabledSelect.value = String(configuration.adaptation_enabled);
-  adaptationModeSelect.value = configuration.adaptation_mode;
-  growthRateSourceSelect.value = configuration.growth_rate_source;
+  setIfChanged(runTypeSelect, "value", configuration.run_type);
+  setIfChanged(controllerModeSelect, "value", configuration.controller_mode);
+  setIfChanged(controlTargetSelect, "value", configuration.control_target);
+  setIfChanged(adaptationEnabledSelect, "value", String(configuration.adaptation_enabled));
+  setIfChanged(adaptationModeSelect, "value", configuration.adaptation_mode);
+  setIfChanged(growthRateSourceSelect, "value", configuration.growth_rate_source);
   if (runtimeRunActive()) {
     renderLiveConfiguration();
     return;
   }
-  adaptationEnableLabel.textContent = "Adaptation at Start";
-  retryRuntimeButton.hidden = true;
+  setIfChanged(adaptationEnableLabel, "textContent", "Adaptation at Start");
+  setIfChanged(retryRuntimeButton, "hidden", true);
 
   const locked = runConfigurationLocked();
   runConfigurationControls.forEach((control) => {
-    control.disabled = state.runConfigurationInFlight || locked;
+    setIfChanged(control, "disabled", state.runConfigurationInFlight || locked);
   });
   renderAdaptiveSelection(configuration.adaptation_mode, locked);
-  renderSetpoints(state.params?.controller, locked || !state.params);
+  renderSetpoints(state.params?.controller, locked || state.parameterActionInFlight || !state.params);
   renderConfigurationDetails(state.params?.controller, false);
 
   growthRateSourceSelect.querySelectorAll("[data-development-source]").forEach((option) => {
     const selected = option.value === configuration.growth_rate_source;
-    option.hidden = state.uiMode !== "development" && !selected;
-    option.disabled = state.uiMode !== "development";
+    setIfChanged(option, "hidden", state.uiMode !== "development" && !selected);
+    setIfChanged(option, "disabled", state.uiMode !== "development");
   });
 
   if (state.runConfigurationInFlight) {
-    runConfigurationStatus.textContent = "saving";
-    runConfigurationStatus.className = "status idle";
-    runConfigurationMessage.textContent = "Saving run configuration…";
+    setIfChanged(runConfigurationStatus, "textContent", "saving");
+    setIfChanged(runConfigurationStatus, "className", "status idle");
+    setIfChanged(runConfigurationMessage, "textContent", "Saving run configuration…");
     runConfigurationMessage.classList.remove("error");
     return;
   }
   if (state.runConfigurationError) {
-    runConfigurationStatus.textContent = "error";
-    runConfigurationStatus.className = "status error";
-    runConfigurationMessage.textContent = state.runConfigurationError;
+    setIfChanged(runConfigurationStatus, "textContent", "error");
+    setIfChanged(runConfigurationStatus, "className", "status error");
+    setIfChanged(runConfigurationMessage, "textContent", state.runConfigurationError);
     runConfigurationMessage.classList.add("error");
     return;
   }
   if (state.runConfigurationRefreshError) {
-    runConfigurationStatus.textContent = "saved; refresh pending";
-    runConfigurationStatus.className = "status error";
-    runConfigurationMessage.textContent = state.runConfigurationRefreshError;
+    setIfChanged(runConfigurationStatus, "textContent", "saved; refresh pending");
+    setIfChanged(runConfigurationStatus, "className", "status error");
+    setIfChanged(runConfigurationMessage, "textContent", state.runConfigurationRefreshError);
     runConfigurationMessage.classList.add("error");
     return;
   }
   if (locked) {
-    runConfigurationStatus.textContent = "locked";
-    runConfigurationStatus.className = "status running";
-    runConfigurationMessage.textContent = !state.systemStatusFresh
+    setIfChanged(runConfigurationStatus, "textContent", "locked");
+    setIfChanged(runConfigurationStatus, "className", "status running");
+    setIfChanged(runConfigurationMessage, "textContent", !state.systemStatusFresh
       ? "Refresh system status before changing the configuration."
-      : (mutationInFlight() ? "Wait for the current operation to finish." : "Configuration is locked for the active run.");
+      : (state.experimentActionInFlight ? "Wait for the experiment action to finish." : "Configuration is locked for the active run."));
     runConfigurationMessage.classList.remove("error");
     return;
   }
 
   const savedTime = formatParameterTime(state.runConfigurationUpdatedAt);
-  runConfigurationStatus.textContent = savedTime ? "saved" : "defaults";
-  runConfigurationStatus.className = "status success";
-  runConfigurationMessage.textContent = savedTime
+  setIfChanged(runConfigurationStatus, "textContent", savedTime ? "saved" : "defaults");
+  setIfChanged(runConfigurationStatus, "className", "status success");
+  setIfChanged(runConfigurationMessage, "textContent", savedTime
     ? `Configuration saved at ${savedTime}. Changes are applied automatically.`
-    : "Using the default run configuration. Changes are saved automatically.";
+    : "Using the default run configuration. Changes are saved automatically.");
   runConfigurationMessage.classList.remove("error");
 }
 
@@ -875,34 +958,44 @@ async function saveRunConfiguration() {
   const previous = { ...state.runConfiguration };
   const draft = collectRunConfiguration();
   const expectedRunId = state.currentRunId;
-  invalidatePendingReads();
+  const actionId = state.experimentActionId;
+  const context = experimentContextKey();
+  state.configurationRequestId += 1;
+  state.operationRequestId += 1;
   state.runConfiguration = draft;
   state.runConfigurationInFlight = true;
   state.runConfigurationError = null;
   state.runConfigurationRefreshError = null;
-  renderMutationState();
   try {
+    renderMutationState();
     const payload = await fetchJson("/api/run-configuration", {
       method: "PUT",
       body: JSON.stringify({ ...draft, expected_run_id: expectedRunId }),
     });
+    if (context !== experimentContextKey()) return null;
     applyRunConfigurationPayload(payload);
     // The PUT confirms the complete saved configuration. The normal status
     // poll refreshes the derived preview without holding the edit lock.
     return payload;
   } catch (error) {
-    state.runConfiguration = previous;
-    state.runConfigurationError = error.message;
+    if (context === experimentContextKey()) {
+      state.runConfiguration = previous;
+      state.runConfigurationError = error.message;
+    }
     return null;
   } finally {
-    state.runConfigurationInFlight = false;
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.runConfigurationInFlight = false;
+      state.configurationRequestId += 1;
+      state.operationRequestId += 1;
+      renderMutationState();
+    }
   }
 }
 
 function setDrawerOpen(open) {
   state.drawerOpen = open;
-  shell.classList.toggle("drawer-open", open);
+  toggleClass(shell, "drawer-open", open);
 }
 
 function parseFieldValue(rawValue) {
@@ -947,8 +1040,8 @@ function createParameterInput(value, meta = {}) {
     const choices = typeof value === "boolean" ? [true, false] : meta.choices;
     choices.forEach((choice) => {
       const option = document.createElement("option");
-      option.value = String(choice);
-      option.textContent = String(choice);
+      setIfChanged(option, "value", String(choice));
+      setIfChanged(option, "textContent", String(choice));
       input.appendChild(option);
     });
   } else if (value !== null && typeof value === "object") {
@@ -959,9 +1052,9 @@ function createParameterInput(value, meta = {}) {
     input.type = typeof value === "number" ? "number" : "text";
     if (input.type === "number") input.step = "any";
   }
-  input.className = "field-input";
+  setIfChanged(input, "className", "field-input");
   input.dataset.valueType = typeof value;
-  input.value = formatFieldValue(value);
+  setIfChanged(input, "value", formatFieldValue(value));
   return input;
 }
 
@@ -982,14 +1075,14 @@ function readParameterInput(input) {
 
 function renderParameterDetails(field, key, meta, defaultValue) {
   const reference = meta.reference || {};
-  field.querySelector(".field-definition").textContent = reference.definition || meta.description || "";
+  setIfChanged(field.querySelector(".field-definition"), "textContent", reference.definition || meta.description || "");
   const list = field.querySelector(".field-reference");
   const addDetail = (name, value) => {
     if (value === undefined || value === null || value === "") return;
     const term = document.createElement("dt");
     const detail = document.createElement("dd");
-    term.textContent = name;
-    detail.textContent = String(value);
+    setIfChanged(term, "textContent", name);
+    setIfChanged(detail, "textContent", String(value));
     list.appendChild(term);
     list.appendChild(detail);
   };
@@ -1008,15 +1101,15 @@ function renderParameterDetails(field, key, meta, defaultValue) {
   const formula = reference.formula || meta.expression;
   const formulaLabel = field.querySelector(".field-formula-label");
   const formulaContent = field.querySelector(".field-formula");
-  formulaLabel.textContent = reference.origin === "matlab" && reference.formula
-    ? "MATLAB expression" : "Expression";
-  formulaLabel.hidden = !formula;
-  formulaContent.textContent = formula || "";
-  formulaContent.hidden = !formula;
+  setIfChanged(formulaLabel, "textContent", reference.origin === "matlab" && reference.formula
+    ? "MATLAB expression" : "Expression");
+  setIfChanged(formulaLabel, "hidden", !formula);
+  setIfChanged(formulaContent, "textContent", formula || "");
+  setIfChanged(formulaContent, "hidden", !formula);
   for (const [selector, content] of [[".field-note", reference.note], [".field-unit-note", reference.unit_note]]) {
     const element = field.querySelector(selector);
-    element.textContent = content || "";
-    element.hidden = !content;
+    setIfChanged(element, "textContent", content || "");
+    setIfChanged(element, "hidden", !content);
   }
 }
 
@@ -1024,12 +1117,12 @@ function renderParameterFieldState(field, value, savedValue, defaultValue, meta)
   const unsaved = !valuesEqual(value, savedValue);
   const nonDefault = !valuesMatchDefault(value, defaultValue, meta);
   const differsExactly = !valuesEqual(value, defaultValue);
-  field.classList.toggle("unsaved", unsaved);
-  field.classList.toggle("modified", nonDefault);
-  field.querySelector(".field-unsaved").hidden = !unsaved;
-  field.querySelector(".field-modified").hidden = !nonDefault || unsaved;
-  field.querySelector(".field-state").hidden = !unsaved && !nonDefault;
-  field.querySelector(".field-reset").hidden = !differsExactly;
+  toggleClass(field, "unsaved", unsaved);
+  toggleClass(field, "modified", nonDefault);
+  setIfChanged(field.querySelector(".field-unsaved"), "hidden", !unsaved);
+  setIfChanged(field.querySelector(".field-modified"), "hidden", !nonDefault || unsaved);
+  setIfChanged(field.querySelector(".field-state"), "hidden", !unsaved && !nonDefault);
+  setIfChanged(field.querySelector(".field-reset"), "hidden", !differsExactly);
   return { unsaved, differsExactly };
 }
 
@@ -1076,11 +1169,11 @@ function renderForm(form, params, sectionName) {
 
   groups.forEach((group) => {
     const wrapper = document.createElement("section");
-    wrapper.className = "param-group";
+    setIfChanged(wrapper, "className", "param-group");
 
     const title = document.createElement("h4");
-    title.className = "param-group-title";
-    title.textContent = group.section;
+    setIfChanged(title, "className", "param-group-title");
+    setIfChanged(title, "textContent", group.section);
     wrapper.appendChild(title);
 
     group.items.forEach(({ key, value, meta }) => {
@@ -1094,13 +1187,13 @@ function renderForm(form, params, sectionName) {
       const input = createParameterInput(value, meta);
       field.querySelector(".field-input").replaceWith(input);
 
-      label.textContent = meta.label || key;
-      description.textContent = meta.description || "";
-      description.classList.toggle("is-empty", !meta.description);
+      setIfChanged(label, "textContent", meta.label || key);
+      setIfChanged(description, "textContent", meta.description || "");
+      toggleClass(description, "is-empty", !meta.description);
       const unit = field.querySelector(".field-unit");
-      unit.textContent = meta.unit === "-" ? "−" : meta.unit || "";
+      setIfChanged(unit, "textContent", meta.unit === "-" ? "−" : meta.unit || "");
       unit.setAttribute("aria-label", meta.unit === "-" ? "Dimensionless" : meta.unit || "No physical unit");
-      unit.hidden = !meta.unit;
+      setIfChanged(unit, "hidden", !meta.unit);
       const fieldId = `parameter-${sectionName}-${encodeURIComponent(key)}`;
       input.id = fieldId;
       label.setAttribute("for", fieldId);
@@ -1111,7 +1204,7 @@ function renderForm(form, params, sectionName) {
       info.setAttribute("aria-label", `Details for ${meta.label || key}`);
       info.setAttribute("aria-controls", details.id);
       const setDetailsOpen = (open) => {
-        details.hidden = !open;
+        setIfChanged(details, "hidden", !open);
         info.setAttribute("aria-expanded", String(open));
       };
       info.addEventListener("click", () => setDetailsOpen(details.hidden));
@@ -1122,7 +1215,7 @@ function renderForm(form, params, sectionName) {
           event.stopPropagation();
         }
       });
-      field.classList.toggle("field-wide", input.tagName === "TEXTAREA" || typeof value === "string");
+      toggleClass(field, "field-wide", input.tagName === "TEXTAREA" || typeof value === "string");
       renderParameterDetails(field, key, meta, defaultValue);
       input.dataset.key = key;
       input.dataset.section = sectionName;
@@ -1138,7 +1231,7 @@ function renderForm(form, params, sectionName) {
       });
       resetButton.addEventListener("click", () => {
         state.parameterRequestId += 1;
-        input.value = formatFieldValue(defaultValue);
+        setIfChanged(input, "value", formatFieldValue(defaultValue));
         state.parameterError = null;
         input.dataset.edited = String(!valuesEqual(defaultValue, state.params?.[sectionName]?.[key]));
         updateParameterDraftState();
@@ -1225,9 +1318,16 @@ async function loadParams() {
 }
 
 function renderParameterForms() {
+  const signature = JSON.stringify([state.params.shared, state.params.gsensor, state.params.controller,
+    state.params.defaults, state.paramMeta]);
+  if (signature === state.parameterFormSignature && state.parameterUnsavedCount === 0) {
+    updateParameterDraftState();
+    return;
+  }
   renderForm(sharedForm, state.params.shared, "shared");
   renderForm(gsensorForm, state.params.gsensor, "gsensor");
   renderForm(controllerForm, state.params.controller, "controller");
+  state.parameterFormSignature = signature;
   updateParameterDraftState();
 }
 
@@ -1303,7 +1403,7 @@ function syncOnlineParameterValues() {
     if (changedContext && state.parameterDraftContext) {
       input.dataset.edited = "false";
       if (Object.hasOwn(restoredDraft?.changes?.[section] || {}, key)) {
-        input.value = formatFieldValue(restoredDraft.changes[section][key]);
+        setIfChanged(input, "value", formatFieldValue(restoredDraft.changes[section][key]));
         input.dataset.edited = "true";
       }
     }
@@ -1311,7 +1411,7 @@ function syncOnlineParameterValues() {
     // unsaved edit must survive status polling and acknowledgments.
     if (Object.hasOwn(applied[section] || {}, key)
         && valuesEqual(readParameterInput(input), applied[section][key])) input.dataset.edited = "false";
-    if (input.dataset.edited !== "true") input.value = formatFieldValue(value);
+    if (input.dataset.edited !== "true") setIfChanged(input, "value", formatFieldValue(value));
     state.params[section][key] = value;
   });
   if (changedContext) {
@@ -1323,10 +1423,8 @@ function syncOnlineParameterValues() {
 }
 
 function parametersLocked() {
-  if (!state.systemStatusFresh || mutationInFlight() || state.parameterViewNeedsRefresh) return true;
-  if (runtimeRunActive()) return !onlineParametersReady() || runtimeUnconfirmed()
-    || Boolean(state.controllerStatus?.runtime_controls?.pending)
-    || Boolean(state.controllerStatus?.run_parameters?.pending);
+  if (!state.systemStatusFresh || state.experimentActionInFlight || state.parameterViewNeedsRefresh) return true;
+  if (runtimeRunActive()) return !onlineParametersReady() || runtimeUpdateBlocked();
   const status = currentExperiment()?.status;
   return Boolean(status && !["created", "completed", "error"].includes(status));
 }
@@ -1346,36 +1444,36 @@ function updateParameterDraftState() {
     const defaultValue = state.params?.defaults?.[section]?.[key];
     const online = runtimeRunActive();
     const policy = parameterPolicy(section, key);
-    input.disabled = state.parameterActionInFlight || locked
-      || (online && policy.runtime_editable !== true);
-    input.title = online ? (policy.reason || "Online editing is not available for this field.") : "";
+    setIfChanged(input, "disabled", state.parameterActionInFlight || locked
+      || (online && policy.runtime_editable !== true));
+    setIfChanged(input, "title", online ? (policy.reason || "Online editing is not available for this field.") : "");
     const field = input.closest(".field");
     const fieldState = renderParameterFieldState(field, value, savedValue, defaultValue, state.paramMeta[key]);
     if (fieldState.unsaved && (!online || input.dataset.edited === "true")) unsavedCount += 1;
     if (fieldState.differsExactly) modifiedCount += 1;
     const fieldReset = field.querySelector(".field-reset");
-    fieldReset.disabled = state.parameterActionInFlight || locked || online;
+    setIfChanged(fieldReset, "disabled", state.parameterActionInFlight || locked || online);
     let policyNote = field.querySelector(".field-runtime-policy");
     if (!policyNote) {
       policyNote = document.createElement("p");
-      policyNote.className = "field-runtime-policy field-description";
+      setIfChanged(policyNote, "className", "field-runtime-policy field-description");
       field.appendChild(policyNote);
     }
-    policyNote.hidden = !online;
-    policyNote.textContent = online ? `${policy.runtime_editable ? "Online" : "Startup only"}: ${policy.reason || "Not available during a run."}${fieldState.unsaved ? ` Active value: ${formatFieldValue(savedValue)}.` : ""}${key === "dt_G" ? " Match the external camera interval; this does not change its capture rate." : ""}` : "";
+    setIfChanged(policyNote, "hidden", !online);
+    setIfChanged(policyNote, "textContent", online ? `${policy.runtime_editable ? "Online" : "Startup only"}: ${policy.reason || "Not available during a run."}${fieldState.unsaved ? ` Active value: ${formatFieldValue(savedValue)}.` : ""}${key === "dt_G" ? " Match the external camera interval; this does not change its capture rate." : ""}` : "");
   });
 
   const staleRevision = runtimeRunActive() && unsavedCount > 0 && state.parameterEditRevision !== null
     && state.parameterEditRevision !== state.controllerStatus?.runtime_controls?.revision;
-  saveParamsButton.disabled = state.parameterActionInFlight || locked || staleRevision || unsavedCount === 0;
-  resetParamsButton.disabled = state.parameterActionInFlight || locked || runtimeRunActive() || modifiedCount === 0;
+  setIfChanged(saveParamsButton, "disabled", state.parameterActionInFlight || locked || staleRevision || unsavedCount === 0);
+  setIfChanged(resetParamsButton, "disabled", state.parameterActionInFlight || locked || runtimeRunActive() || modifiedCount === 0);
   if (!unsavedCount) state.parameterEditRevision = null;
   state.parameterUnsavedCount = unsavedCount;
   if (parameterReviewRevisionButton) {
     const stale = runtimeRunActive() && unsavedCount > 0 && state.parameterEditRevision !== null
       && state.parameterEditRevision !== state.controllerStatus?.runtime_controls?.revision;
-    parameterReviewRevisionButton.hidden = !stale;
-    parameterReviewRevisionButton.disabled = locked;
+    setIfChanged(parameterReviewRevisionButton, "hidden", !stale);
+    setIfChanged(parameterReviewRevisionButton, "disabled", locked);
   }
   renderParameterStatus(unsavedCount);
 }
@@ -1408,9 +1506,7 @@ function renderParameterStatus(unsavedCount = 0) {
   if (runtimeRunActive() && !state.parameterError && !state.parameterActionInFlight) {
     if (parameterRequest && runtimeUnconfirmed(parameterRequest)) {
       kind = "saving";
-      const result = parameterRequest.result || {};
-      message = result.phase === "waiting_for_measurement" || result.waiting_for_fresh_measurement
-        ? "Waiting for fresh measurement" : "Pending — waiting for participant confirmation";
+      message = "Pending — waiting for Controller/GSensor assignment confirmation";
       if (parameterRequest.transport_error) message += `. ${parameterRequest.transport_error}`;
       if (parameterRequest.status === "timeout") message += ". Confirmation delayed; retry the same update using Retry Update.";
     } else if (!unsavedCount && parameterRequest?.status === "applied") {
@@ -1428,18 +1524,18 @@ function renderParameterStatus(unsavedCount = 0) {
     }
   }
 
-  parameterStatus.className = `parameter-status ${kind}`;
-  parameterStatusText.textContent = message;
+  setIfChanged(parameterStatus, "className", `parameter-status ${kind}`);
+  setIfChanged(parameterStatusText, "textContent", message);
   const source = document.getElementById("parameter-source");
   if (source) {
     if (runtimeRunActive()) {
-      source.textContent = "Changes affect this experiment only. Save Parameters submits edits for the next prepared control boundary; startup values and next-experiment defaults are unchanged.";
+      setIfChanged(source, "textContent", "Changes affect this experiment only. Save Parameters submits edits for the next prepared control boundary; startup values and next-experiment defaults are unchanged.");
       return;
     }
     const savedTime = formatParameterTime(state.params?.status?.saved_at);
-    source.textContent = savedTime
+    setIfChanged(source, "textContent", savedTime
       ? `Source: saved parameter set · ${savedTime}. Reopening or creating an experiment keeps this set.`
-      : "Source: project defaults. Saving keeps your settings for the next experiment.";
+      : "Source: project defaults. Saving keeps your settings for the next experiment.");
   }
 }
 
@@ -1471,15 +1567,15 @@ function displayNameForExperiment(experiment) {
 }
 
 function setExperimentMessage(message, { error = false } = {}) {
-  experimentMessage.textContent = message;
-  experimentMessage.classList.toggle("error", error);
+  setIfChanged(experimentMessage, "textContent", message);
+  toggleClass(experimentMessage, "error", error);
 }
 
 function renderControllerStartStatus() {
   if (!state.startSentRunId) return;
   if (controllerHasUnendedRun() || state.recoveryEndPending) {
-    commandStatus.textContent = "safety confirmation required";
-    commandStatus.className = "status error";
+    setIfChanged(commandStatus, "textContent", "safety confirmation required");
+    setIfChanged(commandStatus, "className", "status error");
     state.startSentRunId = null;
     renderRecoveryEndStatus();
     return;
@@ -1496,21 +1592,22 @@ function renderControllerStartStatus() {
     && controller.last_message.payload?.run_id === current.run_id
     && controller.last_message_result?.accepted === false;
   if (controller?.status === "error" || controller?.recovery?.status === "error" || rejected) {
-    commandStatus.textContent = "start blocked";
-    commandStatus.className = "status error";
+    setIfChanged(commandStatus, "textContent", "start blocked");
+    setIfChanged(commandStatus, "className", "status error");
     const reason = controllerFailureMessage(controller)
       || controller.last_message_result?.reason || "Controller rejected the start command.";
     setExperimentMessage(`Controller did not start ${displayNameForExperiment(current)}. ${reason}`, { error: true });
   } else if (controllerRunningForRun(current.run_id)) {
-    commandStatus.textContent = "running";
-    commandStatus.className = "status success";
+    setIfChanged(commandStatus, "textContent", "running");
+    setIfChanged(commandStatus, "className", "status success");
     setExperimentMessage(`Controller confirmed running for ${displayNameForExperiment(current)}.`);
     state.startSentRunId = null;
     renderProcessWaitStatus();
   } else {
-    commandStatus.textContent = "awaiting Controller";
-    commandStatus.className = "status idle";
-    setExperimentMessage(`Start sent for ${displayNameForExperiment(current)}. Waiting for Controller to confirm this experiment is running.`);
+    setIfChanged(commandStatus, "textContent", "awaiting Controller");
+    setIfChanged(commandStatus, "className", "status idle");
+    const delivery = state.deliveries.ordinary.find(item => item.key === `start:${current.run_id}`);
+    setExperimentMessage(`Start: ${deliveryMessage(delivery)} for ${displayNameForExperiment(current)}. Waiting for Controller to confirm this experiment is running.`);
   }
 }
 
@@ -1568,6 +1665,14 @@ function observeGsensorActivation(activation) {
     }
     return;
   }
+
+  const previous = state.gsensorActivation;
+  if (previous?.run_id === activation.run_id
+      && previous.experiment_started_at === activation.experiment_started_at
+      && Number.isInteger(previous.revision) && Number.isInteger(activation.revision)
+      && (activation.revision < previous.revision
+        || (activation.revision === previous.revision && previous.acknowledged_event_id
+          && previous.acknowledged_event_id === activation.pending?.event_id))) return;
 
   state.gsensorActivation = activation;
   const local = state.gsensorActivationCommand;
@@ -1647,10 +1752,10 @@ function renderControllerGrowthInput() {
     }
   }
 
-  gsensorGrowthReadinessState.textContent = label;
-  gsensorGrowthReadinessState.className = className;
-  gsensorGrowthReadinessMessage.textContent = message;
-  gsensorGrowthReadinessMessage.classList.toggle("error", label === "Stale");
+  setIfChanged(gsensorGrowthReadinessState, "textContent", label);
+  setIfChanged(gsensorGrowthReadinessState, "className", className);
+  setIfChanged(gsensorGrowthReadinessMessage, "textContent", message);
+  toggleClass(gsensorGrowthReadinessMessage, "error", label === "Stale");
 }
 
 function renderGsensorActivation() {
@@ -1661,7 +1766,7 @@ function renderGsensorActivation() {
   const pending = matchesCurrent ? activation.pending : null;
   const confirmedEnabled = Boolean(matchesCurrent && activation.enabled);
   const retryCommand = retryableGsensorActivationCommand();
-  const operationsBlocked = mutationInFlight();
+  const operationsBlocked = state.experimentActionInFlight || state.gsensorActivationInFlight;
   const canOperate = Boolean(
     state.systemStatusFresh
     && matchesCurrent
@@ -1670,16 +1775,16 @@ function renderGsensorActivation() {
     && !operationsBlocked
   );
 
-  gsensorActivationState.textContent = confirmedEnabled ? "On" : "Off";
-  gsensorActivationState.className = confirmedEnabled ? "status success" : "status idle";
-  gsensorActivationConfirmedAt.textContent = matchesCurrent
+  setIfChanged(gsensorActivationState, "textContent", confirmedEnabled ? "On" : "Off");
+  setIfChanged(gsensorActivationState, "className", confirmedEnabled ? "status success" : "status idle");
+  setIfChanged(gsensorActivationConfirmedAt, "textContent", matchesCurrent
     ? formatExperimentTime(activation.acknowledged_at)
-    : "—";
+    : "—");
 
-  gsensorActivationPending.hidden = !pending;
+  setIfChanged(gsensorActivationPending, "hidden", !pending);
   if (pending) {
-    gsensorActivationPending.textContent = pending.enabled ? "enable pending" : "disable pending";
-    gsensorActivationPending.className = pending.transport_error ? "status error" : "status running";
+    setIfChanged(gsensorActivationPending, "textContent", pending.enabled ? "enable pending" : "disable pending");
+    setIfChanged(gsensorActivationPending, "className", pending.transport_error ? "status error" : "status running");
   }
 
   let desiredEnabled = !confirmedEnabled;
@@ -1697,15 +1802,15 @@ function renderGsensorActivation() {
     const command = state.gsensorActivationCommand;
     toggleLabel = command?.enabled ? "Sending Enable…" : "Sending Disable…";
   }
-  toggleGsensorActivationButton.textContent = toggleLabel;
-  toggleGsensorActivationButton.dataset.enabled = String(desiredEnabled);
-  toggleGsensorActivationButton.disabled = !toggleAllowed;
-  toggleGsensorActivationButton.classList.toggle("danger", confirmedEnabled || Boolean(pending?.enabled));
-  toggleGsensorActivationButton.classList.toggle("primary", !confirmedEnabled && !pending?.enabled);
+  setIfChanged(toggleGsensorActivationButton, "textContent", toggleLabel);
+  setIfChanged(toggleGsensorActivationButton.dataset, "enabled", String(desiredEnabled));
+  setIfChanged(toggleGsensorActivationButton, "disabled", !toggleAllowed);
+  toggleClass(toggleGsensorActivationButton, "danger", confirmedEnabled || Boolean(pending?.enabled));
+  toggleClass(toggleGsensorActivationButton, "primary", !confirmedEnabled && !pending?.enabled);
 
-  retryGsensorActivationButton.hidden = !retryCommand || state.gsensorActivationInFlight;
-  retryGsensorActivationButton.disabled = !retryCommand || !canOperate;
-  retryGsensorActivationButton.textContent = `Retry ${retryCommand?.enabled ? "Enable" : "Disable"}`;
+  setIfChanged(retryGsensorActivationButton, "hidden", !retryCommand || state.gsensorActivationInFlight);
+  setIfChanged(retryGsensorActivationButton, "disabled", !retryCommand || !canOperate);
+  setIfChanged(retryGsensorActivationButton, "textContent", `Retry ${retryCommand?.enabled ? "Enable" : "Disable"}`);
 
   let help = "Start the experiment before enabling GSensor.";
   if (pending?.enabled) {
@@ -1717,7 +1822,7 @@ function renderGsensorActivation() {
   } else if (matchesCurrent && activeGsensorExperiment(current)) {
     help = "The experiment continues while GSensor is Off. Enable it when the process is ready for image-based growth measurement.";
   }
-  gsensorActivationHelp.textContent = help;
+  setIfChanged(gsensorActivationHelp, "textContent", help);
 
   let message = "";
   let isError = false;
@@ -1745,8 +1850,8 @@ function renderGsensorActivation() {
   } else if (matchesCurrent) {
     message = `GSensor is confirmed ${confirmedEnabled ? "on" : "off"}.`;
   }
-  gsensorActivationMessage.textContent = message;
-  gsensorActivationMessage.classList.toggle("error", isError);
+  setIfChanged(gsensorActivationMessage, "textContent", message);
+  toggleClass(gsensorActivationMessage, "error", isError);
   renderControllerGrowthInput();
 }
 
@@ -1775,49 +1880,50 @@ function renderExperiments() {
     || (state.gsensorStatusRunId !== current?.run_id && state.selectionSentRunId !== current?.run_id));
   const canEnd = hasCurrent && (!isTerminal || controllerHasUnendedRunForRun(current));
   const action = state.experimentActionName;
-  const blocked = !state.systemStatusFresh || mutationInFlight();
+  const blocked = !state.systemStatusFresh || state.experimentActionInFlight;
+  const preparationSaving = state.parameterActionInFlight || state.runConfigurationInFlight;
   if (state.lastRenderedRunId !== current?.run_id) {
     clearCentralOverlay();
     document.querySelector("#runtime-history-rows").replaceChildren();
-    document.querySelector("#runtime-history-status").textContent = "Refresh history for the selected run.";
-    document.querySelector("#runtime-history-older").hidden = true;
+    setIfChanged(document.querySelector("#runtime-history-status"), "textContent", "Refresh history for the selected run.");
+    setIfChanged(document.querySelector("#runtime-history-older"), "hidden", true);
     state.historyRunId = null;
     state.historyCursor = null;
   }
 
   const displayedStatus = status === "starting" && knownRunning ? "running" : status;
-  experimentStatus.textContent = displayedStatus || "not selected";
-  experimentStatus.className = `status ${displayedStatus || "idle"}`;
-  experimentDisplayName.textContent = displayNameForExperiment(current);
-  experimentRunId.textContent = current?.run_id || "—";
-  experimentCreatedAt.textContent = formatExperimentTime(current?.created_at);
-  experimentStartedAt.textContent = formatExperimentTime(current?.started_at);
-  experimentEndedAt.textContent = formatExperimentTime(current?.ended_at);
-  cameraSavePath.value = current?.camera_save_path || "";
+  setIfChanged(experimentStatus, "textContent", displayedStatus || "not selected");
+  setIfChanged(experimentStatus, "className", `status ${displayedStatus || "idle"}`);
+  setIfChanged(experimentDisplayName, "textContent", displayNameForExperiment(current));
+  setIfChanged(experimentRunId, "textContent", current?.run_id || "—");
+  setIfChanged(experimentCreatedAt, "textContent", formatExperimentTime(current?.created_at));
+  setIfChanged(experimentStartedAt, "textContent", formatExperimentTime(current?.started_at));
+  setIfChanged(experimentEndedAt, "textContent", formatExperimentTime(current?.ended_at));
+  setIfChanged(cameraSavePath, "value", current?.camera_save_path || "");
 
-  copyCameraPathButton.disabled = !hasCurrent || state.experimentActionInFlight;
-  newExperimentButton.disabled = !canCreate || blocked;
-  startExperimentButton.disabled = !canStart
+  setIfChanged(copyCameraPathButton, "disabled", !hasCurrent || state.experimentActionInFlight);
+  setIfChanged(newExperimentButton, "disabled", !canCreate || blocked || preparationSaving);
+  setIfChanged(startExperimentButton, "disabled", !canStart
     || blocked
     || state.parameterViewNeedsRefresh
     || selectionRetryRequired
-    || state.runConfigurationInFlight
-    || Boolean(state.runConfigurationError);
-  endExperimentButton.disabled = !canEnd || blocked;
-  retrySelectionButton.hidden = !canRetrySelection;
-  retrySelectionButton.disabled = !canRetrySelection || blocked;
-  retrySelectionButton.textContent = action === "select" ? "Resending selection…" : "Retry Selection";
-  newExperimentLabel.disabled = !canCreate || blocked;
+    || preparationSaving
+    || Boolean(state.runConfigurationError));
+  setIfChanged(endExperimentButton, "disabled", !canEnd || (state.experimentActionInFlight && action !== "start"));
+  setIfChanged(retrySelectionButton, "hidden", !canRetrySelection);
+  setIfChanged(retrySelectionButton, "disabled", !canRetrySelection || blocked || preparationSaving);
+  setIfChanged(retrySelectionButton, "textContent", action === "select" ? "Resending selection…" : "Retry Selection");
+  setIfChanged(newExperimentLabel, "disabled", !canCreate || blocked || preparationSaving);
 
-  newExperimentButton.textContent = action === "create" ? "Creating…" : "Create Experiment";
-  startExperimentButton.textContent = action === "start"
+  setIfChanged(newExperimentButton, "textContent", action === "create" ? "Creating…" : "Create Experiment");
+  setIfChanged(startExperimentButton, "textContent", action === "start"
     ? "Starting…"
     : knownRunning ? "Controller Running"
       : (!state.systemStatusFresh || state.controllerStatus?.available !== true) ? "Checking Controller…"
-        : (status === "starting" ? "Retry Start" : "Start Experiment");
-  endExperimentButton.textContent = action === "end"
+        : (status === "starting" ? "Retry Start" : "Start Experiment"));
+  setIfChanged(endExperimentButton, "textContent", action === "end"
     ? "Ending…"
-    : (status === "stopping" ? "Retry End" : "End Experiment");
+    : (status === "stopping" ? "Retry End" : "End Experiment"));
 
   if (completedAfterStop && !recoveryHeld && !state.recoveryEndPending) {
     setExperimentMessage(`Completed ${displayNameForExperiment(current)}. Gsensor finalization is complete.`);
@@ -1841,8 +1947,8 @@ function updateCentralOverlay(runId, frameSeq, { final = false, force = false } 
     return;
   }
   centralOverlayImage.src = `/api/experiments/${encodeURIComponent(runId)}/overlay/${kind}?frame_seq=${encodeURIComponent(frameSeq)}&_=${now}`;
-  centralOverlayImage.hidden = false;
-  centralOverlayCaption.textContent = `${final ? "Final" : "Latest"} overlay · frame ${frameSeq}`;
+  setIfChanged(centralOverlayImage, "hidden", false);
+  setIfChanged(centralOverlayCaption, "textContent", `${final ? "Final" : "Latest"} overlay · frame ${frameSeq}`);
   state.latestOverlayKey = key;
   state.lastOverlayRefreshAt = now;
 }
@@ -1855,6 +1961,23 @@ function renderSystemStatus(payload) {
     && gsensor.last_status?.run_id === current.run_id;
   const gsensorStatus = gsensorMatchesRun ? gsensor.last_status : {};
   state.controllerStatus = controller;
+  state.deliveries = payload.delivery || { ordinary: [], stop: [] };
+  const selectionDelivery = state.deliveries.ordinary.find(item => item.key === `select:${current?.run_id}`);
+  if (selectionDelivery?.status === "sent") {
+    state.selectionSentRunId = current.run_id;
+    if (state.selectionRetryRunId === current.run_id) state.selectionRetryRunId = null;
+  } else if (selectionDelivery) {
+    state.selectionRetryRunId = current?.run_id;
+    if (current?.status === "created" && !state.experimentActionInFlight) {
+      setExperimentMessage(`Selection: ${deliveryMessage(selectionDelivery)}. Start waits for delivery.`,
+        { error: ["unconfirmed", "cancelled"].includes(selectionDelivery.status) });
+    }
+  }
+  const endDelivery = state.deliveries.stop.filter(item => item.run_id === current?.run_id).at(-1);
+  if (current?.status === "stopping" && endDelivery && !state.experimentActionInFlight) {
+    setExperimentMessage(`End: ${deliveryMessage(endDelivery)}. Waiting for participant stop confirmation.`,
+      { error: ["unconfirmed", "cancelled"].includes(endDelivery.status) });
+  }
   if (controller.available === true) state.lastControllerStatus = controller;
   state.processSource = payload.process_source || null;
   state.processSourceReceivedAt = Date.now();
@@ -1872,55 +1995,63 @@ function renderSystemStatus(payload) {
     state.seedActionMessage = "";
     state.seedActionError = false;
   }
+  const seedDelivery = state.deliveries.ordinary.find(item => item.key === `seed:${current?.run_id}:${state.pendingSeedEventId}`);
+  if (seedDelivery && ["unconfirmed", "cancelled"].includes(seedDelivery.status)) {
+    state.seedActionMessage = `Add Seed: ${deliveryMessage(seedDelivery)}. Check Controller before retrying.`;
+    state.seedActionError = true;
+    if (seedDelivery.status === "cancelled") state.pendingSeedEventId = null;
+  }
 
-  systemRefreshStatus.textContent = "online";
-  systemRefreshStatus.className = "status running";
-  gsensorLiveStatus.textContent = gsensorStatus.status || "waiting for this run";
-  gsensorLiveStatus.className = gsensorStatus.status === "error"
+  setIfChanged(systemRefreshStatus, "textContent", "online");
+  setIfChanged(systemRefreshStatus, "className", "status running");
+  setIfChanged(gsensorLiveStatus, "textContent", gsensorStatus.status || "waiting for this run");
+  setIfChanged(gsensorLiveStatus, "className", gsensorStatus.status === "error"
     ? "status error"
-    : (gsensorStatus.status ? "status running" : "status idle");
-  gsensorLiveFrame.textContent = gsensorStatus.frame_seq ?? "—";
-  gsensorLiveImage.textContent = gsensorStatus.image_name || "—";
-  gsensorMessageCount.textContent = String(gsensor.message_count || 0);
-  gsensorReceivedAt.textContent = formatExperimentTime(gsensorMatchesRun ? gsensor.received_at : null);
-  gsensorLiveError.textContent = gsensorStatus.error || gsensor.consumer_error || "";
-  gsensorLiveError.hidden = !gsensorLiveError.textContent;
+    : (gsensorStatus.status ? "status running" : "status idle"));
+  setIfChanged(gsensorLiveFrame, "textContent", gsensorStatus.frame_seq ?? "—");
+  setIfChanged(gsensorLiveImage, "textContent", gsensorStatus.image_name || "—");
+  setIfChanged(gsensorMessageCount, "textContent", String(gsensor.message_count || 0));
+  setIfChanged(gsensorReceivedAt, "textContent", formatExperimentTime(gsensorMatchesRun ? gsensor.received_at : null));
+  setIfChanged(gsensorLiveError, "textContent", gsensorStatus.error || gsensor.consumer_error || "");
+  setIfChanged(gsensorLiveError, "hidden", !gsensorLiveError.textContent);
 
   const recoveryFailed = controller.recovery?.status === "error";
   const processWaiting = controllerWaitingForProcess(controller);
   const growthWaiting = controllerWaitingForGrowth(controller);
   const inputWaiting = processWaiting || growthWaiting;
-  controllerLiveStatus.textContent = recoveryFailed ? "error"
-    : processWaiting ? "Waiting for process data"
-      : growthWaiting ? "Waiting for G data" : controller.status || "unavailable";
-  controllerLiveStatus.className = controller.available
+  setIfChanged(controllerLiveStatus, "textContent", recoveryFailed ? "error"
+    : controller.stale ? "status stale" : processWaiting ? "Waiting for process data"
+      : growthWaiting ? "Waiting for G data" : controller.status || "unavailable");
+  setIfChanged(controllerLiveStatus, "className", controller.available
     ? (recoveryFailed || controller.status === "error" ? "status error"
       : controller.status === "running" && !inputWaiting ? "status running" : "status idle")
-    : "status error";
-  controllerRunId.textContent = controller.current_run_id || "—";
-  controllerLastFrame.textContent = controller.last_frame_seq ?? "—";
-  controllerValidCount.textContent = String(controller.sample_counts?.valid || 0);
-  controllerInvalidCount.textContent = String(controller.sample_counts?.invalid || 0);
-  controllerSeedCount.textContent = String(controller.seed_events?.count || 0);
-  controllerLastSeedAt.textContent = formatExperimentTime(controller.seed_events?.last?.added_at);
+    : "status error");
+  setIfChanged(controllerRunId, "textContent", controller.current_run_id || "—");
+  const observedAt = document.querySelector("#controller-observed-at");
+  if (observedAt) setIfChanged(observedAt, "textContent", formatExperimentTime(controller.observed_at));
+  setIfChanged(controllerLastFrame, "textContent", controller.last_frame_seq ?? "—");
+  setIfChanged(controllerValidCount, "textContent", String(controller.sample_counts?.valid || 0));
+  setIfChanged(controllerInvalidCount, "textContent", String(controller.sample_counts?.invalid || 0));
+  setIfChanged(controllerSeedCount, "textContent", String(controller.seed_events?.count || 0));
+  setIfChanged(controllerLastSeedAt, "textContent", formatExperimentTime(controller.seed_events?.last?.added_at));
   const adaptation = controller.adaptation || {};
-  controllerAdaptationStatus.textContent = adaptation.enabled ? "enabled" : "disabled";
-  controllerAdaptationMode.textContent = adaptation.mode || "E_A";
+  setIfChanged(controllerAdaptationStatus, "textContent", adaptation.enabled ? "enabled" : "disabled");
+  setIfChanged(controllerAdaptationMode, "textContent", adaptation.mode || "E_A");
   const fitting = adaptation.fitting;
-  adaptationActionMessage.textContent = fitting
+  setIfChanged(adaptationActionMessage, "textContent", fitting
     ? `Last fitting status: ${fitting.last_status}; mode ${fitting.last_mode || "—"}; tick ${fitting.last_tick ?? "—"}. Samples ${fitting.sample_count}/${fitting.minimum_samples}; completed fits ${fitting.fit_count}; failures ${fitting.failure_count}.${fitting.pause_reason ? " " + fitting.pause_reason : ""}`
-    : "Fitting diagnostics unavailable.";
-  adaptationActionMessage.classList.toggle("error", fitting?.last_status === "fit_failed");
+    : "Fitting diagnostics unavailable.");
+  toggleClass(adaptationActionMessage, "error", fitting?.last_status === "fit_failed");
   const previousConnectionError = !controller.error && !recoveryFailed
     && controller.recovery?.status !== "persistence_error"
     && typeof controller.last_error === "string"
     && controller.last_error.startsWith("RabbitMQ consumer error:")
     && controller.consumer?.status === "consuming"
     && controller.consumer?.thread_alive === true;
-  controllerLiveError.textContent = inputWaiting ? "" : previousConnectionError
+  setIfChanged(controllerLiveError, "textContent", inputWaiting ? "" : previousConnectionError
     ? `Previous connection error; connection currently reported active. ${controller.last_error}`
-    : controllerFailureMessage(controller);
-  controllerLiveError.hidden = !controllerLiveError.textContent;
+    : controllerFailureMessage(controller));
+  setIfChanged(controllerLiveError, "hidden", !controllerLiveError.textContent);
 
   const lastSeedEventId = controller.seed_events?.last?.event_id || null;
   const lastControllerEventId = controller.last_message?.payload?.event_id || null;
@@ -1954,8 +2085,6 @@ function renderSystemStatus(payload) {
 
 function renderRuntimeControls() {
   const current = currentExperiment();
-  const controller = state.controllerStatus || {};
-  const adaptation = controller.adaptation || {};
   const activeExperiment = current && [
     "starting",
     "waiting_for_initial_image",
@@ -1963,16 +2092,34 @@ function renderRuntimeControls() {
     "measuring",
   ].includes(current.status);
   const controllerReady = controllerRunningForRun(current?.run_id);
-  const runtimeActionInFlight = mutationInFlight()
+  const runtimeActionInFlight = state.experimentActionInFlight || state.seedActionInFlight
     || Boolean(state.pendingSeedEventId);
-  addSeedButton.disabled = runtimeActionInFlight || !activeExperiment || !controllerReady;
-  addSeedButton.textContent = state.seedActionInFlight ? "Recording..." : "Add Seed";
-  seedActionMessage.textContent = state.seedActionMessage;
-  seedActionMessage.classList.toggle("error", state.seedActionError);
+  setIfChanged(addSeedButton, "disabled", runtimeActionInFlight || !activeExperiment || !controllerReady);
+  setIfChanged(addSeedButton, "textContent", state.seedActionInFlight ? "Recording..." : "Add Seed");
+  setIfChanged(seedActionMessage, "textContent", state.seedActionMessage);
+  toggleClass(seedActionMessage, "error", state.seedActionError);
   renderRunConfiguration();
 }
 
-async function loadSystemStatus({ forceOverlay = false } = {}) {
+let systemStatusRead = null;
+
+function loadSystemStatus({ forceOverlay = false } = {}) {
+  if (systemStatusRead) {
+    systemStatusRead.forceOverlay ||= forceOverlay;
+    if (systemStatusRead.actionId === state.experimentActionId) return systemStatusRead.promise;
+    // A lifecycle action superseded this read. Wait for it to settle before
+    // querying the new context; never overlap status requests.
+    return systemStatusRead.promise.catch(() => null).then(() => loadSystemStatus({ forceOverlay }));
+  }
+  const read = { actionId: state.experimentActionId, forceOverlay };
+  read.promise = requestSystemStatus(read).finally(() => {
+    if (systemStatusRead === read) systemStatusRead = null;
+  });
+  systemStatusRead = read;
+  return read.promise;
+}
+
+async function requestSystemStatus(read) {
   const requestId = ++state.experimentRequestId;
   state.systemStatusInFlight += 1;
   let payload;
@@ -1995,6 +2142,13 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
     throw new Error("Experiment identity is inconsistent. Refresh before operating.");
   }
   if (state.currentRunId !== (experiments.current_run_id || null)) {
+    if (!state.experimentActionInFlight) {
+      state.experimentActionId += 1;
+      state.runtimeInFlight = false;
+      state.parameterActionInFlight = false;
+      state.runConfigurationInFlight = false;
+      state.seedActionInFlight = false;
+    }
     state.operationRequestId += 1;
     state.parameterRequestId += 1;
     state.configurationRequestId += 1;
@@ -2022,6 +2176,7 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
   renderExperiments();
   updateParameterDraftState();
   renderSystemStatus(payload);
+  reconcileRuntimeRequest(payload.runtime_request).catch(error => console.error("Runtime request rendering failed", error));
   if (state.parameterViewNeedsRefresh && !runtimeRunActive()) {
     try {
       await loadParams();
@@ -2030,7 +2185,7 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
     }
     renderMutationState();
   }
-  if (forceOverlay) {
+  if (read.forceOverlay) {
     const status = payload.gsensor?.last_status || {};
     const frameSeq = Number(status.frame_seq || 0);
     if (payload.current_experiment?.run_id && frameSeq > 0
@@ -2045,27 +2200,32 @@ async function loadSystemStatus({ forceOverlay = false } = {}) {
 }
 
 async function runExperimentAction(actionName, action, successMessage) {
-  if (!state.systemStatusFresh || mutationInFlight()) return null;
+  if (actionName === "end") {
+    if (endExperimentButton.disabled) return null;
+  } else if (!state.systemStatusFresh || state.experimentActionInFlight
+      || state.parameterActionInFlight || state.runConfigurationInFlight) return null;
   const previousRunId = state.currentRunId;
-  invalidatePendingReads();
-  state.experimentActionInFlight = true;
-  state.experimentActionName = actionName;
-  state.systemStatusFresh = false;
-  systemRefreshStatus.textContent = "refreshing";
-  systemRefreshStatus.className = "status idle";
-  setExperimentMessage("");
-  renderMutationState();
+  const actionId = beginExperimentAction(actionName);
+  setIfChanged(systemRefreshStatus, "textContent", "refreshing");
+  setIfChanged(systemRefreshStatus, "className", "status idle");
   let result = null;
   try {
+    setExperimentMessage("");
+    renderMutationState();
     result = await action();
+    if (actionId !== state.experimentActionId) return null;
     if (["create", "select"].includes(actionName)) {
-      state.selectionSentRunId = result.run_id;
-      if (state.selectionRetryRunId === result.run_id) state.selectionRetryRunId = null;
+      if (!result.delivery || result.delivery.status === "sent") {
+        state.selectionSentRunId = result.run_id;
+        if (state.selectionRetryRunId === result.run_id) state.selectionRetryRunId = null;
+      } else state.selectionRetryRunId = result.run_id;
     }
     await loadSystemStatus();
+    if (actionId !== state.experimentActionId) return null;
     setExperimentMessage(successMessage(result));
     return result;
   } catch (error) {
+    if (actionId !== state.experimentActionId) return null;
     if (result) {
       setExperimentMessage(`${successMessage(result)} Status refresh failed: ${error.message} Confirm the current status before retrying.`, { error: true });
       return result;
@@ -2073,9 +2233,11 @@ async function runExperimentAction(actionName, action, successMessage) {
     try {
       await loadSystemStatus();
     } catch (reloadError) {
+      if (actionId !== state.experimentActionId) return null;
       setExperimentMessage(`${error.message} Reload failed: ${reloadError.message}`, { error: true });
       return null;
     }
+    if (actionId !== state.experimentActionId) return null;
     const current = currentExperiment();
     if (current?.status === "created" && (
       (actionName === "create" && current.run_id !== previousRunId)
@@ -2088,9 +2250,11 @@ async function runExperimentAction(actionName, action, successMessage) {
     }
     return null;
   } finally {
-    state.experimentActionInFlight = false;
-    state.experimentActionName = null;
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.experimentActionInFlight = false;
+      state.experimentActionName = null;
+      renderMutationState();
+    }
   }
 }
 
@@ -2107,7 +2271,7 @@ async function createExperiment() {
     (experiment) => `Created ${displayNameForExperiment(experiment)}. Review the run configuration and parameters, point the camera software to the path shown above, then start the experiment.`,
   );
   if (result) {
-    newExperimentLabel.value = "";
+    setIfChanged(newExperimentLabel, "value", "");
     try {
       await loadOperationState();
     } catch (error) {
@@ -2153,7 +2317,7 @@ async function finishCurrentExperiment() {
     },
     (experiment) => recoveryEnd ? recoveryEndMessage(current) : experiment.status === "completed"
       ? `Ended ${displayNameForExperiment(experiment)}.`
-      : `End sent for ${displayNameForExperiment(experiment)}. Waiting for Gsensor to save the final result and confirm completion.`,
+      : `End: ${deliveryMessage(experiment.delivery)} for ${displayNameForExperiment(experiment)}. Waiting for Gsensor to save the final result and confirm completion.`,
   );
   const refreshed = currentExperiment();
   if (!recoveryEnd && result && refreshed?.run_id === current.run_id && refreshed?.status === "completed"
@@ -2187,38 +2351,41 @@ async function addSeed() {
     return;
   }
 
+  const actionId = state.experimentActionId;
+  const context = experimentContextKey();
   state.seedActionInFlight = true;
-  invalidatePendingReads();
   state.seedActionRunId = current.run_id;
   state.seedActionMessage = "Recording seed addition...";
   state.seedActionError = false;
-  renderMutationState();
   let sent = false;
   try {
+    renderMutationState();
     const result = await fetchJson("/api/operation/controller/add-seed", {
       method: "POST",
       body: JSON.stringify({ expected_run_id: current.run_id }),
     });
     sent = true;
-    if (state.currentRunId !== current.run_id) return;
+    if (context !== experimentContextKey()) return;
     state.pendingSeedEventId = result.event.event_id;
-    state.seedActionMessage = "Add Seed sent. Waiting for Controller confirmation...";
+    state.seedActionMessage = `Add Seed: ${deliveryMessage(result.delivery)}. Waiting for Controller confirmation...`;
   } catch (error) {
-    if (state.currentRunId === current.run_id) {
+    if (context === experimentContextKey()) {
       state.pendingSeedEventId = null;
       state.seedActionMessage = `${error.message} Check Controller status before retrying Add Seed.`;
       state.seedActionError = true;
     }
   } finally {
-    state.seedActionInFlight = false;
-    renderMutationState();
-    try {
-      await loadSystemStatus();
-    } catch (error) {
-      if (state.currentRunId === current.run_id) {
-        state.seedActionMessage = `${sent ? "Add Seed was sent; confirmation is still pending." : state.seedActionMessage} Status refresh failed: ${error.message} Do not send Add Seed again until confirmed.`;
-        state.seedActionError = true;
-        renderRuntimeControls();
+    if (actionId === state.experimentActionId) {
+      state.seedActionInFlight = false;
+      renderMutationState();
+      try {
+        await loadSystemStatus();
+      } catch (error) {
+        if (context === experimentContextKey()) {
+          state.seedActionMessage = `${sent ? "Add Seed was sent; confirmation is still pending." : state.seedActionMessage} Status refresh failed: ${error.message} Do not send Add Seed again until confirmed.`;
+          state.seedActionError = true;
+          renderRuntimeControls();
+        }
       }
     }
   }
@@ -2230,7 +2397,7 @@ async function sendGsensorActivation(command) {
   if (
     !current
     || !state.systemStatusFresh
-    || mutationInFlight()
+    || state.experimentActionInFlight || state.gsensorActivationInFlight
     || activation?.run_id !== current.run_id
     || command.run_id !== current.run_id
     || !activeGsensorExperiment(current)
@@ -2242,16 +2409,14 @@ async function sendGsensorActivation(command) {
 
   const experimentStartedAt = activation.experiment_started_at;
   const issuedRevision = activation.revision;
-  invalidatePendingReads();
   const requestId = ++state.gsensorActivationRequestId;
   state.gsensorActivationInFlight = true;
   state.gsensorActivationCommand = { ...command, delivery_error: null };
   state.gsensorActivationError = "";
   state.gsensorActivationErrorSource = null;
-  renderMutationState();
-
   let response = null;
   try {
+    renderMutationState();
     response = await fetchJson("/api/operation/gsensor/activation", {
       method: "POST",
       body: JSON.stringify(command),
@@ -2282,6 +2447,10 @@ async function sendGsensorActivation(command) {
       };
     }
   } finally {
+    if (requestId === state.gsensorActivationRequestId) {
+      state.gsensorActivationInFlight = false;
+      renderMutationState();
+    }
     if (requestId === state.gsensorActivationRequestId
         && state.currentRunId === command.run_id) {
       const requestError = state.gsensorActivationErrorSource === "request"
@@ -2290,12 +2459,13 @@ async function sendGsensorActivation(command) {
       try {
         await loadSystemStatus();
       } catch (error) {
-        state.gsensorActivationError = `${requestError ? requestError + " " : ""}Status refresh failed: ${error.message}`;
-        state.gsensorActivationErrorSource = requestError ? "request" : "status";
+        if (requestId === state.gsensorActivationRequestId && state.currentRunId === command.run_id) {
+          state.gsensorActivationError = `${requestError ? requestError + " " : ""}Status refresh failed: ${error.message}`;
+          state.gsensorActivationErrorSource = requestError ? "request" : "status";
+        }
       }
     }
     if (requestId === state.gsensorActivationRequestId) {
-      state.gsensorActivationInFlight = false;
       renderMutationState();
     }
   }
@@ -2332,9 +2502,7 @@ async function retryGsensorActivation() {
 
 async function submitRuntimeUpdate(changes, retryCommand = null) {
   if (retryCommand?.experiment_started_at) return submitParameterUpdate(retryCommand);
-  if (!runtimeReady() || mutationInFlight() || (runtimeUnconfirmed() && !retryCommand)
-      || (!retryCommand && (state.controllerStatus?.runtime_controls?.pending
-          || state.controllerStatus?.run_parameters?.pending))) {
+  if (!runtimeReady() || runtimeUpdateBlocked(Boolean(retryCommand))) {
     renderRunConfiguration();
     return;
   }
@@ -2344,40 +2512,47 @@ async function submitRuntimeUpdate(changes, retryCommand = null) {
     changes, requested_at: new Date().toISOString(),
   };
   if (command.run_id !== state.currentRunId) return;
+  const context = experimentContextKey();
+  const actionId = state.experimentActionId;
   const request = retryCommand ? state.runtimeRequest : {
     command, status: "pending", created_at: Date.now() / 1000, result: null,
     before: { ...state.controllerStatus.runtime_controls.configuration },
   };
-  rememberRuntimeRequest(request);
-  state.runtimeError = "";
   state.runtimeInFlight = true;
-  invalidatePendingReads();
-  renderMutationState();
+  let deliveryAttempted = false;
   try {
+    rememberRuntimeRequest(request);
+    state.runtimeError = "";
+    renderMutationState();
+    deliveryAttempted = true;
     const response = await fetchJson("/api/operation/controller/runtime", {
       method: "POST", body: JSON.stringify(command),
     });
-    if (state.currentRunId === command.run_id) rememberRuntimeRequest(response.runtime_request);
+    if (context === experimentContextKey()) rememberRuntimeRequest(response.runtime_request);
   } catch (error) {
-    if (state.currentRunId === command.run_id) {
+    if (context === experimentContextKey()) {
       state.runtimeError = error.message;
-      if ([400, 403, 404, 409, 422].includes(error.status)) {
+      if (!deliveryAttempted || [400, 403, 404, 409, 422].includes(error.status)) {
         rememberRuntimeRequest({ ...request, status: "rejected", result: { reason: error.message } });
       } else {
         rememberRuntimeRequest({ ...request, transport_error: "HTTP delivery is unconfirmed." });
       }
     }
   } finally {
-    state.runtimeInFlight = false;
-    try { await loadSystemStatus(); } catch (error) { state.runtimeError = error.message; }
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.runtimeInFlight = false;
+      renderMutationState();
+      try { await loadSystemStatus(); } catch (error) {
+        if (context === experimentContextKey()
+            && state.runtimeRequest?.command?.event_id === command.event_id) state.runtimeError = error.message;
+      }
+      if (context === experimentContextKey()) renderMutationState();
+    }
   }
 }
 
 async function submitParameterUpdate(retryCommand = null) {
-  if (!onlineParametersReady() || mutationInFlight() || (runtimeUnconfirmed() && !retryCommand)
-      || (!retryCommand && (state.controllerStatus?.runtime_controls?.pending
-          || state.controllerStatus?.run_parameters?.pending))) return null;
+  if (!onlineParametersReady() || runtimeUpdateBlocked(Boolean(retryCommand))) return null;
   const command = retryCommand || {
     run_id: state.currentRunId, event_id: crypto.randomUUID(),
     expected_revision: state.parameterEditRevision ?? state.controllerStatus.runtime_controls.revision,
@@ -2385,32 +2560,43 @@ async function submitParameterUpdate(retryCommand = null) {
     changes: collectParameterChanges(), requested_at: new Date().toISOString(),
   };
   if (command.run_id !== state.currentRunId || !Object.keys(command.changes).length) return null;
+  const context = experimentContextKey();
+  const actionId = state.experimentActionId;
   const request = retryCommand ? state.runtimeRequest : {
     command, status: "pending", created_at: Date.now() / 1000, result: null,
   };
-  rememberRuntimeRequest(request);
   state.parameterActionInFlight = true;
-  state.parameterError = null;
-  invalidatePendingReads();
-  renderMutationState();
+  state.parameterRequestId += 1;
+  let deliveryAttempted = false;
   try {
+    rememberRuntimeRequest(request);
+    state.parameterError = null;
+    renderMutationState();
+    deliveryAttempted = true;
     const response = await fetchJson("/api/params", {method: "POST", body: JSON.stringify({
       ...command, run_id: undefined, expected_run_id: command.run_id,
     })});
-    if (state.currentRunId === command.run_id) rememberRuntimeRequest(response.runtime_request);
+    if (context === experimentContextKey()) rememberRuntimeRequest(response.runtime_request);
     return response;
   } catch (error) {
-    if (state.currentRunId === command.run_id) {
+    if (context === experimentContextKey()) {
       state.parameterError = error.message;
-      if ([400, 403, 404, 409, 422].includes(error.status)) {
+      if (!deliveryAttempted || [400, 403, 404, 409, 422].includes(error.status)) {
         rememberRuntimeRequest({...request, status: "rejected", result: {reason: error.message}});
       } else rememberRuntimeRequest({...request, transport_error: "HTTP delivery is unconfirmed; retry the same update."});
     }
     return null;
   } finally {
-    state.parameterActionInFlight = false;
-    try { await loadSystemStatus(); } catch (error) { state.parameterRefreshError = error.message; }
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.parameterActionInFlight = false;
+      state.parameterRequestId += 1;
+      renderMutationState();
+      try { await loadSystemStatus(); } catch (error) {
+        if (context === experimentContextKey()
+            && state.runtimeRequest?.command?.event_id === command.event_id) state.parameterRefreshError = error.message;
+      }
+      if (context === experimentContextKey()) renderMutationState();
+    }
   }
 }
 
@@ -2450,19 +2636,28 @@ async function commitSetpoint(key, input) {
       shared: { ...state.params.shared }, gsensor: { ...state.params.gsensor },
       controller: { ...state.params.controller, [key]: value },
     };
+    const context = experimentContextKey();
+    const actionId = state.experimentActionId;
     state.parameterActionInFlight = true;
     state.runConfigurationError = null;
-    invalidatePendingReads();
-    renderMutationState();
+    state.parameterRequestId += 1;
+    state.operationRequestId += 1;
     try {
-      state.params = await fetchJson("/api/params", { method: "POST", body: JSON.stringify(draft) });
+      renderMutationState();
+      const params = await fetchJson("/api/params", { method: "POST", body: JSON.stringify(draft) });
+      if (context !== experimentContextKey()) return;
+      state.params = params;
       renderParameterForms();
       await loadOperationState();
     } catch (error) {
-      state.runConfigurationError = error.message;
+      if (context === experimentContextKey()) state.runConfigurationError = error.message;
     } finally {
-      state.parameterActionInFlight = false;
-      renderMutationState();
+      if (actionId === state.experimentActionId) {
+        state.parameterActionInFlight = false;
+        state.parameterRequestId += 1;
+        state.operationRequestId += 1;
+        renderMutationState();
+      }
     }
   }
 }
@@ -2486,46 +2681,62 @@ async function copyCameraPath() {
   setExperimentMessage("Camera save path copied.");
 }
 
-async function loadOperationState({ updateRunConfiguration = true } = {}) {
+async function loadOperationState({ updateRunConfiguration = true, refreshChangedParameters = true } = {}) {
   const requestId = ++state.operationRequestId;
-  const payload = await fetchJson("/api/operation/state");
+  const configurationRequestId = state.configurationRequestId;
+  const configurationSaving = state.runConfigurationInFlight;
+  const suffix = state.operationRevision ? `?revision=${encodeURIComponent(state.operationRevision)}` : "";
+  const payload = await fetchJson(`/api/operation/state${suffix}`);
   if (requestId !== state.operationRequestId) return;
   state.runConfigurationRefreshError = null;
   state.parameterRefreshError = null;
-  state.target = payload.target;
-  if (updateRunConfiguration && !state.runConfigurationInFlight) {
-    applyRunConfigurationPayload(payload.run_configuration);
+  if (!payload.unchanged) {
+    state.target = payload.target;
+    const applyConfiguration = updateRunConfiguration && !configurationSaving && !state.runConfigurationInFlight
+      && configurationRequestId === state.configurationRequestId;
+    if (applyConfiguration) applyRunConfigurationPayload(payload.run_configuration);
+    state.operationRevision = applyConfiguration ? payload.revision || null : null;
+    state.parameterDocumentRevision = payload.parameters_revision || null;
+    state.startupParameterPreview = payload.preview;
+    renderDerivedParameterPreview();
+    renderParameterStatus(state.parameterUnsavedCount);
   }
-  state.startupParameterPreview = payload.preview;
-  renderDerivedParameterPreview();
-  renderParameterStatus(state.parameterUnsavedCount);
+  if (refreshChangedParameters && state.parameterDocumentRevision
+      && state.params?.document_revision !== state.parameterDocumentRevision
+      && state.parameterUnsavedCount === 0 && !state.parameterActionInFlight
+      && !state.runtimeInFlight && !state.experimentActionInFlight && !state.runConfigurationInFlight) {
+    await loadParams();
+  }
 }
 
 function renderDerivedParameterPreview() {
+  if (state.uiMode !== "development") return;
   const current = currentExperiment();
   const controller = state.controllerStatus;
   const confirmed = state.systemStatusFresh && controller?.available
     && controllerMatchesRecoveryIdentity(current) && runtimeRunActive();
-  derivedPreview.textContent = JSON.stringify({
+  setIfChanged(derivedPreview, "textContent", JSON.stringify({
     startup_preview: state.startupParameterPreview,
     current_runtime_derived: confirmed ? controller.run_parameters?.derived_values ?? null : null,
-  }, null, 2);
+  }, null, 2));
 }
 
 async function pollStatus({ refreshParameters = false } = {}) {
-  if (state.bootstrapInFlight || state.pollInFlight || mutationInFlight()
+  if (state.bootstrapInFlight || state.pollInFlight
     || state.systemStatusInFlight || document.hidden) return;
   state.pollInFlight = true;
   try {
     const reads = [];
-    if (refreshParameters && state.parameterUnsavedCount === 0) {
+    if (refreshParameters && state.parameterUnsavedCount === 0
+        && !state.parameterActionInFlight && !state.runConfigurationInFlight
+        && !state.experimentActionInFlight && !state.runtimeInFlight) {
       reads.push(loadParams().catch(error => {
         state.parameterError = error.message;
         updateParameterDraftState();
         throw error;
       }));
     }
-    reads.push(loadOperationState(), loadSystemStatus());
+    reads.push(loadOperationState({ refreshChangedParameters: !refreshParameters }), loadSystemStatus());
     // Wait for both endpoints even when one fails. Clearing the guard on an
     // early rejection would let the next timer overlap the slower request.
     const outcomes = await Promise.allSettled(reads);
@@ -2538,71 +2749,94 @@ async function pollStatus({ refreshParameters = false } = {}) {
 }
 
 function reportPollingError(error) {
-  commandResult.textContent = error.message;
-  commandStatus.textContent = "error";
-  commandStatus.className = "status error";
+  setIfChanged(commandResult, "textContent", error.message);
+  setIfChanged(commandStatus, "textContent", "error");
+  setIfChanged(commandStatus, "className", "status error");
 }
 
 async function saveParams() {
-  if (saveParamsButton.disabled || !state.systemStatusFresh || mutationInFlight()) return null;
+  if (saveParamsButton.disabled || !state.systemStatusFresh
+      || state.experimentActionInFlight || state.parameterActionInFlight) return null;
   if (runtimeRunActive()) return submitParameterUpdate();
   const draft = parameterPayloadFromDraft();
-  invalidatePendingReads();
+  const actionId = state.experimentActionId;
+  const context = experimentContextKey();
+  state.parameterRequestId += 1;
+  state.operationRequestId += 1;
   state.parameterActionInFlight = true;
   state.parameterError = null;
   state.parameterRefreshError = null;
-  renderMutationState();
   let saved = false;
   try {
-    state.params = await fetchJson("/api/params", {
+    renderMutationState();
+    const params = await fetchJson("/api/params", {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    if (context !== experimentContextKey()) return null;
+    state.params = params;
     saved = true;
     renderParameterForms();
     await loadOperationState();
     return state.params;
   } catch (error) {
+    if (context !== experimentContextKey()) return null;
     if (saved) state.parameterRefreshError = `Parameters saved, but preview refresh failed: ${error.message}`;
     else state.parameterError = error.message;
     renderMutationState();
     return null;
   } finally {
-    state.parameterActionInFlight = false;
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.parameterActionInFlight = false;
+      state.parameterRequestId += 1;
+      state.operationRequestId += 1;
+      renderMutationState();
+    }
   }
 }
 
 async function resetParamsToDefaults() {
-  if (resetParamsButton.disabled || !state.systemStatusFresh || mutationInFlight()) return null;
+  if (resetParamsButton.disabled || !state.systemStatusFresh
+      || state.experimentActionInFlight || state.parameterActionInFlight) return null;
   const expectedRunId = state.currentRunId;
-  invalidatePendingReads();
+  const actionId = state.experimentActionId;
+  const context = experimentContextKey();
+  state.parameterRequestId += 1;
+  state.operationRequestId += 1;
   state.parameterActionInFlight = true;
   state.parameterError = null;
   state.parameterRefreshError = null;
-  renderMutationState();
   let saved = false;
   try {
-    state.params = await fetchJson("/api/params/reset", {
+    renderMutationState();
+    const params = await fetchJson("/api/params/reset", {
       method: "POST",
       body: JSON.stringify({ expected_run_id: expectedRunId }),
     });
+    if (context !== experimentContextKey()) return null;
+    state.params = params;
     saved = true;
     renderParameterForms();
     await loadOperationState();
   } catch (error) {
+    if (context !== experimentContextKey()) return null;
     if (saved) state.parameterRefreshError = `Defaults restored, but preview refresh failed: ${error.message}`;
     else state.parameterError = error.message;
     renderMutationState();
     return null;
   } finally {
-    state.parameterActionInFlight = false;
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.parameterActionInFlight = false;
+      state.parameterRequestId += 1;
+      state.operationRequestId += 1;
+      renderMutationState();
+    }
   }
 }
 
 async function startExperimentCommand() {
-  if (!state.systemStatusFresh || mutationInFlight() || startExperimentButton.disabled) return null;
+  if (!state.systemStatusFresh || state.experimentActionInFlight
+      || state.parameterActionInFlight || startExperimentButton.disabled) return null;
   if (state.runConfigurationInFlight) {
     setExperimentMessage("Wait for the run configuration to finish saving before starting.", { error: true });
     return null;
@@ -2611,62 +2845,64 @@ async function startExperimentCommand() {
     setExperimentMessage("Resolve the run-configuration save error before starting.", { error: true });
     return null;
   }
-  commandStatus.textContent = "saving parameters";
-  commandStatus.className = "status idle";
-  state.parameterActionInFlight = true;
-  state.experimentActionInFlight = true;
-  state.experimentActionName = "start";
-  state.systemStatusFresh = false;
-  systemRefreshStatus.textContent = "refreshing";
-  systemRefreshStatus.className = "status idle";
-  state.parameterError = null;
+  setIfChanged(commandStatus, "textContent", "saving parameters");
+  setIfChanged(commandStatus, "className", "status idle");
   const draft = parameterPayloadFromDraft();
-  invalidatePendingReads();
-  setExperimentMessage("");
-  renderMutationState();
+  const actionId = beginExperimentAction("start");
+  setIfChanged(systemRefreshStatus, "textContent", "refreshing");
+  setIfChanged(systemRefreshStatus, "className", "status idle");
+  state.parameterError = null;
   let accepted = null;
   try {
+    setExperimentMessage("");
+    renderMutationState();
     const payload = await fetchJson("/api/operation/experiment/start", {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    if (actionId !== state.experimentActionId) return null;
     accepted = payload;
     state.params = payload.parameters;
     renderParameterForms();
-    commandResult.textContent = JSON.stringify(payload, null, 2);
+    setIfChanged(commandResult, "textContent", JSON.stringify(payload, null, 2));
     state.startSentRunId = payload.experiment?.run_id || state.currentRunId;
-    commandStatus.textContent = "start sent";
-    commandStatus.className = "status idle";
-    setExperimentMessage(`Start sent for ${displayNameForExperiment(payload.experiment)}. Waiting for Controller confirmation.`);
+    setIfChanged(commandStatus, "textContent", `start: ${deliveryMessage(payload.delivery)}`);
+    setIfChanged(commandStatus, "className", "status idle");
+    setExperimentMessage(`Start: ${deliveryMessage(payload.delivery)} for ${displayNameForExperiment(payload.experiment)}. Waiting for Controller confirmation.`);
     await loadSystemStatus();
+    if (actionId !== state.experimentActionId) return null;
     return payload;
   } catch (error) {
+    if (actionId !== state.experimentActionId) return null;
     if (accepted) {
-      commandStatus.textContent = "start sent; unconfirmed";
-      commandStatus.className = "status error";
-      const message = `Start sent for ${displayNameForExperiment(accepted.experiment)}, but status refresh failed: ${error.message} Controller startup is unconfirmed; refresh status before retrying.`;
+      setIfChanged(commandStatus, "textContent", "start sent; unconfirmed");
+      setIfChanged(commandStatus, "className", "status error");
+      const message = `Start: ${deliveryMessage(accepted.delivery)} for ${displayNameForExperiment(accepted.experiment)}, but status refresh failed: ${error.message} Controller startup is unconfirmed; refresh status before retrying.`;
       setExperimentMessage(message, { error: true });
-      commandResult.textContent = message;
+      setIfChanged(commandResult, "textContent", message);
       return accepted;
     }
     try {
       await Promise.all([loadParams(), loadSystemStatus(), loadRunConfiguration()]);
     } catch (reloadError) {
-      commandResult.textContent = `${error.message}\nReload failed: ${reloadError.message}`;
+      if (actionId !== state.experimentActionId) return null;
+      setIfChanged(commandResult, "textContent", `${error.message}\nReload failed: ${reloadError.message}`);
     }
+    if (actionId !== state.experimentActionId) return null;
     state.parameterError = error.message;
     setExperimentMessage(error.message, { error: true });
     if (!commandResult.textContent.includes("Reload failed:")) {
-      commandResult.textContent = error.message;
+      setIfChanged(commandResult, "textContent", error.message);
     }
-    commandStatus.textContent = "error";
-    commandStatus.className = "status error";
+    setIfChanged(commandStatus, "textContent", "error");
+    setIfChanged(commandStatus, "className", "status error");
     return null;
   } finally {
-    state.parameterActionInFlight = false;
-    state.experimentActionInFlight = false;
-    state.experimentActionName = null;
-    renderMutationState();
+    if (actionId === state.experimentActionId) {
+      state.experimentActionInFlight = false;
+      state.experimentActionName = null;
+      renderMutationState();
+    }
   }
 }
 
@@ -2688,7 +2924,7 @@ parameterReviewRevisionButton?.addEventListener("click", () => {
   state.parameterError = null;
   state.parameterRefreshError = null;
   updateParameterDraftState();
-  parameterStatusText.textContent = `Edits retained. Review against revision ${state.parameterEditRevision}, then click Save Parameters.`;
+  setIfChanged(parameterStatusText, "textContent", `Edits retained. Review against revision ${state.parameterEditRevision}, then click Save Parameters.`);
 });
 
 refreshPreviewButton.addEventListener("click", async (event) => {
@@ -2697,9 +2933,9 @@ refreshPreviewButton.addEventListener("click", async (event) => {
   try {
     await loadOperationState();
   } catch (error) {
-    commandStatus.textContent = "error";
-    commandStatus.className = "status error";
-    commandResult.textContent = `Preview refresh failed: ${error.message}`;
+    setIfChanged(commandStatus, "textContent", "error");
+    setIfChanged(commandStatus, "className", "status error");
+    setIfChanged(commandResult, "textContent", `Preview refresh failed: ${error.message}`);
   }
 });
 
@@ -2746,14 +2982,14 @@ copyCameraPathButton.addEventListener("click", async () => {
 
 centralRefreshOverlay.addEventListener("click", () => {
   loadSystemStatus({ forceOverlay: true }).catch((error) => {
-    systemRefreshStatus.textContent = error.message;
-    systemRefreshStatus.className = "status error";
+    setIfChanged(systemRefreshStatus, "textContent", error.message);
+    setIfChanged(systemRefreshStatus, "className", "status error");
   });
 });
 
 centralOverlayImage.addEventListener("error", () => {
-  centralOverlayImage.hidden = true;
-  centralOverlayCaption.textContent = "Overlay is not available yet.";
+  setIfChanged(centralOverlayImage, "hidden", true);
+  setIfChanged(centralOverlayCaption, "textContent", "Overlay is not available yet.");
 });
 
 runConfigurationControls.forEach((control) => {
@@ -2785,7 +3021,7 @@ adaptiveCheckboxes.forEach((box) => {
       adaptiveCombinations[name].length === selected.length
       && adaptiveCombinations[name].every((name) => selected.includes(name)));
     if (!mode) {
-      box.checked = true;
+      setIfChanged(box, "checked", true);
       if (runtimeRunActive()) state.runtimeError = "Keep at least one parameter selected; use Adaptation to stop fitting.";
       else state.runConfigurationError = "Keep at least one parameter selected.";
       renderRunConfiguration();

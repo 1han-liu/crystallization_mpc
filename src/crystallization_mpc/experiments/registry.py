@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -56,6 +57,14 @@ class ExperimentSnapshotExistsError(ExperimentRegistryError, FileExistsError):
     """Raised when an immutable snapshot would be overwritten."""
 
 
+def _manifest_change(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class ExperimentRegistry:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve(strict=False)
@@ -65,6 +74,7 @@ class ExperimentRegistry:
         # visible. Opening and resolving every historical JSON on each status
         # poll is especially expensive on Docker Desktop bind mounts.
         self._index_lock = threading.RLock()
+        self._mutation_lock = threading.RLock()
         self._directory_cache: dict[Path, tuple[int, ...]] = {}
         self._manifest_cache: dict[
             Path, tuple[tuple[int, ...], ExperimentManifest]
@@ -157,13 +167,7 @@ class ExperimentRegistry:
         now: datetime | None = None,
     ) -> ExperimentManifest:
         manifest = self.get(run_id)
-        if manifest.status == ExperimentStatus.STARTING:
-            self._write_yaml_snapshot_once(
-                self._resolve_existing_run_dir(run_id) / PARAMS_SNAPSHOT_FILENAME,
-                params_snapshot,
-            )
-            return manifest
-        if manifest.status != ExperimentStatus.CREATED:
+        if manifest.status not in {ExperimentStatus.CREATED, ExperimentStatus.STARTING}:
             raise InvalidExperimentStateError(
                 f"Cannot start experiment {run_id} from state {manifest.status.value}."
             )
@@ -173,6 +177,17 @@ class ExperimentRegistry:
             params_snapshot,
         )
         resolved_version = _parameter_version(params_snapshot, parameter_version)
+        return self._commit_start(run_id, resolved_version, now)
+
+    @_manifest_change
+    def _commit_start(self, run_id, resolved_version, now):
+        # Snapshot encoding stays outside the lifecycle commit lock. End can
+        # finish a CREATED run during preparation; re-read before committing.
+        manifest = self.get(run_id)
+        if manifest.status == ExperimentStatus.STARTING:
+            return manifest
+        if manifest.status != ExperimentStatus.CREATED:
+            raise InvalidExperimentStateError(f"Cannot start experiment {run_id} from state {manifest.status.value}.")
         updated = manifest.updated(
             status=ExperimentStatus.STARTING,
             started_at=_utc_iso(now),
@@ -183,6 +198,7 @@ class ExperimentRegistry:
         self._write_manifest(updated)
         return updated
 
+    @_manifest_change
     def transition(
         self,
         run_id: str,
@@ -201,6 +217,7 @@ class ExperimentRegistry:
         self._write_manifest(updated)
         return updated
 
+    @_manifest_change
     def request_stop(self, run_id: str) -> ExperimentManifest:
         manifest = self.get(run_id)
         if manifest.status in TERMINAL_EXPERIMENT_STATUSES:
@@ -211,6 +228,7 @@ class ExperimentRegistry:
             )
         return self.transition(run_id, ExperimentStatus.STOPPING)
 
+    @_manifest_change
     def finish(
         self,
         run_id: str,
@@ -237,6 +255,7 @@ class ExperimentRegistry:
         self._write_manifest(updated)
         return updated
 
+    @_manifest_change
     def mark_error(
         self,
         run_id: str,

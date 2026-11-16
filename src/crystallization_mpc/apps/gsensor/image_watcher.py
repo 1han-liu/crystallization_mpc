@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+import os
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,7 +48,6 @@ class DetectedImage:
 @dataclass(frozen=True)
 class ImageScanResult:
     detections: tuple[DetectedImage, ...]
-    processed_files: frozenset[str]
     file_identities: frozenset[str]
     observations: tuple[ImageObservation, ...]
     latest_discovered: ImageObservation | None
@@ -86,52 +86,47 @@ def scan_new_images(
     if not image_directory.is_dir():
         raise FileNotFoundError(f"Experiment image directory not found: {image_directory}")
 
-    processed = set(processed_files)
+    processed = frozenset(processed_files)
     probe = image_probe or verify_image_readable
-    previous_observations = dict(observations or {})
+    previous_observations = observations or {}
     current_observations: dict[str, ImageObservation] = {}
     current_file_identities: set[str] = set()
     candidates: list[tuple[tuple[int, int, int, str], Path, ImageObservation]] = []
     stat_failures: list[str] = []
-    for path in image_directory.iterdir():
-        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        try:
-            stat = path.stat()
-        except OSError as exc:
-            stat_failures.append(f"{path.name}: {exc}")
-            continue
-        identity_key = image_identity_key(
-            path.name,
-            modified_time_ns=stat.st_mtime_ns,
-            file_size=stat.st_size,
-        )
-        current_file_identities.add(identity_key)
-        sequence_number = parse_image_sequence(path.name)
-        previous = previous_observations.get(path.name)
-        same_revision = previous is not None and previous.identity_key == identity_key
-        stable_scan_count = (
-            min(2, previous.stable_scan_count + 1) if same_revision else 1
-        )
-        observation = ImageObservation(
-            image_name=path.name,
-            identity_key=identity_key,
-            sequence_number=sequence_number,
-            modified_time_ns=stat.st_mtime_ns,
-            file_size=stat.st_size,
-            file_modified_at=_utc_iso_from_timestamp(stat.st_mtime),
-            stable_scan_count=stable_scan_count,
-            ready=bool(previous.ready) if same_revision else False,
-            ready_at=previous.ready_at if same_revision else None,
-        )
-        if path.name in processed or identity_key in processed:
-            continue
-        current_observations[path.name] = observation
-        candidates.append((_image_order_key(observation), path, observation))
+    with os.scandir(image_directory) as entries:
+        for entry in entries:
+            if os.path.splitext(entry.name)[1].lower() not in IMAGE_EXTENSIONS or not entry.is_file():
+                continue
+            try:
+                stat = entry.stat()
+            except OSError as exc:
+                stat_failures.append(f"{entry.name}: {exc}")
+                continue
+            identity_key = image_identity_key(
+                entry.name, modified_time_ns=stat.st_mtime_ns, file_size=stat.st_size,
+            )
+            current_file_identities.add(identity_key)
+            # Every signature is still checked, including same-name overwrites.
+            # Consumed revisions need no path object, sequence or timestamp.
+            if entry.name in processed or identity_key in processed:
+                continue
+            previous = previous_observations.get(entry.name)
+            if previous is not None and previous.identity_key == identity_key:
+                observation = previous if previous.stable_scan_count == 2 else replace(previous, stable_scan_count=2)
+            else:
+                observation = ImageObservation(
+                    image_name=entry.name, identity_key=identity_key,
+                    sequence_number=parse_image_sequence(entry.name),
+                    modified_time_ns=stat.st_mtime_ns, file_size=stat.st_size,
+                    file_modified_at=_utc_iso_from_timestamp(stat.st_mtime), stable_scan_count=1,
+                )
+            current_observations[entry.name] = observation
+            candidates.append((_image_order_key(observation), Path(entry.path), observation))
 
     candidates.sort(key=lambda item: item[0])
     detections: list[DetectedImage] = []
     read_failures: list[str] = []
+    order_changed = False
     for _order_key, path, observation in candidates:
         ready_observation = observation
         if not observation.ready:
@@ -155,6 +150,7 @@ def scan_new_images(
                 file_size=final_stat.st_size,
             )
             if final_identity_key != observation.identity_key:
+                order_changed = True
                 current_file_identities.discard(observation.identity_key)
                 current_file_identities.add(final_identity_key)
                 if (
@@ -197,15 +193,15 @@ def scan_new_images(
         detections.append(detection)
 
     errors = [*stat_failures, *read_failures]
-    ordered_observations = tuple(
-        sorted(current_observations.values(), key=_image_order_key)
-    )
+    ordered_observations = tuple(current_observations[item.image_name]
+                                 for _key, _path, item in candidates if item.image_name in current_observations)
+    if order_changed:
+        ordered_observations = tuple(sorted(ordered_observations, key=_image_order_key))
     pending_count = len(stat_failures) + sum(
         1 for observation in ordered_observations if not observation.ready
     )
     return ImageScanResult(
         detections=tuple(detections),
-        processed_files=frozenset(processed),
         file_identities=frozenset(current_file_identities),
         observations=ordered_observations,
         latest_discovered=(

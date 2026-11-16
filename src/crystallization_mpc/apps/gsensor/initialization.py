@@ -45,6 +45,22 @@ class GsensorInitializationManager:
     def __init__(self) -> None:
         self.sessions: dict[str, InitializationSession] = {}
         self.active_session_id: str | None = None
+        self._epoch = uuid4().hex
+        self._revision = 0
+        self._payload_cache = None
+
+    @property
+    def revision(self) -> str:
+        return f"{self._epoch}:{self._revision}"
+
+    @property
+    def status(self) -> str:
+        session = self._get_session(None, required=False)
+        return session.status if session is not None else "not_started"
+
+    def _touch(self) -> None:
+        self._revision += 1
+        self._payload_cache = None
 
     def start_folder(self, folder: str, image_choice: str = "first") -> dict[str, Any]:
         folder_path = Path(folder).expanduser().resolve(strict=False)
@@ -84,11 +100,18 @@ class GsensorInitializationManager:
             image_width=image_width,
             image_height=image_height,
         )
+        self._touch()
         self.sessions[session.session_id] = session
         self.active_session_id = session.session_id
         return self.payload(session.session_id)
 
     def payload(self, session_id: str | None = None) -> dict[str, Any]:
+        key = session_id or self.active_session_id, self._revision
+        if self._payload_cache is None or self._payload_cache[0] != key:
+            self._payload_cache = key, self._build_payload(session_id)
+        return deepcopy(self._payload_cache[1])
+
+    def _build_payload(self, session_id: str | None) -> dict[str, Any]:
         session = self._get_session(session_id, required=False)
         if session is None:
             return {
@@ -176,6 +199,7 @@ class GsensorInitializationManager:
         if points:
             self._validate_geometry(session)
         self._update_status(session)
+        self._touch()
         self.sessions = {session_id: session}
         self.active_session_id = session_id
         return self.payload(session_id)
@@ -190,6 +214,7 @@ class GsensorInitializationManager:
 
     def set_is_full(self, session_id: str, is_full: bool) -> dict[str, Any]:
         session = self._get_session(session_id)
+        self._touch()
         session.is_full = bool(is_full)
         session.corner = None
         session.candidates_3d.clear()
@@ -202,6 +227,7 @@ class GsensorInitializationManager:
 
     def submit_point(self, session_id: str, x: float, y: float) -> dict[str, Any]:
         session = self._get_session(session_id)
+        self._touch()
         if session.is_full is None:
             raise ValueError("Choose full mode before marking points.")
         self._validate_point(session, x, y)
@@ -226,6 +252,7 @@ class GsensorInitializationManager:
 
     def choose_corner(self, session_id: str, corner: str) -> dict[str, Any]:
         session = self._get_session(session_id)
+        self._touch()
         if session.status not in {"ready_for_corner", "ready_for_3d_choice", "ready_for_3d"}:
             raise ValueError("Complete 2D point marking before choosing a corner.")
         corner = corner.upper()
@@ -240,6 +267,7 @@ class GsensorInitializationManager:
 
     def select_3d_choice(self, session_id: str, choice: int) -> dict[str, Any]:
         session = self._get_session(session_id)
+        self._touch()
         if session.status not in {"ready_for_3d_choice", "ready_for_3d"}:
             raise ValueError("Choose a corner before selecting a 3D candidate.")
         for candidate in session.candidates_3d:
@@ -278,6 +306,7 @@ class GsensorInitializationManager:
 
     def undo(self, session_id: str) -> dict[str, Any]:
         session = self._get_session(session_id)
+        self._touch()
         if session.selected_3d_choice is not None or session.recovered_3d is not None:
             session.selected_3d_choice = None
             session.recovered_3d = None
@@ -297,6 +326,7 @@ class GsensorInitializationManager:
         return self.payload(session.session_id)
 
     def reset(self, session_id: str | None = None) -> dict[str, Any]:
+        self._touch()
         if session_id is None:
             # No session id means service-level cleanup rather than the UI's
             # in-session reset action.
