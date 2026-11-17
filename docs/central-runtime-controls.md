@@ -5,6 +5,39 @@
 > the development checkout; they are not available in a fresh clone without
 > those local files. Production runtime and startup tools remain tracked.
 
+## Adaptive confirmation repair (2026-11-17, not deployed)
+
+Controller HTTP observation now has its own polling thread. Status reads and
+runtime submissions use that observation independently of the filesystem,
+GSensor activation lock and archive/history snapshot work. The freshness limit
+remains 5 seconds by default; `CENTRAL_CONTROLLER_STATUS_MAX_AGE_SEC` configures
+it. A submission with expired status makes a bounded live query and revalidates
+the selected run, start identity and runtime revision before delivery. GSensor
+status observation reuses a validated run directory instead of repeatedly
+scanning the registry while holding activation state.
+
+A previously unknown runtime event rejected during preflight returns a scoped
+`not_sent` error (503 for unavailable Controller; 409 for state/revision
+conflicts). Existing unknown deliveries retain their outcome and event ID.
+Central persists before publishing as before. The UI retains unknown deliveries,
+shows the 30-second confirmation timeout even without a server journal, preserves
+the original deadline across reloads, and validates receipt identity before
+accepting an applied/rejected result. A 404 lookup alone is not a rejection.
+
+Runtime history recognizes legacy seed records by their original seed command
+and adds an explicit event type to newly saved records. Seed records stay in the
+complete audit history but are excluded from configuration summaries, annotations
+and the configuration-export barrier. Malformed configuration events report
+their event identity. Missing historical before-values remain unavailable; exact
+application timestamps still come only from Controller receipts.
+
+Validation uses disposable containers with networking disabled, read-only source
+mounts, temporary experiment roots and in-memory publishers/process adapters;
+HTTP integration runs only over loopback. Local tests are
+`test_adaptive_runtime_regressions.py`, `test_adaptive_runtime_http.py` and
+`test_adaptive_runtime_ui.cjs`. No production service was rebuilt or restarted,
+and no current experiment command was sent. Deployment remains a separate step.
+
 ## Objective and boundary
 
 Within one experiment, reuse Central's control target, adaptive parameter

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import copy
 import hashlib
 import os
@@ -28,6 +29,7 @@ from crystallization_mpc.apps.central.experiments import CentralExperimentManage
 from crystallization_mpc.apps.central.archive import ExperimentArchive
 from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.infra.file_version import file_version
+from crystallization_mpc.infra.runtime_history import RuntimeHistoryEventError
 from crystallization_mpc.apps.central.runtime_controls import RuntimeRequestStore
 from crystallization_mpc.apps.central.delivery import DeliveryLane, DeliveryBusy, DeliveryCancelled
 from crystallization_mpc.apps.central.params import (
@@ -109,6 +111,19 @@ GSENSOR_ACTIVATION_STATE_FILENAME = ".central_gsensor_activation.json"
 GSENSOR_PROCESSING_STATE_FILENAME = "gsensor_processing_state.json"
 CONTROLLER_OBSERVATION_MAX_AGE_SEC = 5.0
 logger = logging.getLogger(__name__)
+
+
+class ControllerUnavailableError(RuntimeError):
+    """No fresh Controller observation authorizes this operation."""
+
+
+class RuntimeRequestNotSent(RuntimeError):
+    """A previously unknown event failed preflight, before persistence/delivery."""
+
+    def __init__(self, event, cause):
+        super().__init__(str(cause))
+        self.event = event
+        self.cause = cause
 
 
 class ExperimentContext(BaseModel):
@@ -643,6 +658,14 @@ class CentralService:
         self._ui_context = threading.local()
         self._status_stop = threading.Event()
         self._status_thread = None
+        self.controller_observation_max_age_sec = float(os.getenv(
+            "CENTRAL_CONTROLLER_STATUS_MAX_AGE_SEC", str(CONTROLLER_OBSERVATION_MAX_AGE_SEC)
+        ))
+        if not math.isfinite(self.controller_observation_max_age_sec) or self.controller_observation_max_age_sec <= 0:
+            raise ValueError("CENTRAL_CONTROLLER_STATUS_MAX_AGE_SEC must be finite and positive.")
+        self._controller_poll_stop = threading.Event()
+        self._controller_poll_thread = None
+        self._controller_poll_lock = threading.Lock()
         self._status_generation = 0
         self._stopping_runs = set()
         self._controller_observation = {"available": False, "status": "unavailable", "active": False,
@@ -701,7 +724,8 @@ class CentralService:
                     if cursor == previous_cursor:
                         raise ValueError("History pagination did not advance.")
             except (OSError, ValueError, KeyError, TypeError) as exc:
-                self.runtime_history_error = f"History synchronization incomplete: {type(exc).__name__}"
+                detail = str(exc) if isinstance(exc, RuntimeHistoryEventError) else type(exc).__name__
+                self.runtime_history_error = f"History synchronization incomplete: {detail}"
 
     def runtime_history_page(self, run_id: str, before: int | None = None, limit: int = 50):
         self.experiments.registry.get(run_id)
@@ -710,7 +734,8 @@ class CentralService:
             page = self.runtime_request_store.history.page(run_id, before=before, limit=limit)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             page = {"entries": [], "next_cursor": None}
-            self.runtime_history_error = f"History unavailable: {type(exc).__name__}"
+            detail = str(exc) if isinstance(exc, RuntimeHistoryEventError) else type(exc).__name__
+            self.runtime_history_error = f"History unavailable: {detail}"
         return {**page,
                 "error": self.runtime_history_error, "grafana_enabled": self.runtime_export_enabled,
                 "grafana_error": self.runtime_export_error}
@@ -832,17 +857,37 @@ class CentralService:
             # AMQP bursts must not increase the remote polling rate.
             self._status_stop.wait(1)
 
+    def _controller_monitor(self):
+        # This lane never enters the experiment registry, activation, history or
+        # archive locks. Slow host mounts must not age an online observation.
+        while not self._controller_poll_stop.is_set():
+            try:
+                self._refresh_controller_observation()
+            except Exception:
+                logger.exception("Controller observation failed; waiting for the next poll.")
+            self._controller_poll_stop.wait(1)
+
+    def _refresh_controller_observation(self):
+        # Serialize on-demand and background reads, bounding the wait for either.
+        # No status/snapshot lock is held during the HTTP request.
+        if not self._controller_poll_lock.acquire(timeout=1.0):
+            return self.controller_status()
+        try:
+            controller = self._fetch_controller_status()
+            controller["observed_at"] = utc_ts()
+            observed = time.monotonic()
+            with self._lock:
+                self._controller_observation = controller
+                self._controller_observed_monotonic = observed
+        finally:
+            self._controller_poll_lock.release()
+        return self.controller_status()
+
     def refresh_status(self):
         with self._lock:
             generation = self._status_generation
-        controller = self._fetch_controller_status()
-        controller["observed_at"] = utc_ts()
-        observed_monotonic = time.monotonic()
-        with self._lock:
-            self._controller_observation = controller
-            self._controller_observed_monotonic = observed_monotonic
+        controller = self.controller_status()
         snapshot = self._collect_system_status(controller)
-        snapshot["_controller_observed_monotonic"] = observed_monotonic
         with self._lock:
             if generation != self._status_generation:
                 # Messages/actions can advance local lifecycle during HTTP or
@@ -862,12 +907,9 @@ class CentralService:
     def system_status(self):
         with self._lock:
             payload = copy.deepcopy(self._status_snapshot)
-        observed = payload.pop("_controller_observed_monotonic", None)
-        controller = payload["controller"]
-        controller["age_s"] = None if observed is None else max(0, time.monotonic() - observed)
-        controller["stale"] = observed is None or controller["age_s"] > CONTROLLER_OBSERVATION_MAX_AGE_SEC
-        if controller["stale"]:
-            controller.update(available=False, error="Controller observation is stale; waiting for background refresh.")
+        # The optional details snapshot may be delayed by filesystem work. Read
+        # Controller from its independent observation, never that old snapshot.
+        payload["controller"] = self.controller_status()
         payload["delivery"] = {"ordinary": self._ordinary_delivery.status(), "stop": self._stop_delivery.status()}
         return payload
 
@@ -1033,11 +1075,14 @@ class CentralService:
         if last_error is not None and not isinstance(last_error, str):
             raise ValueError("Central Gsensor activation last error is invalid.")
 
-    def _save_gsensor_activation_state(self, state: Dict[str, Any]) -> None:
-        manifest = self.experiments.registry.get(str(state.get("run_id", "")))
+    def _save_gsensor_activation_state(self, state: Dict[str, Any], *, manifest=None,
+                                       run_directory: Path | None = None) -> None:
+        manifest = manifest or self.experiments.registry.get(str(state.get("run_id", "")))
+        if state.get("run_id") != manifest.run_id:
+            raise ValueError("Central Gsensor activation run_id mismatch.")
         self._validate_gsensor_activation_state(state, manifest)
         state["updated_at"] = utc_ts()
-        _atomic_write_json(self._gsensor_activation_path(manifest.run_id), state)
+        _atomic_write_json(self._gsensor_activation_path(manifest.run_id, run_directory=run_directory), state)
 
     @staticmethod
     def _gsensor_activation_allowed(manifest) -> bool:
@@ -1308,6 +1353,7 @@ class CentralService:
         self,
         payload: GrowthRateStatusPayload,
         manifest,
+        *, run_directory: Path | None = None,
     ) -> bool:
         metadata = (
             payload.enabled,
@@ -1318,7 +1364,7 @@ class CentralService:
         if all(value is None for value in metadata):
             return True
 
-        state = self._load_gsensor_activation_state(manifest, create=False)
+        state = self._load_gsensor_activation_state(manifest, create=False, run_directory=run_directory)
         if payload.control_revision is not None:
             if payload.control_revision < state["revision"]:
                 return False
@@ -1351,7 +1397,7 @@ class CentralService:
                 if pending is not None
                 else None
             )
-            self._save_gsensor_activation_state(state)
+            self._save_gsensor_activation_state(state, manifest=manifest, run_directory=run_directory)
             return True
 
         if pending is not None:
@@ -1374,7 +1420,7 @@ class CentralService:
                     if requested_enabled
                     else "Gsensor did not confirm the requested disabled state."
                 )
-            self._save_gsensor_activation_state(state)
+            self._save_gsensor_activation_state(state, manifest=manifest, run_directory=run_directory)
             return True
 
         acknowledged_revision = state["acknowledged_revision"]
@@ -1392,7 +1438,7 @@ class CentralService:
         if payload.enabled is prior_enabled:
             state["acknowledged_event_id"] = event_id
             state["acknowledged_at"] = payload.occurred_at
-            self._save_gsensor_activation_state(state)
+            self._save_gsensor_activation_state(state, manifest=manifest, run_directory=run_directory)
             return True
         # Recovery is fail-safe: a restarted Gsensor restores disabled at the same
         # revision. That is authoritative and requires a fresh higher revision to
@@ -1404,7 +1450,7 @@ class CentralService:
             state["last_error"] = (
                 "Gsensor restarted in the disabled state. Issue a new enable request."
             )
-            self._save_gsensor_activation_state(state)
+            self._save_gsensor_activation_state(state, manifest=manifest, run_directory=run_directory)
             return True
         return False
 
@@ -1494,6 +1540,11 @@ class CentralService:
 
     def start(self) -> None:
         self.process_source.start()
+        if not self._controller_poll_thread or not self._controller_poll_thread.is_alive():
+            self._controller_poll_stop.clear()
+            self._controller_poll_thread = threading.Thread(
+                target=self._controller_monitor, name="central-controller-status", daemon=True)
+            self._controller_poll_thread.start()
         self.archive.start()
         if not self._status_thread or not self._status_thread.is_alive():
             self._status_stop.clear()
@@ -1513,6 +1564,9 @@ class CentralService:
         self._consumer_thread.start()
 
     def stop(self) -> None:
+        self._controller_poll_stop.set()
+        if self._controller_poll_thread:
+            self._controller_poll_thread.join(timeout=2)
         self._status_stop.set()
         if self._status_thread:
             self._status_thread.join(timeout=2)
@@ -1617,8 +1671,11 @@ class CentralService:
             except (KeyError, TypeError, ValueError):
                 # Older valid producers may not have a comparable timestamp.
                 pass
+        # Resolve once before holding activation state. Previously each load and
+        # save scanned every experiment again while blocking status readers.
+        run_directory = self.experiments.registry.run_dir(run_id)
         with self._activation_lock:
-            if not self._observe_gsensor_activation(payload, manifest):
+            if not self._observe_gsensor_activation(payload, manifest, run_directory=run_directory):
                 return False
         if payload.enabled:
             self.archive.note_gsensor_enabled(run_id)
@@ -1708,7 +1765,7 @@ class CentralService:
             result = copy.deepcopy(self._controller_observation)
             observed = self._controller_observed_monotonic
         result["age_s"] = None if observed is None else max(0, time.monotonic() - observed)
-        result["stale"] = observed is None or result["age_s"] > CONTROLLER_OBSERVATION_MAX_AGE_SEC
+        result["stale"] = observed is None or result["age_s"] > self.controller_observation_max_age_sec
         if result["stale"]:
             result.update(available=False, error="Controller status is stale; waiting for background observation.")
         return result
@@ -1719,7 +1776,7 @@ class CentralService:
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("Controller status response must be an object.")
-            return {"available": True, **payload, "error": None}
+            return {**payload, "available": True, "error": None}
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return {
                 "available": False,
@@ -1776,7 +1833,8 @@ class CentralService:
             history = self.runtime_request_store.history.latest_fields(current_run_id) if current_run_id else []
         except (OSError, ValueError, KeyError, TypeError) as exc:
             history = []
-            errors.append(f"History unavailable: {type(exc).__name__}")
+            detail = str(exc) if isinstance(exc, RuntimeHistoryEventError) else type(exc).__name__
+            errors.append(f"History unavailable: {detail}")
         archive = self.archive.status_summary(current) if current else None
         return {
             "observed_at": utc_ts(),
@@ -2577,6 +2635,24 @@ class CentralService:
 
     @_action_lock("_runtime_action_lock")
     def update_controller_runtime(self, event: ControllerRuntimeUpdatePayload) -> Dict[str, Any]:
+        # Only a previously unknown event can be declared definitively unsent.
+        # A retry may have reached Controller before its HTTP response was lost.
+        previous = self.runtime_request_store.get_event(event.run_id, event.event_id)
+        try:
+            run_id, entry = self._prepare_runtime_update(event)
+        except (ControllerUnavailableError, InvalidExperimentStateError) as exc:
+            if previous is None:
+                raise RuntimeRequestNotSent(event, exc) from exc
+            raise
+        if entry["status"] in {"applied", "rejected"}:
+            return {"requested": False, "runtime_request": entry}
+        # Persist the exact event before delivery; an interrupted request can be
+        # recovered after refresh or Central restart without a new event ID.
+        self.runtime_request_store.save(run_id, entry)
+        entry = self._deliver_runtime(event, "publish_controller_runtime_command")
+        return {"requested": True, "runtime_request": entry}
+
+    def _prepare_runtime_update(self, event):
         run_id, controller = self._require_running_controller("Runtime controls")
         if event.run_id != run_id:
             raise InvalidExperimentStateError("Runtime run_id does not match the current experiment.")
@@ -2586,8 +2662,6 @@ class CentralService:
         prior = self.runtime_request_store.observe(run_id, controller)
         known = self._known_runtime_request(event, controller, prior)
         if known:
-            if known["status"] in {"applied", "rejected"}:
-                return {"requested": False, "runtime_request": known}
             entry = known
         else:
             if prior and prior["status"] not in {"applied", "rejected"}:
@@ -2600,11 +2674,7 @@ class CentralService:
                 "command": event.to_dict(), "status": "pending",
                 "created_at": time.time(), "result": None, "transport_error": None,
             }
-        # Persist the exact event before delivery; an interrupted request can be
-        # recovered after refresh or Central restart without a new event ID.
-        self.runtime_request_store.save(run_id, entry)
-        entry = self._deliver_runtime(event, "publish_controller_runtime_command")
-        return {"requested": True, "runtime_request": entry}
+        return run_id, entry
 
     def _known_runtime_request(self, event, controller, latest):
         known = self.runtime_request_store.get_event(event.run_id, event.event_id)
@@ -2649,10 +2719,18 @@ class CentralService:
             )
 
         controller = self.controller_status()
+        if controller.get("stale") or not controller.get("available"):
+            controller = self._refresh_controller_observation()
         if not controller.get("available"):
-            raise RuntimeError(
+            raise ControllerUnavailableError(
                 f"Controller is unavailable; {action_label} was not sent."
             )
+        # Identity/lifecycle may have changed during the bounded live query.
+        if self.experiments.current_run_id() != run_id:
+            raise InvalidExperimentStateError("The selected experiment changed; refresh before retrying.")
+        latest_manifest = self.experiments.registry.get(run_id)
+        if latest_manifest.status not in active_statuses or run_id in self._stopping_runs:
+            raise InvalidExperimentStateError("Experiment ended before the command could be sent.")
         if controller.get("status") != "running":
             raise InvalidExperimentStateError(
                 f"Controller is not ready for {action_label}."
@@ -2661,6 +2739,9 @@ class CentralService:
             raise InvalidExperimentStateError(
                 "Controller run_id does not match the current Central experiment."
             )
+        if (controller.get("started_at") and latest_manifest.started_at
+                and not _same_timestamp(controller["started_at"], latest_manifest.started_at)):
+            raise InvalidExperimentStateError("Controller start identity does not match the current experiment.")
         return run_id, controller
 
 
@@ -2998,6 +3079,14 @@ def runtime_request_status(run_id: str, event_id: str) -> Dict[str, Any]:
 
 
 def _experiment_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, RuntimeRequestNotSent):
+        status = 503 if isinstance(exc.cause, ControllerUnavailableError) else 409
+        return HTTPException(status_code=status, detail={
+            "message": str(exc), "code": "controller_unavailable" if status == 503 else "runtime_preflight_failed",
+            "not_sent": True, "run_id": exc.event.run_id, "event_id": exc.event.event_id,
+        })
+    if isinstance(exc, ControllerUnavailableError):
+        return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, DeliveryBusy):
         return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, DeliveryCancelled):

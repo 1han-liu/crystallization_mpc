@@ -15,6 +15,33 @@ from uuid import uuid4
 from crystallization_mpc.infra.file_version import file_version
 
 
+SEED_EVENT_TYPE = "controller.add_seed"
+
+
+class RuntimeHistoryEventError(ValueError):
+    """A safe, event-specific diagnostic for a malformed journal entry."""
+
+
+def runtime_event_type(entry):
+    """Classify old and new journals without inventing configuration changes."""
+    command = entry.get("command") or {}
+    identity = f"{command.get('run_id', '?')}/{command.get('event_id', '?')}"
+    if "changes" in command:
+        if not isinstance(command["changes"], dict):
+            raise RuntimeHistoryEventError(f"Runtime history event {identity}: changes must be an object.")
+        kind = ("experiment.parameters.update" if "experiment_started_at" in command
+                else "controller.runtime.update")
+    elif (command.get("run_id") and command.get("event_id")
+          and isinstance(command.get("added_at"), str) and command["added_at"]
+          and "expected_revision" not in command):
+        kind = SEED_EVENT_TYPE
+    else:
+        raise RuntimeHistoryEventError(f"Runtime history event {identity}: configuration changes are missing.")
+    if entry.get("event_type", kind) != kind:
+        raise RuntimeHistoryEventError(f"Runtime history event {identity}: event type does not match its command.")
+    return kind
+
+
 class RuntimeHistory:
     def __init__(self, path: Path):
         self.path = path
@@ -82,12 +109,15 @@ class RuntimeHistory:
                                           and (result or {}).get("status") == "pending"):
             return previous
         merged = {**previous, **entry, "sequence": previous["sequence"]}
-        if result and result.get("status") == "applied" and not result.get("no_change") and previous.get("grafana_sync") == "not_applicable":
+        if (result and result.get("status") == "applied" and not result.get("no_change")
+                and previous.get("grafana_sync") == "not_applicable"
+                and runtime_event_type(merged) != SEED_EVENT_TYPE):
             merged["grafana_sync"] = "pending"
         return merged
 
     def save(self, entry):
         entry = copy.deepcopy(entry)
+        entry["event_type"] = runtime_event_type(entry)
         command = entry["command"]
         run_id, event_id = command["run_id"], command["event_id"]
         result = entry.get("result")
@@ -110,7 +140,8 @@ class RuntimeHistory:
                 entries[entries.index(previous)] = merged
             else:
                 entry["sequence"] = max((item["sequence"] for item in entries), default=0) + 1
-                entry.setdefault("grafana_sync", "pending" if result and result.get("status") == "applied"
+                entry.setdefault("grafana_sync", "pending" if entry["event_type"] != SEED_EVENT_TYPE
+                                 and result and result.get("status") == "applied"
                                  and not result.get("no_change") else "not_applicable")
                 entries.append(entry)
             self._write(data)
@@ -148,6 +179,7 @@ class RuntimeHistory:
             entries = [item for item in self._load()["entries"]
                                   if (item.get("result") or {}).get("status") == "applied"
                                   and not item["result"].get("no_change")
+                                  and runtime_event_type(item) != SEED_EVENT_TYPE
                                   and item.get("grafana_sync") not in {"synced", "time_unavailable"}]
             return self._remember(("exports",), entries) if len(entries) <= 64 else copy.deepcopy(entries)
 
@@ -161,6 +193,8 @@ class RuntimeHistory:
                              key=lambda item: item["sequence"], reverse=True)
             selected, seen = [], set()
             for entry in entries:
+                if runtime_event_type(entry) == SEED_EVENT_TYPE:
+                    continue
                 keys = set(entry["command"]["changes"])
                 if keys - seen:
                     selected.append(entry)

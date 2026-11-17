@@ -527,20 +527,27 @@ function controllerFailureMessage(controller = state.controllerStatus) {
 }
 
 function runtimeUnconfirmed(request = state.runtimeRequest) {
-  return Boolean(request) && !["applied", "rejected"].includes(request.status);
+  return Boolean(request) && !["applied", "rejected", "not_sent"].includes(request.status);
+}
+
+function runtimeConfirmationTimedOut(request = state.runtimeRequest) {
+  if (!runtimeUnconfirmed(request)) return false;
+  const created = request.created_at ?? Date.parse(request.command?.requested_at) / 1000;
+  return request.status === "timeout" || (Number.isFinite(created) && Date.now() / 1000 - created >= 30);
 }
 
 function runtimeSessionKey(runId) { return `central-runtime:${runId}`; }
 
 function rememberRuntimeRequest(request) {
   const previous = state.runtimeRequest;
+  if (runtimeConfirmationTimedOut(request)) request = {...request, status: "timeout"};
   if (previous?.command?.event_id === request?.command?.event_id
       && !runtimeUnconfirmed(previous) && runtimeUnconfirmed(request)) return;
   state.runtimeRequest = request;
   if (previous?.command?.event_id !== request?.command?.event_id || !runtimeUnconfirmed(request)) state.runtimeLookupError = "";
   if (!request?.command?.run_id) return;
   try {
-    if (runtimeUnconfirmed(request)) {
+    if (runtimeUnconfirmed(request) || request.status === "not_sent") {
       sessionStorage.setItem(runtimeSessionKey(request.command.run_id), JSON.stringify(request));
     } else {
       sessionStorage.removeItem(runtimeSessionKey(request.command.run_id));
@@ -549,6 +556,10 @@ function rememberRuntimeRequest(request) {
 }
 
 function observeRuntimeRequest(remote) {
+  if (remote && !runtimeReceiptMatches(remote, remote.command)) {
+    state.runtimeLookupError = "Central returned no matching event receipt; confirmation remains unconfirmed.";
+    remote = null;
+  }
   state.runtimeRemotePending = remote?.command?.run_id === state.currentRunId && runtimeUnconfirmed(remote)
     ? remote.command.event_id : null;
   let local = state.runtimeRequest;
@@ -557,7 +568,7 @@ function observeRuntimeRequest(remote) {
     state.runtimeError = "";
     try { local = JSON.parse(sessionStorage.getItem(runtimeSessionKey(state.currentRunId))); } catch (_) {}
   }
-  if (local?.status === "rejected" && remote?.command?.event_id !== local.command.event_id) {
+  if (["rejected", "not_sent"].includes(local?.status) && remote?.command?.event_id !== local.command.event_id) {
     rememberRuntimeRequest(local); // Do not relabel a rejected edit using an older successful request.
   } else if (!runtimeUnconfirmed(local) || remote?.command?.event_id === local?.command?.event_id) {
     rememberRuntimeRequest(remote || local);
@@ -584,7 +595,7 @@ async function reconcileRuntimeRequest(remote) {
     if (stillCurrent() && payload.runtime_request?.command?.run_id === request.command.run_id
         && payload.runtime_request.command.event_id === eventId) {
       state.runtimeLookupError = "";
-      rememberRuntimeRequest(payload.runtime_request);
+      acceptRuntimeResponse(payload, request.command);
       syncOnlineParameterValues();
     }
   } catch (error) {
@@ -594,7 +605,11 @@ async function reconcileRuntimeRequest(remote) {
   } finally {
     runtimeRequestRead = false;
   }
-  if (stillCurrent()) renderMutationState();
+  if (stillCurrent()) {
+    // A local-only request has no server journal to advance its timeout.
+    rememberRuntimeRequest(state.runtimeRequest);
+    renderMutationState();
+  }
 }
 
 function renderAdaptiveSelection(mode, disabled) {
@@ -690,13 +705,13 @@ function renderConfigurationDetails(configuration, live) {
   if (state.runtimeRequest?.command?.run_id === state.currentRunId) {
     const index = entries.findIndex(item => item.command.event_id === state.runtimeRequest.command.event_id);
     if (index >= 0) entries[index] = state.runtimeRequest;
-    else if (!entries.length || runtimeUnconfirmed() || state.runtimeError) entries.unshift(state.runtimeRequest);
+    else if (!entries.length || runtimeUnconfirmed() || state.runtimeError || state.runtimeRequest.status === "not_sent") entries.unshift(state.runtimeRequest);
   }
   const keys = ["control_target", "sigma_set", "G_set", "adaptation_enabled", "adaptation_mode"];
   keys.forEach(key => {
     const element = document.querySelector(`#feedback-${key}`);
-    const entry = live && entries.find(item => item.command?.run_id === state.currentRunId
-      && Object.hasOwn(item.command?.changes || {}, key));
+    const entry = entries.find(item => item.command?.run_id === state.currentRunId
+      && (live || item.status === "not_sent") && Object.hasOwn(item.command?.changes || {}, key));
     setIfChanged(element, "textContent", "");
     element.classList.remove("error");
     if (!entry) return;
@@ -710,11 +725,13 @@ function renderConfigurationDetails(configuration, live) {
       if (state.controllerStatus?.runtime_controls?.history_error) element.textContent += " History persistence incomplete.";
       if (entry.persistence_error) element.textContent += ` ${entry.persistence_error}`;
       toggleClass(element, "error", !saved);
-    } else if (entry.status === "rejected") {
-      setIfChanged(element, "textContent", `Rejected: ${result.reason || entry.transport_error || "Update was not accepted."}`);
+    } else if (["rejected", "not_sent"].includes(entry.status)) {
+      setIfChanged(element, "textContent", `${entry.status === "not_sent" ? "Not sent" : "Rejected"}: ${result.reason || entry.transport_error || "Update was not accepted."}`);
       element.classList.add("error");
     } else {
-      setIfChanged(element, "textContent", `${entry.status === "timeout" ? "Confirmation timed out. " : ""}Waiting for Controller to confirm assignment at an iteration boundary.${entry.transport_error ? " " + entry.transport_error : ""}`);
+      setIfChanged(element, "textContent", runtimeConfirmationTimedOut(entry)
+        ? `Confirmation timed out. The outcome is unconfirmed; retry the same request.${entry.transport_error ? " " + entry.transport_error : ""}`
+        : `Waiting for Controller to confirm assignment at an iteration boundary.${entry.transport_error ? " " + entry.transport_error : ""}`);
     }
   });
   const panel = document.querySelector("#runtime-fitting");
@@ -743,6 +760,16 @@ function renderConfigurationDetails(configuration, live) {
   toggleClass(panel, "error", (adaptation.enabled && fitting?.last_status === "fit_failed") || refresh?.state === "failed");
 }
 
+function runtimeHistoryChanges(entry) {
+  const command = entry.command || {};
+  if (!Object.hasOwn(command, "changes")
+      && (entry.event_type === "controller.add_seed" || command.added_at)) return "Add Seed (operator confirmed).";
+  if (!command.changes || typeof command.changes !== "object" || Array.isArray(command.changes)) {
+    return `Invalid history record ${command.event_id || "unknown"}: configuration changes unavailable.`;
+  }
+  return Object.keys(command.changes).map(key => runtimeChangeDescription(entry, key)).join(" ");
+}
+
 async function loadRuntimeHistory(older = false) {
   const runId = state.currentRunId;
   const message = document.querySelector("#runtime-history-status");
@@ -763,12 +790,13 @@ async function loadRuntimeHistory(older = false) {
     for (const entry of page.entries || []) {
       const result = entry.result || {};
       const tr = document.createElement("tr");
-      const changes = Object.keys(entry.command.changes).map(key => runtimeChangeDescription(entry, key)).join(" ");
+      const changes = runtimeHistoryChanges(entry);
       const refreshOutcome = result.no_change ? "; unchanged" : result.refreshed ? "; Controller refreshed" : entry.status === "pending" ? "; waiting for assignment confirmation" : "";
       const outcome = `${entry.status}${refreshOutcome}; revision ${result.revision ?? "unavailable"}; effective tick ${result.effective_tick ?? "unavailable"}${result.reason ? "; " + result.reason : ""}${entry.persistence === "persistence_error" ? "; active state not durably saved" : ""}`;
-      const sync = !page.grafana_enabled ? "Not configured" : (entry.grafana_sync === "synced" ? "Synced"
+      const seed = !entry.command.changes && (entry.event_type === "controller.add_seed" || entry.command.added_at);
+      const sync = seed ? "Not a configuration change" : !page.grafana_enabled ? "Not configured" : (entry.grafana_sync === "synced" ? "Synced"
         : entry.grafana_sync === "not_applicable" ? "No change annotation" : `Incomplete: ${entry.grafana_error || entry.grafana_sync || "pending"}`);
-      for (const text of [formatExperimentTime(entry.command.requested_at),
+      for (const text of [formatExperimentTime(entry.command.requested_at || entry.command.added_at),
         result.applied_at ? `Applied: ${formatExperimentTime(result.applied_at)}`
           : result.processed_at ? `${result.source === "central" ? "Central decision" : "Controller processed"}: ${formatExperimentTime(result.processed_at)}; not an application timestamp`
             : "Not confirmed", changes, outcome, sync]) {
@@ -812,12 +840,23 @@ function renderLiveConfiguration() {
   renderSetpoints(configuration || state.params?.controller, disabled);
   renderConfigurationDetails(configuration, true);
   const request = state.runtimeRequest;
-  const timedOut = runtimeUnconfirmed() && Date.now() / 1000 - (request.created_at || 0) >= 30;
+  const timedOut = runtimeConfirmationTimedOut(request);
   setIfChanged(retryRuntimeButton, "hidden", !runtimeUnconfirmed());
   setIfChanged(retryRuntimeButton, "disabled", !runtimeReady() || runtimeUpdateBlocked(true));
   let label = "live";
   let message = `Actual Controller settings · revision ${runtime?.revision ?? "—"}. Changes affect this run only.`;
-  if (!ready) {
+  if (request?.status === "not_sent") {
+    label = "not sent";
+    message = request.result?.reason || "The update was not sent. Refresh status before editing again.";
+  } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
+    label = timedOut ? "confirmation timeout" : "awaiting confirmation";
+    message = `Request ${request?.command?.event_id || "…"}: ${deliveryMessage(request?.delivery)}. `
+      + (timedOut ? "Confirmation timed out; the outcome is still unconfirmed. Retry the same request."
+        : "Waiting for Controller to confirm assignment at an iteration boundary. Retry uses the same event.");
+    if (!ready) message += " Controller live status is unavailable; retry will unlock after a successful refresh.";
+    if (request?.transport_error) message += ` ${request.transport_error}`;
+    if (state.runtimeLookupError) message += ` ${state.runtimeLookupError}`;
+  } else if (!ready) {
     const controller = state.controllerStatus;
     const failed = controller?.status === "error" || controller?.recovery?.status === "error";
     label = failed ? "Controller error" : "unconfirmed";
@@ -828,11 +867,6 @@ function renderLiveConfiguration() {
     message += configuration
       ? " Last received Controller settings are shown. Editing waits for a successful status refresh."
       : " Saved start settings are shown; they are not confirmed as active. Editing is locked.";
-  } else if (state.runtimeInFlight || runtimeUnconfirmed()) {
-    label = timedOut || request?.status === "timeout" ? "confirmation timeout" : "awaiting confirmation";
-    message = `Request ${request?.command?.event_id || "…"}: ${deliveryMessage(request?.delivery)}. Waiting for Controller to confirm assignment at an iteration boundary. Retry uses the same event.`;
-    if (request?.transport_error) message += ` ${request.transport_error}`;
-    if (state.runtimeLookupError) message += ` ${state.runtimeLookupError}`;
   } else if (request?.status === "applied") {
     label = "applied";
     message += request.result.no_change ? " Last request did not change values."
@@ -852,10 +886,10 @@ function renderLiveConfiguration() {
     message += ` ${state.runtimeHistoryError} Controller settings remain authoritative; history may be incomplete.`;
   }
   setIfChanged(runConfigurationStatus, "textContent", label);
-  setIfChanged(runConfigurationStatus, "className", ["rejected", "unconfirmed", "Controller error", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
+  setIfChanged(runConfigurationStatus, "className", ["not sent", "rejected", "unconfirmed", "Controller error", "confirmation timeout"].includes(label) || state.runtimeError || persistenceFailed || state.runtimeHistoryError
     ? "status error" : (label === "applied" ? "status success" : "status running"));
   setIfChanged(runConfigurationMessage, "textContent", message);
-  toggleClass(runConfigurationMessage, "error", Boolean(state.runtimeError || state.runtimeHistoryError) || ["rejected", "Controller error"].includes(label) || persistenceFailed);
+  toggleClass(runConfigurationMessage, "error", Boolean(state.runtimeError || state.runtimeHistoryError) || ["not sent", "rejected", "Controller error"].includes(label) || persistenceFailed);
 }
 
 function applyRunConfigurationPayload(payload) {
@@ -1277,9 +1311,13 @@ async function fetchJson(url, options = {}) {
       const detail = payload?.detail;
       const message = Array.isArray(detail)
         ? detail.map((item) => `${(item.loc || []).join(".")}: ${item.msg || "Invalid value"}`).join("; ")
-        : (typeof detail === "string" ? detail : `Request failed (HTTP ${response.status}).`);
+        : (typeof detail === "string" ? detail : detail?.message || `Request failed (HTTP ${response.status}).`);
       const error = new Error(message);
       error.status = response.status;
+      error.code = detail?.code;
+      error.notSent = detail?.not_sent === true;
+      error.runId = detail?.run_id;
+      error.eventId = detail?.event_id;
       throw error;
     }
     if (payload === null) throw new Error("The server returned an unreadable response.");
@@ -1513,7 +1551,7 @@ function renderParameterStatus(unsavedCount = 0) {
       kind = "applied";
       message = parameterRequest.result?.no_change ? "Values unchanged; no refresh"
         : `Applied at tick ${parameterRequest.result?.effective_tick ?? "unavailable"} · revision ${parameterRequest.result?.revision ?? "unavailable"}`;
-    } else if (parameterRequest?.status === "rejected") {
+    } else if (["rejected", "not_sent"].includes(parameterRequest?.status)) {
       kind = "error";
       message = `Failed: ${parameterRequest.result?.reason || "Parameter update rejected"}. Your edits are retained.`;
     } else if (!unsavedCount) {
@@ -2500,6 +2538,39 @@ async function retryGsensorActivation() {
 }
 
 
+function failedRuntimeSubmission(request, error, deliveryAttempted, retrying) {
+  const certifiedUnsent = error.notSent === true
+    && error.runId === request.command.run_id && error.eventId === request.command.event_id;
+  if (!deliveryAttempted || certifiedUnsent) {
+    return {...request, status: "not_sent", result: {
+      run_id: request.command.run_id, event_id: request.command.event_id,
+      source: "central", reason: error.message, not_sent: true,
+    }};
+  }
+  // A refusal of this retry cannot erase the unknown outcome of an earlier
+  // delivery. Only an explicit unsent result or Controller receipt settles it.
+  if (!retrying && [400, 403, 404, 409, 422].includes(error.status)) {
+    return {...request, status: "rejected", result: {reason: error.message}};
+  }
+  return {...request, transport_error: "HTTP delivery is unconfirmed. Retry the same request."};
+}
+
+function runtimeReceiptMatches(request, command) {
+  return Boolean(command?.run_id && command.event_id
+    && request?.command?.run_id === command.run_id && request.command.event_id === command.event_id
+    && (!["applied", "rejected"].includes(request.status)
+      || (request.result?.run_id === command.run_id && request.result.event_id === command.event_id
+        && request.result.status === request.status)));
+}
+
+function acceptRuntimeResponse(response, command) {
+  const request = response?.runtime_request;
+  if (!runtimeReceiptMatches(request, command)) {
+    throw new Error("Central returned no matching event receipt; delivery is unconfirmed. Retry the same request.");
+  }
+  rememberRuntimeRequest(request);
+}
+
 async function submitRuntimeUpdate(changes, retryCommand = null) {
   if (retryCommand?.experiment_started_at) return submitParameterUpdate(retryCommand);
   if (!runtimeReady() || runtimeUpdateBlocked(Boolean(retryCommand))) {
@@ -2528,15 +2599,11 @@ async function submitRuntimeUpdate(changes, retryCommand = null) {
     const response = await fetchJson("/api/operation/controller/runtime", {
       method: "POST", body: JSON.stringify(command),
     });
-    if (context === experimentContextKey()) rememberRuntimeRequest(response.runtime_request);
+    if (context === experimentContextKey()) acceptRuntimeResponse(response, command);
   } catch (error) {
     if (context === experimentContextKey()) {
       state.runtimeError = error.message;
-      if (!deliveryAttempted || [400, 403, 404, 409, 422].includes(error.status)) {
-        rememberRuntimeRequest({ ...request, status: "rejected", result: { reason: error.message } });
-      } else {
-        rememberRuntimeRequest({ ...request, transport_error: "HTTP delivery is unconfirmed." });
-      }
+      rememberRuntimeRequest(failedRuntimeSubmission(request, error, deliveryAttempted, Boolean(retryCommand)));
     }
   } finally {
     if (actionId === state.experimentActionId) {
@@ -2576,14 +2643,12 @@ async function submitParameterUpdate(retryCommand = null) {
     const response = await fetchJson("/api/params", {method: "POST", body: JSON.stringify({
       ...command, run_id: undefined, expected_run_id: command.run_id,
     })});
-    if (context === experimentContextKey()) rememberRuntimeRequest(response.runtime_request);
+    if (context === experimentContextKey()) acceptRuntimeResponse(response, command);
     return response;
   } catch (error) {
     if (context === experimentContextKey()) {
       state.parameterError = error.message;
-      if (!deliveryAttempted || [400, 403, 404, 409, 422].includes(error.status)) {
-        rememberRuntimeRequest({...request, status: "rejected", result: {reason: error.message}});
-      } else rememberRuntimeRequest({...request, transport_error: "HTTP delivery is unconfirmed; retry the same update."});
+      rememberRuntimeRequest(failedRuntimeSubmission(request, error, deliveryAttempted, Boolean(retryCommand)));
     }
     return null;
   } finally {

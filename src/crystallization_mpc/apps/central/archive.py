@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from crystallization_mpc.experiments.exporter import ExperimentExporter, InfluxExportSource, CSV_FILENAMES, timestamp_ns
 from crystallization_mpc.experiments.models import TERMINAL_EXPERIMENT_STATUSES, ExperimentStatus
+from crystallization_mpc.infra.runtime_history import runtime_event_type, SEED_EVENT_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,8 @@ class ExperimentArchive:
         for entry in controller_history:
             result = entry.get("result") or {}
             if (capture.get("runtime_influx_enabled", True) and entry.get("command", {}).get("run_id") == manifest.run_id and result.get("status") == "applied"
-                    and not result.get("no_change") and result.get("applied_at") and entry["command"]["event_id"] not in synced):
+                    and not result.get("no_change") and result.get("applied_at")
+                    and runtime_event_type(entry) != SEED_EVENT_TYPE and entry["command"]["event_id"] not in synced):
                 reasons.append("Waiting for runtime configuration event persistence.")
                 break
         if capture.get("process_enabled"):

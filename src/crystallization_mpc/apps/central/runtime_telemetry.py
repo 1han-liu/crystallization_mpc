@@ -7,6 +7,7 @@ from datetime import datetime
 
 from crystallization_mpc.infra.influxdb.client import InfluxSettings
 from crystallization_mpc.infra.influxdb.durable import DurableInfluxWriter, telemetry_path
+from crystallization_mpc.infra.runtime_history import runtime_event_type, SEED_EVENT_TYPE
 
 RUNTIME_EVENT_MEASUREMENT = "controller_runtime_event"
 
@@ -32,6 +33,8 @@ def load_runtime_influx_settings() -> InfluxSettings:
 
 
 def write_runtime_event(writer, entry):
+    if runtime_event_type(entry) == SEED_EVENT_TYPE:
+        return False
     result = entry["result"]
     if result.get("status") != "applied" or result.get("no_change"):
         return False
@@ -51,14 +54,20 @@ def write_runtime_event(writer, entry):
                             for section, changes in parameter_changes.items()
                             for key, value in changes.items())
     else:
-        before, after = result["before"], result["configuration"]
-        summary = "; ".join(f"{key}: {before.get(key)} → {after.get(key)}"
-                            for key in entry["command"]["changes"] if before.get(key) != after.get(key))
+        before, after = result.get("before", entry.get("before")), result["configuration"]
+        summary = "; ".join(
+            f"{key}: {before.get(key)} → {after.get(key)}" if before is not None
+            else f"{key} = {after.get(key)}"
+            for key in entry["command"]["changes"]
+            if before is None or before.get(key) != after.get(key))
     fields = {"title": "Run parameters applied" if parameter_changes is not None else "Runtime configuration applied",
               "text": f"{summary}; revision {result['revision']}; effective tick {result['effective_tick']}",
               "before": json.dumps(before, sort_keys=True), "after": json.dumps(after, sort_keys=True),
               "revision": result["revision"], "effective_tick": result["effective_tick"],
-              "requested_at": result["requested_at"], "applied_at": timestamp}
+              "applied_at": timestamp}
+    requested_at = result.get("requested_at", entry["command"].get("requested_at"))
+    if requested_at is not None:
+        fields["requested_at"] = requested_at
     if parameter_changes is not None:
         fields["parameter_changes"] = json.dumps(parameter_changes, sort_keys=True)
         fields.update(event_type="experiment.parameters.update", status="applied", is_effective=True)
