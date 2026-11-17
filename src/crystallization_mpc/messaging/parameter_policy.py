@@ -16,8 +16,8 @@ _DEFAULTS = {
                "q2": 1e-16, "r_diag": [4, 3, 2]},
     "gsensor": {
         "alignment_method": "none", "ptr_format": ["%d", "%05d", "%d"],
-        "params_G.width": 100, "params_G.ratio": 10, "params_G.delta_theta": 10,
-        "params_G.width_divider": 4, "params_G.num_peak": 10, "params_G.len_min": 50,
+        "params_G.width": 100, "params_G.ratio": 10, "params_G.delta_theta": 15,
+        "params_G.width_divider": 4, "params_G.num_peak": 10, "params_G.len_min": 30,
         "params_G.hough_threshold": 10, "params_G.hough_min_line_length": 7,
         "params_G.hough_max_line_gap": 5,
     },

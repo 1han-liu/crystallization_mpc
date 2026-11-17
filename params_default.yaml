@@ -27,13 +27,13 @@ params:
   - key: params_G.ratio
     default: 10
   - key: params_G.delta_theta
-    default: 10
+    default: 15
   - key: params_G.width_divider
     default: 4
   - key: params_G.num_peak
     default: 10
   - key: params_G.len_min
-    default: 50
+    default: 30
   - key: params_G.hough_threshold
     default: 10
   - key: params_G.hough_min_line_length

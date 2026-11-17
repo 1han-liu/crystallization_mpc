@@ -1,4 +1,14 @@
-"""Translation of gsensor/detection/update_line.m."""
+"""Track one initialized crystal edge in one image.
+
+``update_line`` is the per-edge coordinator; ``houghlines_opencv`` proposes and
+filters straight lines. The remaining helpers handle coordinates, parameters,
+image loading, and optional debug images. Logging does not select the edge.
+
+Pipeline: shared edge mask -> search strip -> Hough segments -> angle/length/
+position checks -> side-based selection -> displacement from initialization.
+The same pipeline is called separately for u and v. Growth-rate calculation
+and the decision to commit both edges belong to GrowthRateProcessor.
+"""
 
 from __future__ import annotations
 
@@ -34,6 +44,17 @@ def update_line(
     original_image=None,
     edge_mask=None,
 ):
+    """Return ``(line, displacement_px, original_image)`` for one edge.
+
+    ``line`` is the last accepted tracking geometry. ``t`` and ``e`` are the
+    initialized endpoints, ``n`` is the initialized normal used for masking
+    and displacement projection, and ``o``/``is_opposite`` choose the desired
+    side among eligible candidates. A supplied ``edge_mask`` avoids repeating
+    YOLO inference for u and v.
+
+    No candidate: retain the old geometry with ``detection_valid=False``.
+    A retained line is tracking context, not a new measured growth sample.
+    """
     old_line = line
     path = _image_file_path(image_file)
     debug_label = debug_label or path.stem
@@ -241,7 +262,21 @@ def houghlines_opencv(
     debug_label: str | None = None,
     debug_base_image: Any = None,
 ):
-    """Detect growth-line candidates with OpenCV's probabilistic Hough transform."""
+    """Propose segments, then apply the configured acceptance limits.
+
+    ``delta_theta`` limits normal-angle change in degrees; ``len_min`` checks
+    the observed segment length in pixels, before extending its endpoints.
+    ``width / width_divider`` is the preferred rho band; ``width`` is the
+    recovery band used only when the preferred band has no eligible lines.
+    Rho is a signed distance from the image origin, not a point-to-point
+    displacement, so changes in angle also change rho.
+
+    Accepted segments are ranked by observed length and capped by
+    ``num_peak``/``hough_max_candidates``. ``update_line`` then makes the final
+    side-based choice. Tune these limits through params_G rather than
+    removing the checks. Templates currently use 15 degrees and 30 pixels;
+    an experiment's saved parameter values remain authoritative.
+    """
 
     image = _opencv_hough_image(I)
     edge_pixels = int(np.count_nonzero(image))
