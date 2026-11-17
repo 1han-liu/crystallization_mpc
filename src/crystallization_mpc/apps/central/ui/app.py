@@ -20,13 +20,14 @@ from typing import Any, Dict, Literal, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from crystallization_mpc.apps.ui_mode import resolve_ui_mode, ui_mode_payload
 from crystallization_mpc.apps.central.experiments import CentralExperimentManager
 from crystallization_mpc.apps.central.archive import ExperimentArchive
+from crystallization_mpc.apps.central.database_history import DatabaseHistory, HistoryUnavailable
 from crystallization_mpc.infra.storage_paths import system_path
 from crystallization_mpc.infra.file_version import file_version
 from crystallization_mpc.infra.runtime_history import RuntimeHistoryEventError
@@ -686,6 +687,7 @@ class CentralService:
         self.runtime_export_error: str | None = None
         self.runtime_export_enabled = os.getenv("CENTRAL_RUNTIME_INFLUX_ENABLED", os.getenv("CONTROLLER_INFLUX_ENABLED", "false")).lower() == "true"
         self.archive = ExperimentArchive(self.experiments, controller_status=self.controller_status)
+        self.database_history = DatabaseHistory(self.experiments)
         self._publish_local_status()
 
     def _sync_runtime_history(self, run_id: str, controller: dict[str, Any], *, all_pages=False):
@@ -1546,6 +1548,7 @@ class CentralService:
                 target=self._controller_monitor, name="central-controller-status", daemon=True)
             self._controller_poll_thread.start()
         self.archive.start()
+        self.database_history.start()
         if not self._status_thread or not self._status_thread.is_alive():
             self._status_stop.clear()
             self._status_thread = threading.Thread(target=self._status_monitor, name="central-status", daemon=True)
@@ -1572,6 +1575,7 @@ class CentralService:
             self._status_thread.join(timeout=2)
         self.process_source.stop()
         self.archive.stop()
+        self.database_history.stop()
         self._runtime_monitor_stop.set()
         if self._runtime_monitor_thread:
             self._runtime_monitor_thread.join(timeout=3)
@@ -2914,7 +2918,7 @@ def experiment_history(
     date_to: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
 ) -> Dict[str, Any]:
     try:
-        return service.archive.history(q, date_from, date_to)
+        return service.database_history.history(q, date_from, date_to)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -2922,7 +2926,7 @@ def experiment_history(
 @web_app.get("/api/experiments/{run_id}/archive")
 def experiment_archive(run_id: str) -> Dict[str, Any]:
     try:
-        return service.archive.describe(run_id)
+        return service.database_history.detail(run_id)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
@@ -2930,16 +2934,20 @@ def experiment_archive(run_id: str) -> Dict[str, Any]:
 @web_app.post("/api/experiments/{run_id}/export", status_code=202)
 def export_experiment(run_id: str) -> Dict[str, Any]:
     try:
-        return service.archive.request(run_id)
+        return service.database_history.export_status(run_id)
     except Exception as exc:
         raise _experiment_http_exception(exc) from exc
 
 
 @web_app.get("/api/experiments/{run_id}/exports/{filename}")
-def download_experiment_csv(run_id: str, filename: str) -> FileResponse:
+def download_experiment_csv(run_id: str, filename: str) -> StreamingResponse:
     try:
-        path = service.archive.download_path(run_id, filename)
-        return FileResponse(path, media_type="text/csv; charset=utf-8", filename=path.name)
+        chunks, state = service.database_history.download(run_id, filename)
+        return StreamingResponse(chunks, media_type="text/csv; charset=utf-8", headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store", "X-Experiment-Run-ID": run_id,
+            "X-Experiment-Data-Status": state["status"],
+        })
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -3079,6 +3087,8 @@ def runtime_request_status(run_id: str, event_id: str) -> Dict[str, Any]:
 
 
 def _experiment_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, HistoryUnavailable):
+        return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, RuntimeRequestNotSent):
         status = 503 if isinstance(exc.cause, ControllerUnavailableError) else 409
         return HTTPException(status_code=status, detail={

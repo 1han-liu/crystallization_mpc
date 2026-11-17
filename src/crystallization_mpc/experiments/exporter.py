@@ -202,7 +202,18 @@ class ExperimentExporter:
             _atomic_json(directory / ARCHIVE_FILENAME, state)
             return state
 
-    def _collect(self, run_id, directory, manifest, capture, source, state):
+    def collect_database(self, document, source):
+        """Build the five CSV tables using only database-supplied inputs."""
+        manifest = document["manifest"]
+        run_id = manifest["run_id"]
+        if document.get("run_id") != run_id:
+            raise ValueError("History document experiment identity mismatch.")
+        state = {"errors": list(document.get("metadata_errors", [])), "coverage": {}}
+        data = self._collect(run_id, None, manifest, document.get("capture") or {},
+                             source, state, database_inputs=document)
+        return data, state
+
+    def _collect(self, run_id, directory, manifest, capture, source, state, *, database_inputs=None):
         def problem(code, message):
             state["errors"].append({"code": code, "message": message})
 
@@ -210,8 +221,11 @@ class ExperimentExporter:
         gsensor = _records(source.fetch("gsensor_measurement", run_id=run_id), run_id)
         runtime_events = _records(source.fetch("controller_runtime_event", run_id=run_id), run_id)
         io_events = _records(source.fetch("process_io_event", run_id=run_id), run_id)
+        journal_root = (Path(getattr(self.registry, "root", directory.parent))
+                        if database_inputs is None else None)
         runtime_events, history_coverage = _runtime_history_events(
-            run_id, Path(getattr(self.registry, "root", directory.parent)), runtime_events,
+            run_id, journal_root, runtime_events,
+            journals=database_inputs.get("journals", {}) if database_inputs is not None else None,
         )
         state["coverage"]["runtime_events"] = history_coverage
         if history_coverage["status"] == "partial":
@@ -225,7 +239,8 @@ class ExperimentExporter:
             ("controller", controller, "tick_seq", "last_tick"),
             ("gsensor", gsensor, "frame_seq", "last_frame"),
         ):
-            marker = _read_optional_json(directory / f"{component}_finalized.json")
+            marker = (_read_optional_json(directory / f"{component}_finalized.json")
+                      if database_inputs is None else database_inputs.get("finalized", {}).get(component))
             if marker and marker.get("run_id") != run_id:
                 raise ValueError(f"{component} finalization marker belongs to a different experiment.")
             enabled = True if component == "controller" else gsensor_enabled
@@ -240,12 +255,16 @@ class ExperimentExporter:
         events = sorted([*runtime_events, *io_events, *_lifecycle_events(run_id, manifest)],
                         key=lambda row: (int(row["time_ns"]) if row.get("time_ns") is not None else 2**63,
                                          str(row.get("event_id", ""))))
-        snapshot_name = manifest.get("params_snapshot_file") or "params_snapshot.yaml"
-        snapshot_path = (directory / snapshot_name).resolve()
-        if snapshot_path.parent != directory.resolve():
-            raise ValueError("Parameter snapshot path must be inside the experiment directory.")
-        if snapshot_path.exists():
-            snapshot = yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+        if database_inputs is not None:
+            snapshot = database_inputs.get("snapshot")
+        else:
+            snapshot_name = manifest.get("params_snapshot_file") or "params_snapshot.yaml"
+            snapshot_path = (directory / snapshot_name).resolve()
+            if snapshot_path.parent != directory.resolve():
+                raise ValueError("Parameter snapshot path must be inside the experiment directory.")
+            snapshot = (yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))
+                        if snapshot_path.exists() else None)
+        if snapshot is not None:
             if not isinstance(snapshot, dict):
                 raise ValueError("Experiment parameter snapshot must be a mapping.")
         else:
@@ -540,7 +559,7 @@ def _lifecycle_events(run_id, manifest):
                    "error": manifest.get("error") if key == "ended_at" else None}
 
 
-def _runtime_history_events(run_id, root, stored_events):
+def _runtime_history_events(run_id, root, stored_events, *, journals=None):
     """Reconcile applied Influx events with both durable operator journals.
 
     Rejected/unconfirmed requests intentionally have no controller_runtime_event
@@ -552,8 +571,9 @@ def _runtime_history_events(run_id, root, stored_events):
     conflicts = set()
     for service in ("central", "controller"):
         filename = f".{service}_runtime_history.json"
-        for path in (root / filename, root / "_system" / filename):
-            document = _read_optional_json(path)
+        documents = ([_read_optional_json(path) for path in (root / filename, root / "_system" / filename)]
+                     if journals is None else journals.get(service, []))
+        for document in documents:
             if document is None:
                 continue
             if document.get("schema_version") != 1 or not isinstance(document.get("entries"), list):

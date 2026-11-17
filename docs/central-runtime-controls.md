@@ -659,3 +659,66 @@ It also covers an ordinary runtime-control request after a panel update, immutab
 startup/draft data, and HTTP End followed by next-experiment draft recovery.
 Only optimizer outputs are deterministic fixtures; no listening server,
 background service, simulator, camera, or hardware is started.
+
+### InfluxDB experiment history and CSV queries (2026-11-17)
+
+The Central history browser now reads its list, experiment details and five
+CSV downloads from InfluxDB. Every detail/download URL contains the immutable
+`run_id`. These HTTP reads do not scan the experiment registry or read an
+experiment folder. The active experiment lifecycle and local producer storage
+continue to use the existing registry.
+
+Measurements retain their existing schemas. A separate Central worker
+automatically publishes the experiment manifest, startup parameter snapshot,
+capture association, producer finalization markers and runtime request journals
+to `experiment_history_metadata`, tagged by `run_id` and content hash. At startup
+it imports the existing experiment folders, then checks for changes every five
+seconds. No manual export or per-experiment import is required. Only this
+publisher reads the original metadata files; a home computer does not need a
+copy of those files. The worker uses a separate durable SQLite outbox, so a
+temporary InfluxDB failure retries publication without blocking control ticks.
+
+Metadata documents are chunked and checksummed to preserve large parameter and
+request histories. A corrupt runtime journal leaves the experiment listed but
+marks the resulting CSV coverage incomplete. Other unimportable metadata is
+reported as pending. First startup can briefly show an empty history while the
+automatic import finishes. Data that was never recorded in InfluxDB, or has
+expired under the bucket retention policy, cannot be reconstructed by this change.
+
+The five CSV names and Excel-compatible UTF-8 BOM/CRLF format are preserved:
+`parameters.csv`, `process_data.csv`, `controller_data.csv`, `gsensor_data.csv`
+and `events.csv`. Downloading queries the database and generates the response;
+it does not serve an existing CSV file. Final CSVs require a started and ended
+experiment. Missing or unconfirmed observations produce partial coverage rather
+than invented values. Existing raw process points have no `run_id` tag, so their
+device and exact capture interval are resolved from the database metadata for
+that ID; the established quality and timestamp checks still apply.
+
+HTTP interfaces:
+
+- `GET /api/experiment-history?q=<run_id-or-label>` with optional `date_from` and `date_to`.
+- `GET /api/experiments/{run_id}/archive` for database details and links.
+- `POST /api/experiments/{run_id}/export` checks current database coverage.
+- `GET /api/experiments/{run_id}/exports/{filename}` streams one of the five CSVs.
+
+Unavailable database queries return HTTP 503; missing IDs return 404. CSV
+responses include `X-Experiment-Run-ID` and `X-Experiment-Data-Status`.
+`CENTRAL_HISTORY_PUBLISH_ENABLED` defaults to `true`; disable it for a reader
+instance without local producer files. `CENTRAL_HISTORY_QUERY_TIMEOUT_MS`
+defaults to 30000. The worker and readers use the existing Controller Influx
+destination/credentials, falling back to the generic Influx settings.
+
+Home access still requires a network route to the Central and Grafana servers,
+for example an existing institutional VPN. An experiment ID does not provide
+network access. Configure `GRAFANA_EXPERIMENT_URL` with an externally reachable
+dashboard URL when using a reverse proxy or different public ports. The browser
+replaces a default loopback Grafana hostname with the Central page hostname for
+ordinary remote browsing; it preserves explicitly configured external URLs.
+No VPN, public endpoint or production service redeployment is created by this
+source change.
+
+Local-only verification covers folder-independent reads, exact ID/device/time
+selection, five CSV HTTP downloads against a disposable InfluxDB, automatic
+import, chunked Unicode metadata, unavailable database responses, UI selection
+races and existing runtime controls. These tests follow the repository policy
+that excludes `tests/` from Git.

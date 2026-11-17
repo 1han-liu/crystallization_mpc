@@ -3,10 +3,11 @@
   const $ = (id) => document.getElementById(id);
   const labels = {
     not_exported: "Not exported", pending: "Waiting for data", exporting: "Exporting",
-    completed: "Completed", partial: "Incomplete", failed: "Failed",
+    completed: "Completed", partial: "Incomplete", failed: "Failed", database: "Query from InfluxDB by Run ID",
   };
   let selected = null;
   let requestNumber = 0;
+  let detailNumber = 0;
   let loading = false;
   async function request(url, options = {}) {
     const response = await fetch(url, options);
@@ -21,16 +22,21 @@
     $("archive-detail").hidden = false;
     $("archive-name").textContent = run.label || "Unnamed experiment";
     $("archive-run-id").textContent = run.run_id;
-    $("archive-folder").textContent = run.host_directory || run.experiment_directory || run.directory_name;
+    $("archive-folder").textContent = run.source === "influxdb" ? "InfluxDB" : (run.host_directory || run.experiment_directory || run.directory_name || "Unavailable");
     $("archive-period").textContent = `${run.started_at || "Not started"} — ${run.ended_at || "Not ended"}`;
     const archive = run.archive || {};
     $("archive-state").textContent = labels[archive.status] || "Not exported";
     $("archive-errors").textContent = [...(archive.pending_reasons || []), ...(archive.errors || [])]
       .map((item) => typeof item === "string" ? item : item.message || item.code).join(" ");
     $("archive-configuration").textContent = JSON.stringify(run.capture?.run_configuration || {}, null, 2);
-    $("archive-grafana").href = run.grafana_url;
+    const grafana = new URL(run.grafana_url, window.location.href);
+    const loopback = ["localhost", "127.0.0.1", "[::1]"];
+    if (loopback.includes(grafana.hostname) && !loopback.includes(window.location.hostname)) {
+      grafana.hostname = window.location.hostname;
+    }
+    $("archive-grafana").href = grafana.href;
     $("archive-export").disabled = !["completed", "error"].includes(run.status) || archive.status === "exporting";
-    $("archive-export").textContent = Object.keys(run.downloads || {}).length ? "Re-export CSV files" : "Export CSV files";
+    $("archive-export").textContent = "Check database data";
     const links = $("archive-downloads");
     links.replaceChildren();
     for (const [name, url] of Object.entries(run.downloads || {})) {
@@ -46,8 +52,22 @@
     }
     if (!links.childElementCount) {
       const item = document.createElement("li");
-      item.textContent = "CSV files will appear here after export.";
+      item.textContent = "CSV queries become available after the experiment has started and ended.";
       links.append(item);
+    }
+  }
+  async function loadDetail(run) {
+    const number = ++detailNumber;
+    renderDetail(run);
+    try {
+      const detail = await request(`/api/experiments/${encodeURIComponent(run.run_id)}/archive`);
+      if (number === detailNumber && selected === run.run_id) renderDetail(detail);
+    } catch (error) {
+      if (number === detailNumber && selected === run.run_id) {
+        $("archive-errors").textContent = `Database details unavailable: ${error.message}`;
+        $("archive-downloads").replaceChildren();
+        $("archive-export").disabled = true;
+      }
     }
   }
   async function loadHistory() {
@@ -62,21 +82,27 @@
       const list = $("archive-list");
       list.replaceChildren();
       const runs = payload.experiments || [];
-      $("archive-message").textContent = payload.error || `${runs.length} saved experiment(s). Browsing does not change the active run.`;
+      $("archive-message").textContent = payload.error || `${runs.length} experiment(s) in InfluxDB. Search by Run ID or name. Browsing does not change the active run.`;
       for (const run of runs) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "ghost archive-run";
         button.textContent = `${run.label || "Unnamed experiment"} · ${run.created_at} · ${labels[run.archive?.status] || "Not exported"}`;
-        button.addEventListener("click", () => renderDetail(run));
+        button.addEventListener("click", () => loadDetail(run));
         list.append(button);
       }
       const chosen = runs.find((run) => run.run_id === selected);
-      if (chosen) renderDetail(chosen);
-      else if (runs.length) renderDetail(runs[0]);
+      if (chosen) await loadDetail(chosen);
+      else if (runs.length) await loadDetail(runs[0]);
       else { selected = null; $("archive-detail").hidden = true; }
     } catch (error) {
-      $("archive-message").textContent = `History unavailable: ${error.message}`;
+      if (number === requestNumber) {
+        $("archive-message").textContent = `History unavailable: ${error.message}`;
+        $("archive-list").replaceChildren();
+        $("archive-detail").hidden = true;
+        selected = null;
+        detailNumber++;
+      }
     } finally { if (number === requestNumber) loading = false; }
   }
   $("archive-search").addEventListener("submit", (event) => { event.preventDefault(); loadHistory(); });
@@ -87,12 +113,16 @@
   });
   $("archive-export").addEventListener("click", async () => {
     if (!selected) return;
+    const runId = selected;
     $("archive-export").disabled = true;
     try {
-      await request(`/api/experiments/${encodeURIComponent(selected)}/export`, { method: "POST" });
-      $("archive-message").textContent = "Export requested. Waiting for final records to be saved.";
-    } catch (error) { $("archive-message").textContent = `Export request failed: ${error.message}`; }
-    finally { await loadHistory(); }
+      const result = await request(`/api/experiments/${encodeURIComponent(runId)}/export`, { method: "POST" });
+      const detail = await request(`/api/experiments/${encodeURIComponent(runId)}/archive`);
+      if (selected !== runId) return;
+      renderDetail({ ...detail, archive: result.archive });
+      $("archive-message").textContent = result.archive?.status === "partial" ? "Database query completed with missing or unconfirmed data; review the details." : "Database data checked. CSV links query InfluxDB directly.";
+    } catch (error) { if (selected === runId) $("archive-message").textContent = `Database query failed: ${error.message}`; }
+    finally { if (selected === runId) $("archive-export").disabled = false; }
   });
   setInterval(() => { if ($("experiment-history").open && !loading) loadHistory(); }, 5000);
   window.updateExperimentArchive = (archive, error) => {

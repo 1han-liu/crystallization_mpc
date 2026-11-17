@@ -60,15 +60,17 @@ def load_influx_settings(*, prefix: str | None = None) -> InfluxSettings:
     )
 
 
-def create_influx_client(settings: InfluxSettings | None = None) -> InfluxDBClient:
+def create_influx_client(settings: InfluxSettings | None = None, *, timeout_ms: int | None = None) -> InfluxDBClient:
     if InfluxDBClient is None:
         raise RuntimeError("influxdb-client is not installed.") from _IMPORT_ERROR
 
     active_settings = settings or load_influx_settings()
+    options = {"timeout": timeout_ms} if timeout_ms is not None else {}
     return InfluxDBClient(
         url=active_settings.url,
         token=active_settings.token,
         org=active_settings.org,
+        **options,
     )
 
 
